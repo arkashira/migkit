@@ -6311,6 +6311,10 @@ def pgcopydb_move(hop, db, workers, go, log):
         from .decide import forget
         forget(begun)
         begun.unlink(missing_ok=True)
+    else:
+        # the image's copy: its catalogue says every table done and is kept
+        # for the next run to go on from, so a stop here is a checkpoint too
+        failpoint.hit("checkpoint.written")
     _pg_finish_created(hop, db, log, workers)
     _pg_carry_sequences(hop, db, log)
     from .engines.postgres import PostgresEngine
@@ -9180,6 +9184,15 @@ def run_via(via, hop, db, workers, go, log):
                 # stopped by a service manager or `kill`: taken as ctrl-c,
                 # so the programs this run started are stopped with it
                 stack.enter_context(runner.stopping())
+            if go:
+                # a target's setting the run needs, raised for it and put
+                # back after - and what a killed run left put back first
+                from .engines import engine_named
+                own = engine_named(hop.engine, hop)
+                if hasattr(own, "settings_for_run") or \
+                        leftovers.settings_left(hop):
+                    stack.enter_context(leftovers.settings_held(
+                        hop, own, db, log))
             began = time.monotonic()
             got = fns[via](hop, db, workers, go, log)
             if go:

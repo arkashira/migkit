@@ -171,25 +171,15 @@ def _minimal(conf):
 #: run that waits on itself fails its case instead of holding the harness
 #: (the slowest whole case measured took under a minute)
 HANG = 600
-DEFECTS = ("W16N-DEFECTS: the copy before the defects are injected does not"
-           " complete when the source also holds a role and its grant: the"
-           " account a grant names is not on the target, and neither the"
-           " copy nor its repair creates it - MySQL's grants check says"
-           " 'app_reader@% ... do not exist on target', PostgreSQL's"
-           " structural diff keeps '1 to add' (the grant) after the repair."
-           " The two causes before it are fixed (the privilege record's"
-           " tuple keys, postgres._diff_metadata; the counter read stale by"
-           " the MySQL schema comparison, mysql._without_counters); owner of"
-           " what is left: the accounts carried with the copy (users create)")
-LOB_MYSQL = ("W16N-LOB: on MySQL a value past the target's max_allowed_packet"
-             " cannot be held by any statement - measured on 8.4, appending"
-             " the pieces stops at the packet with error 1301 'Result of"
-             " concat() was larger than max_allowed_packet', and a JSON"
-             " column has no append at all - so the piece-writing copier"
-             " carries a row only up to the packet, and the 8 MiB row loses"
-             " the connection. Arriving whole needs the target's packet"
-             " raised (an external setting: the lead's decision whether the"
-             " move may set it) or the copy refused before it starts")
+DEFECTS = ("W16N-DEFECTS: the grant repair now makes the account a source"
+           " grant names first (users plan, decide.account_carried), but the"
+           " first copy of the case still fails on lanes 6 and 7 - the step"
+           " that stops it not yet read after this change")
+LOB_MYSQL = ("W16N-LOB: the packet is raised for the run and put back"
+             " (decide.packet_way, leftovers.settings_held - proved in"
+             " tests/test_a_value_wider_than_the_packet_is_carried_or_refused"
+             "_by_a_rung.py), but the migrate copy on lane 7 still stops"
+             " before it completes - the step not yet read after this change")
 
 _LEFT = re.compile(r"~([\d.,]+)\s*(s|min|h)\b[^;\n]*\bleft")
 _BAND = re.compile(r"([\d.,]+)\s*(?:-|to)\s*([\d.,]+)\s*(s|min|h)\b[^;\n]*"
@@ -456,16 +446,23 @@ def test_a_value_above_the_targets_packet_size_arrives_whole(side, tmp_path,
                                                             request):
     """One JSON value larger than the target accepts in one packet, in the
     same run as the rest of the table."""
+    expert = {}
     if side.engine == "mysql":
         request.node.add_marker(pytest.mark.xfail(strict=True,
                                                   reason=LOB_MYSQL))
+        # the hop allows the run to raise the target's packet: no statement
+        # holds a value wider than it (`decide.packet_way`)
         side.sql("dst", "set global max_allowed_packet = 4194304")
-    conf = _conf(tmp_path, side)
+        expert = {"options": "{target_settings: {max_allowed_packet: yes}}"}
+    conf = _conf(tmp_path, side, **expert)
     side.seed(lob=8 << 20)
     runs = [_run(conf, side, *GO)]
     m = _measure("a value above the packet size", conf, runs, side, lob=1)
     assert runs[0]["r"].returncode == 0, runs[0]["r"].stdout
     assert m["completed"]
+    if side.engine == "mysql":
+        # the packet the run raised is put back once it ends
+        assert "4194304" in side.sql("dst", "select @@global.max_allowed_packet")
 
 
 @pytest.mark.xfail(strict=True, reason=DEFECTS)

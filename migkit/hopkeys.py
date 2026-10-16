@@ -457,6 +457,12 @@ HOP_OPTIONS = {
     "stream_lag": Key("seconds a Keyspaces change position is held behind"
                       " the clock, for writes the service has not yet"
                       " made readable", "number", ("keyspaces",), least=0),
+    "target_settings": Key("the answer, given ahead, to a setting on the"
+                           " target a run needs raised: yes (migkit sets it"
+                           " for the run and puts the old value back, also"
+                           " after a killed run) or no - for every setting"
+                           " or by its name (max_allowed_packet: yes)",
+                           "str|dict|bool", ("mysql",)),
     "table_engine": Key("the storage engine the target's tables are made"
                         " in - a name, or {to, accept: [group numbering,"
                         " remote rows], foreign_keys: {child.column:"

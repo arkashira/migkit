@@ -201,7 +201,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a hop is checked against the engines (`engines.base`) it names; ends when the engine registry is read through a contract
 
-- `migkit/hopkeys.py:2395` configuration -> engines (`engines.base`)
+- `migkit/hopkeys.py:2401` configuration -> engines (`engines.base`)
 
 ### a hop is checked against the engines (`engines.saas`) it names; ends when the engine registry is read through a contract
 
@@ -212,21 +212,21 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/addresses.py:92` configuration -> engines (`engines`)
 - `migkit/config.py:9` configuration -> engines (`engines`)
 - `migkit/engineat.py:393` configuration -> engines (`engines`)
-- `migkit/hopkeys.py:1949` configuration -> engines (`engines`)
+- `migkit/hopkeys.py:1955` configuration -> engines (`engines`)
 - `migkit/managed.py:190` configuration -> engines (`engines`)
 
 ### a hop is checked by safety's `egress`; the check moves to the key table
 
-- `migkit/hopkeys.py:2365` configuration -> safety (`egress`)
+- `migkit/hopkeys.py:2371` configuration -> safety (`egress`)
 
 ### a hop is checked by safety's `freeze`; the check moves to the key table
 
-- `migkit/hopkeys.py:1912` configuration -> safety (`freeze`)
+- `migkit/hopkeys.py:1918` configuration -> safety (`freeze`)
 - `migkit/managed.py:508` configuration -> safety (`freeze`)
 
 ### a hop is checked by safety's `interlock`; the check moves to the key table
 
-- `migkit/hopkeys.py:2883` configuration -> safety (`interlock`)
+- `migkit/hopkeys.py:2889` configuration -> safety (`interlock`)
 
 ### a hop is checked by safety's `leftovers`; the check moves to the key table
 
@@ -238,11 +238,11 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a hop key's check or default asks `archive` what it accepts; ends when the key table is read from the owner
 
-- `migkit/hopkeys.py:2972` configuration -> workflows (`archive`)
+- `migkit/hopkeys.py:2978` configuration -> workflows (`archive`)
 
 ### a hop key's check or default asks `consolidate` what it accepts; ends when the key table is read from the owner
 
-- `migkit/hopkeys.py:2972` configuration -> workflows (`consolidate`)
+- `migkit/hopkeys.py:2978` configuration -> workflows (`consolidate`)
 
 ### a hop key's check or default asks `cutover` what it accepts; ends when the key table is read from the owner
 
@@ -250,31 +250,31 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a hop key's check or default asks `physical` what it accepts; ends when the key table is read from the owner
 
-- `migkit/hopkeys.py:2326` configuration -> workflows (`physical`)
+- `migkit/hopkeys.py:2332` configuration -> workflows (`physical`)
 
 ### a hop key's check or default asks `reshard` what it accepts; ends when the key table is read from the owner
 
-- `migkit/hopkeys.py:2972` configuration -> workflows (`reshard`)
+- `migkit/hopkeys.py:2978` configuration -> workflows (`reshard`)
 
 ### a hop key's check or default asks `split` what it accepts; ends when the key table is read from the owner
 
-- `migkit/hopkeys.py:2972` configuration -> workflows (`split`)
+- `migkit/hopkeys.py:2978` configuration -> workflows (`split`)
 
 ### a hop key's check or default asks `subset` what it accepts; ends when the key table is read from the owner
 
-- `migkit/hopkeys.py:2316` configuration -> workflows (`subset`)
+- `migkit/hopkeys.py:2322` configuration -> workflows (`subset`)
 
 ### a hop key's check or default asks `tableengine` what it accepts; ends when the key table is read from the owner
 
-- `migkit/hopkeys.py:2972` configuration -> workflows (`tableengine`)
+- `migkit/hopkeys.py:2978` configuration -> workflows (`tableengine`)
 
 ### a hop key's check or default asks `tailtables` what it accepts; ends when the key table is read from the owner
 
-- `migkit/hopkeys.py:2410` configuration -> workflows (`tailtables`)
+- `migkit/hopkeys.py:2416` configuration -> workflows (`tailtables`)
 
 ### a hop key's check or default asks `twoway` what it accepts; ends when the key table is read from the owner
 
-- `migkit/hopkeys.py:2381` configuration -> workflows (`twoway`)
+- `migkit/hopkeys.py:2387` configuration -> workflows (`twoway`)
 
 ### a hop option is explained by the decision engine (`dba`); the explanation moves to the key table
 
@@ -287,7 +287,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a hop option is explained by the decision engine (`machine`); the explanation moves to the key table
 
-- `migkit/hopkeys.py:3088` configuration -> decision (`machine`)
+- `migkit/hopkeys.py:3094` configuration -> decision (`machine`)
 
 ### a hop option is explained by the decision engine (`ready`); the explanation moves to the key table
 
@@ -295,11 +295,11 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a hop option is explained by the decision engine (`scenarios`); the explanation moves to the key table
 
-- `migkit/hopkeys.py:2972` configuration -> decision (`scenarios`)
+- `migkit/hopkeys.py:2978` configuration -> decision (`scenarios`)
 
 ### a hop option is explained by the decision engine (`sourcechange`); the explanation moves to the key table
 
-- `migkit/hopkeys.py:3137` configuration -> decision (`sourcechange`)
+- `migkit/hopkeys.py:3143` configuration -> decision (`sourcechange`)
 
 ### a record is rendered by conversion's `canon`; the rendering moves below persistence
 
@@ -703,11 +703,11 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### an engine calls `physical` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/postgres.py:12493` engines -> workflows (`physical`)
+- `migkit/engines/postgres.py:12563` engines -> workflows (`physical`)
 
 ### an engine calls `replicasum` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/mysql.py:5698` engines -> workflows (`replicasum`)
+- `migkit/engines/mysql.py:5774` engines -> workflows (`replicasum`)
 
 ### an engine calls `rules` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
@@ -717,7 +717,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 - `migkit/engines/base.py:2449` engines -> workflows (`second_reader`)
 - `migkit/engines/hetero.py:3398` engines -> workflows (`second_reader`)
-- `migkit/engines/mysql.py:10782` engines -> workflows (`second_reader`)
+- `migkit/engines/mysql.py:10935` engines -> workflows (`second_reader`)
 - `migkit/engines/postgres.py:7162` engines -> workflows (`second_reader`)
 
 ### an engine calls `streamout` for a step it cannot do itself; the engine split gives that step a contract below the engines
@@ -778,7 +778,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/engines/kafka.py:2052` engines -> workflows (`users`)
 - `migkit/engines/mongodb.py:3641` engines -> workflows (`users`)
 - `migkit/engines/mssql.py:2154` engines -> workflows (`users`)
-- `migkit/engines/mysql.py:7054` engines -> workflows (`users`)
+- `migkit/engines/mysql.py:7130` engines -> workflows (`users`)
 - `migkit/engines/postgres.py:9657` engines -> workflows (`users`)
 - `migkit/engines/redis.py:244` engines -> workflows (`users`)
 
@@ -847,11 +847,11 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### configuration reaches `carriers` (integrations); the shared piece moves below both, or the call is inverted
 
-- `migkit/hopkeys.py:3088` configuration -> integrations (`carriers`)
+- `migkit/hopkeys.py:3094` configuration -> integrations (`carriers`)
 
 ### configuration reaches `charsets` (conversion); the shared piece moves below both, or the call is inverted
 
-- `migkit/hopkeys.py:2972` configuration -> conversion (`charsets`)
+- `migkit/hopkeys.py:2978` configuration -> conversion (`charsets`)
 
 ### configuration reaches `cloudapi` (integrations); the shared piece moves below both, or the call is inverted
 
@@ -871,12 +871,12 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### configuration reaches `rowfilter` (scope); the shared piece moves below both, or the call is inverted
 
-- `migkit/hopkeys.py:2536` configuration -> scope (`rowfilter`)
+- `migkit/hopkeys.py:2542` configuration -> scope (`rowfilter`)
 
 ### configuration reaches `transforms` (conversion); the shared piece moves below both, or the call is inverted
 
 - `migkit/config.py:1678` configuration -> conversion (`transforms`)
-- `migkit/hopkeys.py:2597` configuration -> conversion (`transforms`)
+- `migkit/hopkeys.py:2603` configuration -> conversion (`transforms`)
 
 ### configuration reaches `util` (execution); the shared piece moves below both, or the call is inverted
 
@@ -888,7 +888,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### configuration reaches `web.roles` (web); the shared piece moves below both, or the call is inverted
 
-- `migkit/hopkeys.py:2159` configuration -> web (`web.roles`)
+- `migkit/hopkeys.py:2165` configuration -> web (`web.roles`)
 
 ### engines reaches `cli` (cli); the shared piece moves below both, or the call is inverted
 
@@ -1045,7 +1045,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### the hop check refuses prefixes that meet through `topology.overlaps`; the key spaces move below configuration
 
-- `migkit/hopkeys.py:3051` configuration -> decision (`topology`)
+- `migkit/hopkeys.py:3057` configuration -> decision (`topology`)
 
 ### the hop's sign-in and the readiness audit ask the cloud provider's own API (`cloudapi`); the provider calls move to a contract below configuration and decision
 

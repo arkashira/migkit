@@ -2085,6 +2085,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the target refused <...>: <...>
 
+* a setting an earlier run changed on the target could not be put back; nothing more is changed there until it is - migkit leftovers says which
+
 * <...> is not a managed service migkit knows; it knows <...> and more (`migkit/data/managed.yaml`)
 
 * the <...> is named <...> (<...>), and it runs <...> - name the service it is (managed: {service: ...})

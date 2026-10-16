@@ -5040,6 +5040,72 @@ class MySQLEngine(Engine):
             "packet": packet, "widest": n, "margin": self.PACKET_MARGIN,
             "exact": kind in ("measured", "bounded")})
 
+    #: what a piece's statement takes beside its value
+    PIECE_SLACK = 65536
+
+    def _may_set_globals(self):
+        """Whether the target's account may change a global setting: it
+        holds SUPER or SYSTEM_VARIABLES_ADMIN (or every privilege on
+        everything); None where its grants could not be read."""
+        try:
+            lines = [str(r[0]).upper() for r in self._q("dst",
+                                                        "show grants")]
+        except Exception:  # noqa: BLE001 - not known
+            return None
+        return any(" ON *.* " in f" {g} " and (
+            "ALL PRIVILEGES" in g or re.search(r"\bSUPER\b", g)
+            or "SYSTEM_VARIABLES_ADMIN" in g) for g in lines)
+
+    def _setting_allowed(self, name):
+        """Whether the hop allows the target's setting `name` changed for
+        a run: its `target_settings` answer by name, or for every setting."""
+        from ..sourcechange import answer_word
+        raw = (self.hop.options or {}).get("target_settings")
+        if isinstance(raw, dict):
+            raw = raw.get(name, raw.get("*"))
+        return answer_word(raw) == "yes" if raw is not None else False
+
+    def _packet_way(self, widest, packet, exact=True):
+        """`decide.packet_way` for a row of `widest` bytes on this target."""
+        from .. import decide
+        return decide.packet_way({
+            "widest": widest, "exact": exact, "packet": packet,
+            "slack": self.PIECE_SLACK, "want": self._packet_to_set(widest),
+            "ceiling": self.PACKET_CEILING,
+            "authorized": self._setting_allowed("max_allowed_packet"),
+            "may set": self._may_set_globals()})
+
+    def settings_for_run(self, db):
+        """[{name, old, new, why}] of the target's settings the run raises
+        for its length (`leftovers.settings_held`): its packet, where a row
+        of `db` read to the end is past it and `decide.packet_way` says
+        "raised". A refused one stops at readiness, before the copy."""
+        packet = int(self._q("dst", "select @@global.max_allowed_packet"
+                             )[0][0])
+        sizes = self._row_sizes(db, (packet - self.PACKET_MARGIN) / 2,
+                                time.monotonic() + float(
+                                    self.hop.options.get("lob_scan_seconds",
+                                                         60)))
+        widest = max((n for _, k, n in sizes if k == "measured"), default=0)
+        if widest + self.PIECE_SLACK <= packet:
+            return []
+        got = self._packet_way(widest, packet)
+        if got.path != "raised":
+            return []
+        return [{"name": "max_allowed_packet", "old": packet,
+                 "new": self._packet_to_set(widest), "why": got.reason}]
+
+    def set_target_setting(self, name, value):
+        """One global setting set on the target (`settings_for_run`)."""
+        if not re.fullmatch(r"[a-z_]+", str(name)):
+            raise ValueError(f"not a setting's name: {name!r}")
+        conn = self._conn("dst")
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"set global {name} = {int(value)}")
+        finally:
+            conn.close()
+
     def _packet_items(self):
         """Does the largest row on the source fit the target's
         `max_allowed_packet`.
@@ -5089,19 +5155,29 @@ class MySQLEngine(Engine):
                      and 2 * n + self.PACKET_MARGIN > limit]
             said = ", ".join(f"{t} {n:,} bytes"
                              for n, t in (over or tight)[:4])
-            # a table whose widest row the target cannot take in one
-            # statement goes to the copier that writes it in pieces
-            # (`writes_in_pieces`): carried whole, more slowly
-            carried = all(self.writes_in_pieces(db, t)[0] for _, t in over)
+            # no statement holds a value wider than the packet - appending
+            # past it fails on the server - so such a row arrives only with
+            # the packet raised for the run, or the copy is refused here,
+            # before it starts (`decide.packet_way`)
             if over:
-                add("warn" if carried else "fail",
-                    f"{said}: larger than the target's max_allowed_packet"
-                    f" of {limit:,}"
-                    + (", so the copy writes their values in pieces, more"
-                       " slowly than a load - " if carried else
-                       ", and the copy stops on such a row with a lost"
-                       " connection - ")
-                    + how.format(self._packet_to_set(largest)))
+                got = self._packet_way(largest, limit)
+                want = self._packet_to_set(largest)
+                if got.path == "raised":
+                    add("warn", f"{said}: larger than the target's"
+                                f" max_allowed_packet of {limit:,}, so the"
+                                f" run raises it to {want:,} and puts"
+                                f" {limit:,} back after - also after a run"
+                                " killed before its end")
+                else:
+                    add("fail", f"{said}: larger than the target's"
+                                f" max_allowed_packet of {limit:,}; no"
+                                " statement can carry such a value, and the"
+                                f" run may not raise it: {got.reason} -"
+                                f" SET GLOBAL max_allowed_packet = {want};"
+                                " on the target (in the parameter group on"
+                                " a managed service), or allow the run to"
+                                " (target_settings: {max_allowed_packet:"
+                                " yes})")
             elif tight:
                 add("warn", f"{said}: within the target's"
                             f" max_allowed_packet of {limit:,}, but a"
@@ -7360,10 +7436,75 @@ class MySQLEngine(Engine):
                 stmts.append(fwd)
                 undo += self._revoke_for(fwd)
                 n += 1
+        # an account a source grant names that the target lacks is made
+        # first, through the users plan, each by its rung
+        # (`decide.account_carried`) - granting to it would just fail
+        absent = sorted(set(src) - on_target)
+        made, said = self._accounts_made(absent)
+        for who in sorted(made):
+            for g in sorted(src[who]):
+                line = raw.get((who, g))
+                if line:
+                    fwd = self._retarget_grant(line, db, ddb)
+                    stmts.append(fwd)
+                    undo += self._revoke_for(fwd)
+                    n += 1
         if not stmts:
             return None
-        return RepairAction(db, "grants", stmts, undo,
-                            f"{n} grants the mover did not carry")
+        act = RepairAction(db, "grants", stmts, undo,
+                           f"{n} grants the mover did not carry"
+                           + (f"; {said}" if said else ""))
+        act.accounts = [st for k in sorted(made) for st in made[k]]
+        act.undo += [f"DROP USER IF EXISTS {self._account_literal(k)};"
+                     for k in sorted(made)]
+        return act
+
+    @staticmethod
+    def _account_literal(who):
+        u, _, h = str(who).rpartition("@")
+        q = lambda x: "'" + x.replace("\\", "\\\\").replace("'", "''") + "'"  # noqa: E731
+        return f"{q(u)}@{q(h)}"
+
+    def _accounts_made(self, names):
+        """({account: [users-plan steps]}, what is said) for each account
+        in `names` (`user@host`) the target lacks: the steps the users plan
+        makes it with (`users._my_plan`), or - a login with no password on
+        the source nor in the passwords file - made locked, as
+        `decide.account_carried` chooses."""
+        import collections
+
+        from .. import decide, users
+        if not names:
+            return {}, ""
+        try:
+            s = users._mysql_users(self.hop.source)
+            t = users._mysql_users(self.hop.target)
+        except Exception:  # noqa: BLE001 - not read: the grant waits
+            return {}, ""
+        keys = {f"{u}@{h}": (u, h) for u, h in s}
+        want = [n for n in names if n in keys]
+        out = collections.defaultdict(list, {"missing_on_target": want})
+        steps, skipped = users._my_plan(out, s, t, users._mysql_plugins(
+            self.hop.target), {})
+        made, locked = {}, []
+        for st in steps:
+            made.setdefault(st["key"], []).append(st)
+        for name, _why in skipped:
+            got = decide.account_carried({
+                "carried": True, "planned": False,
+                "login": not s[keys[name]].get("role")})
+            if got.path == "locked":
+                made[name] = [users._step(
+                    name, "CREATE USER IF NOT EXISTS %s@%s ACCOUNT LOCK",
+                    keys[name], f"CREATE USER {self._account_literal(name)}"
+                    " ACCOUNT LOCK", ("DROP USER IF EXISTS %s@%s",
+                                      keys[name]), made=True)]
+                locked.append(name)
+        said = ((f"{len(made)} accounts its grants name made first"
+                 if made else "")
+                + (f" ({', '.join(locked)} locked: no password on the"
+                   " source)" if locked else ""))
+        return made, said
 
     @staticmethod
     def _retarget_grant(line, src_db, dst_db):
@@ -7685,6 +7826,18 @@ class MySQLEngine(Engine):
             ddl = "\n".join(action.statements) + "\n"
             if action.kind == "grants":
                 ddl += "flush privileges;\n"
+                if getattr(action, "accounts", None):
+                    from .. import users
+                    conn = users._mysql_conn(self.hop.target)
+                    try:
+                        ledger = users._run_steps(conn.cursor(),
+                                                  action.accounts, print)
+                        conn.commit()
+                    finally:
+                        conn.close()
+                    if not all(e["ok"] for e in ledger):
+                        raise RuntimeError("an account the grants name could"
+                                           " not be made on the target")
             self._target_client(self._d("dst", db), ddl)
             return
         if action.kind != "rows":

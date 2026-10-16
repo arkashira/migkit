@@ -416,3 +416,96 @@ def clear_dumps(hop, dbs=None, say=None, now=None):
             if say:
                 say(f"left the dump {d['path']}: {c.reason}")
     return removed, kept
+
+
+# --- a target's setting a run raised -----------------------------------------
+
+def _settings_file(hop):
+    return hop.report_dir() / "target-settings.json"
+
+
+def settings_left(hop):
+    """[{name, old, new, db, pid, at}] of every setting a run changed on
+    the target and has not put back - a run killed before its end leaves
+    its entry (`settings_held`)."""
+    import json
+    try:
+        got = json.loads(_settings_file(hop).read_text())
+    except (OSError, ValueError):
+        return []
+    return [e for e in got if isinstance(e, dict) and e.get("name")]
+
+
+def _keep_settings(hop, entries):
+    import json
+    import os
+    path = _settings_file(hop)
+    if not entries:
+        path.unlink(missing_ok=True)
+        return
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "w") as fh:
+        json.dump(entries, fh, indent=2)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
+def put_back_settings(hop, eng, say=None):
+    """Every setting `settings_left` lists put back on the target to the
+    value it had before the run, each entry dropped only once the server
+    took it back; one the server would not take back is kept and said, so
+    the next start and `leftovers` try again. Returns the entries put
+    back."""
+    back, kept = [], []
+    for e in settings_left(hop):
+        try:
+            eng.set_target_setting(e["name"], e["old"])
+        except Exception as x:  # noqa: BLE001 - kept for the next try
+            kept.append(e)
+            if say:
+                say(f"the target's {e['name']} is still {e['new']}: it could"
+                    f" not be put back to {e['old']} ({str(x)[-90:]}) -"
+                    " migkit leftovers tries again")
+            continue
+        back.append(e)
+        if say:
+            say(f"put the target's {e['name']} back to {e['old']}")
+    _keep_settings(hop, kept)
+    return back
+
+
+import contextlib as _contextlib  # noqa: E402 - the one block below
+
+
+@_contextlib.contextmanager
+def settings_held(hop, eng, db, say=None):
+    """The target's settings a run needs (`eng.settings_for_run(db)`, each
+    {name, old, new} chosen by its rung) set for the block and put back
+    after. What a killed run left is put back first; each entry is written
+    to disk before the server is asked, so a run killed between the two
+    leaves an entry the next start puts back (`put_back_settings`)."""
+    want = getattr(eng, "settings_for_run", None)
+    if settings_left(hop):
+        put_back_settings(hop, eng, say)
+    if settings_left(hop):
+        raise SystemExit("a setting an earlier run changed on the target"
+                         " could not be put back; nothing more is changed"
+                         " there until it is - migkit leftovers says which")
+    import os
+    import time
+    entries = []
+    try:
+        for s in (want(db) if want else []):
+            entries.append({"name": s["name"], "old": s["old"],
+                            "new": s["new"], "db": db, "pid": os.getpid(),
+                            "at": time.strftime("%Y-%m-%d %H:%M:%S")})
+            _keep_settings(hop, entries)
+            eng.set_target_setting(s["name"], s["new"])
+            if say:
+                say(f"{db}: the target's {s['name']} raised from {s['old']:,}"
+                    f" to {s['new']:,} for this run: {s.get('why', '')}")
+        yield entries
+    finally:
+        if entries:
+            put_back_settings(hop, eng, say)

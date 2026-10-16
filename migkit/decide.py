@@ -6016,3 +6016,84 @@ for _engine, _shapes in {
     for _shape in _shapes:
         WAYS[_shape][_engine] = (NOT_YET, "P0-CLOUDS.more")
 del _shape, _ways, _engine, _model, _got, _shapes
+
+# ---- a value wider than the target's packet, and the account a grant names
+# ---- (backlog W16N-LOB, W16N-DEFECTS) ---------------------------------------
+def packet_way(facts):
+    """The `Choice` for a table whose widest row the target's packet may
+    not carry: "kept" where the packet carries it as it is (whole, or in
+    pieces each under the packet - `written_in_pieces`); "raised" where the
+    run sets the target's packet to `want` for its length and puts `packet`
+    back after, also after a killed run (`leftovers.settings_held`); else
+    "refused" before the copy, with the statement the operator can run. No
+    statement holds a value wider than the packet - appending past it fails
+    on the server - so there is no third way that carries it. `facts`:
+    {"widest": the widest row's large columns read to the end, "exact":
+    whether it was, "packet": the target's packet, "slack": what a piece's
+    statement takes beside its value, "want": the packet that carries the
+    row, "ceiling": the most the server takes, "may set": whether the
+    target's account may change the global setting, "authorized": the
+    hop's answer for the setting (`target_settings`)}."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    widest = f.get("widest")
+    said = (f"the widest row's large columns "
+            + (f"{int(widest):,} bytes" if widest is not None
+               else "not known")
+            + f"; the target's packet {int(f.get('packet') or 0):,} bytes")
+    read = Need("the widest row read to the end",
+                lambda x: bool(x.get("exact")) and x.get("widest") is not None,
+                "the widest row was not read to the end, and a sample"
+                " bounds nothing")
+    return climb("how a row wider than the target's packet arrives", (
+        Rung("kept", "the target's packet as it is", because=said, needs=(
+            read,
+            Need("the widest row within the packet",
+                 lambda x: bool(x.get("packet")) and int(x["widest"])
+                 + int(x.get("slack") or 0) <= int(x["packet"]),
+                 lambda x: f"{int(x['widest']):,} bytes is past the"
+                 f" target's max_allowed_packet of"
+                 f" {int(x.get('packet') or 0):,}"))),
+        Rung("raised", "the target's packet raised for the run and put"
+             " back after", because=said, needs=(
+                 read,
+                 Need("a packet the server takes",
+                      lambda x: bool(x.get("want")) and int(x["want"])
+                      <= int(x.get("ceiling") or 0)
+                      and int(x["want"]) > int(x["widest"]),
+                      lambda x: f"the row needs a packet of"
+                      f" {int(x.get('want') or 0):,} bytes, past the most"
+                      f" the server takes ({int(x.get('ceiling') or 0):,})"),
+                 Need("the hop allows the target's setting changed",
+                      lambda x: bool(x.get("authorized")),
+                      "the hop does not allow the target's settings changed"
+                      " (target_settings: {max_allowed_packet: yes})"),
+                 Need("the target's account may change it",
+                      lambda x: bool(x.get("may set")),
+                      "the target's account holds neither SUPER nor"
+                      " SYSTEM_VARIABLES_ADMIN"))),
+        Rung("refused", "the copy refused before it starts, with the"
+             " statement that lets it run", because=said)), f)
+
+
+def account_carried(facts):
+    """The `Choice` for an account a grant on the target names that the
+    target lacks: "made" as the source has it, its password from the
+    source's hash or the passwords file (`users` plans it); "locked" - a
+    login whose password neither gives - made unable to sign in, so the
+    grant lands and nobody signs in with a password migkit made up, and
+    said; "left" where the hop does not carry accounts (`users.carried`).
+    `facts`: {"carried", "planned": the users plan makes it, "login"}."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    carried = Need("the hop carries accounts",
+                   lambda x: bool(x.get("carried")),
+                   "the hop does not carry users, roles or grants")
+    return climb("how an account a grant names reaches the target", (
+        Rung("made", "made as the source has it", needs=(
+            carried, Need("planned with its password or as a role",
+                          lambda x: bool(x.get("planned")),
+                          "no password for it on the source or in the"
+                          " passwords file"))),
+        Rung("locked", "made unable to sign in, its grants given",
+             needs=(carried, Need("a login", lambda x: bool(x.get("login")),
+                                  "not a login"))),
+        Rung("left", "left for the operator: the grant waits for it")), f)

@@ -10198,6 +10198,12 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
             return not kind.startswith("DEFAULT ") or \
                 obj.split(" IN SCHEMA ")[0].strip('"') in roles
         seq = {g for g in ga | gb if g.split("\x1f")[1] == "SEQUENCE"}
+        # the roles a source grant names that the target lacks, for the
+        # repair to make first (`_grant_repair`)
+        self._grant_absent = {g.split("\x1f")[0] for g in ga - gb
+                              if g.split("\x1f")[0] not in droles}
+        self._grant_left = sorted(g for g in ga - gb
+                                  if g.split("\x1f")[0] not in droles)
         miss = sorted(g for g in ga - gb - seq if present(g, droles))
         extra = sorted(g for g in gb - ga - seq if present(g, sroles))
         smiss = sorted(g for g in (ga - gb) & seq if present(g, droles))
@@ -10256,13 +10262,64 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         if not gaps:
             return None
         miss, _extra, smiss, _, _ = gaps
-        if not (miss or smiss):
+        # a role a source grant names that the target lacks is made first,
+        # through the users plan, by its rung (`decide.account_carried`)
+        made, said = self._roles_made(sorted(getattr(self, "_grant_absent",
+                                                     ())))
+        late = [g for g in getattr(self, "_grant_left", ())
+                if g.split("\x1f")[0] in made]
+        if not (miss or smiss or late):
             return None
-        stmts = [self._grant_sql(g, db=db) for g in miss + smiss]
-        undo = [self._grant_sql(g, revoke=True, db=db) for g in miss + smiss]
+        every = miss + smiss + late
+        stmts = [self._grant_sql(g, db=db) for g in every]
+        undo = [self._grant_sql(g, revoke=True, db=db) for g in every]
         note = (f"{len(miss)} grants and {len(smiss)} sequence grants the"
-                " mover did not carry")
-        return RepairAction(db, "grants", stmts, undo, note)
+                " mover did not carry" + (f"; {said}" if said else ""))
+        act = RepairAction(db, "grants", stmts, undo, note)
+        act.accounts = [st for k in sorted(made) for st in made[k]]
+        act.undo += [f"DROP ROLE IF EXISTS {_ident(k)};" for k in sorted(made)]
+        return act
+
+    def _roles_made(self, names):
+        """({role: [users-plan steps]}, what is said) for each role in
+        `names` the target lacks: the steps the users plan makes it with
+        (`users._pg_plan`, the source's password hash where it shows it),
+        or - a login with no password to give it - made NOLOGIN, as
+        `decide.account_carried` chooses."""
+        import collections
+
+        from .. import decide, users
+        if not names:
+            return {}, ""
+        try:
+            s = users._pg_roles(self.hop.source)
+            t = users._pg_roles(self.hop.target)
+            hashes = users._pg_hashes(self.hop.source) or {}
+        except Exception:  # noqa: BLE001 - not read: the grant waits
+            return {}, ""
+        want = [n for n in names if n in s and n not in t]
+        out = collections.defaultdict(list, {"missing_on_target": want})
+        steps, skipped = users._pg_plan(out, s, t, hashes, {})
+        made, locked = {}, []
+        for st in steps:
+            if st["key"] in want:
+                made.setdefault(st["key"], []).append(st)
+        for name, _why in skipped:
+            got = decide.account_carried({
+                "carried": True, "planned": False,
+                "login": bool((s.get(name) or {}).get("login", True))})
+            if got.path == "locked" and name in want:
+                made[name] = [users._step(
+                    name, f"CREATE ROLE {_ident(name)} NOLOGIN",
+                    shown=f"CREATE ROLE {_ident(name)} NOLOGIN",
+                    undo=(f"DROP ROLE IF EXISTS {_ident(name)}", ()),
+                    made=True)]
+                locked.append(name)
+        said = ((f"{len(made)} roles its grants name made first"
+                 if made else "")
+                + (f" ({', '.join(locked)} made NOLOGIN: no password to"
+                   " give)" if locked else ""))
+        return made, said
 
     #: leaf partitions read in one statement at most: the statement is one
     #: argument to psql, and Linux caps a single argument at 128 KB
@@ -10807,6 +10864,19 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
             if action.statements:
                 self._write_as_the_load(db, action.statements)
         elif action.kind in ("schema", "grants", "constraints"):
+            if getattr(action, "accounts", None):
+                # the roles the grants name, made first (`_roles_made`)
+                from .. import users
+                conn = users._pg_conn(self.hop.target)
+                try:
+                    ledger = users._run_steps(conn.cursor(),
+                                              action.accounts, print)
+                    conn.commit()
+                finally:
+                    conn.close()
+                if not all(e["ok"] for e in ledger):
+                    raise RuntimeError("a role the grants name could not be"
+                                       " made on the target")
             # one psql call: multi-statement + $$-quoted bodies apply intact,
             # and a grant set lands all-or-nothing
             blob = "begin;\n" + "\n".join(action.statements) + "\ncommit;"
