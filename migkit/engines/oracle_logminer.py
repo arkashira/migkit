@@ -1548,7 +1548,7 @@ def reader_check(eng, side, db):
                         " reader's could be read"), False
     peak, avg = rate
     speed, _ = mined
-    _RATES[(id(eng.hop), side, db)] = (peak, speed)
+    _RATES[(id(getattr(eng, "hop", None)), side, db)] = (peak, speed)
     words = (f"the source archived {peak / 2 ** 20:.2f} MB of redo a second"
              f" at its busiest hour ({avg / 2 ** 20:.2f} on average); the"
              f" reader mined {speed / 2 ** 20:.2f} MB a second")

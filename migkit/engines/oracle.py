@@ -1081,37 +1081,67 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
             n += 1
         return n, total
 
-    def _digest_sql(self, side, db, table, columns, where=None, salt=None):
-        """The server's digest of the table, as (sql, args), or None where
-        some column of it has no exact rendering here, or its rows may be
-        wider than a hash's input can be (4,000 bytes, or 32,767 where
-        `max_string_size` is EXTENDED: past it the concatenation is
-        refused, ORA-01489). With `salt`, the Oracle-to-Oracle digest."""
-        from .. import canon, rowtext
+    def _server_version(self, side, db):
+        """The server's major release, or None where it could not be read
+        (the digest's climb then asks the server itself)."""
+        cache = self.__dict__.setdefault("_server_version_cache", {})
+        if side not in cache:
+            try:
+                got = self._rows(side, db, "select version from"
+                                           " product_component_version"
+                                           " where rownum = 1")
+                cache[side] = int(str(got[0][0]).split(".")[0]) \
+                    if got else None
+            except Exception:  # noqa: BLE001 - not readable: unknown
+                cache[side] = None
+        return cache[side]
+
+    def _digest_facts(self, side, db, table, columns, salt=None):
+        """(`decide.Facts` the digest's ways are chosen from, each column's
+        (rendering, outside) or None): the character set, the release,
+        the columns with no exact rendering here by kind, and a row's
+        text's width against what a hash takes."""
+        from .. import decide
         charset, limit = self._server_facts(side, db)
-        if str(charset).upper() != "AL32UTF8":
-            # the hash is of the bytes the server holds, which are the
-            # UTF-8 the other engines hash only in this character set
-            return None
         facts = {f["name"]: f for f in self._facts(side, db, table)}
-        parts, outside, width = [], [], 0
+        parts, rendered, width = [], [], len(salt or "")
         for n, cls in columns:
             f = facts.get(n)
             got = self._render_sql(f, cls) if f else None
+            parts.append(got)
             if got is None:
+                rendered.append(f"{n} ({f['kind'] if f else 'unknown'})")
+            else:
+                width += self._rendered_width(f)
+        return decide.Facts({"charset": charset, "rendered": rendered,
+                             "width": width, "limit": limit},
+                            version=lambda: self._server_version(side,
+                                                                 db)), parts
+
+    def _digest_sql(self, side, db, table, columns, where=None, salt=None,
+                    facts=None):
+        """The server's digest of the table, as (sql, args), or None where
+        the digest's climb (`decide.oracle_digest_rungs`) does not hold the
+        server's sum: some column has no exact rendering here, or its rows
+        may be wider than a hash's input can be (4,000 bytes, or 32,767
+        where `max_string_size` is EXTENDED: past it the concatenation is
+        refused, ORA-01489). With `salt`, the Oracle-to-Oracle digest."""
+        from .. import canon, decide, rowtext
+        if facts is None:
+            facts = self._digest_facts(side, db, table, columns, salt)
+            if decide.climb("the table's digest", decide.oracle_digest_rungs(),
+                            facts[0]).path != "server":
                 return None
-            parts.append(got[0])
-            if got[1] != "0":
-                outside.append(got[1])
-            width += self._rendered_width(f)
-        if width + len(salt or "") > limit:
+        parts = [p for p in facts[1] if p is not None]
+        if len(parts) != len(columns):
             return None
+        outside = [o for _, o in parts if o != "0"]
         # `lengthc`: `length` counts a character outside the first plane
         # as two (measured, U+1D11E is 2, `lengthc` 1), and the length in
         # the row text is of characters
         row = f" || '{rowtext.SEP}' || ".join(
             f"nvl(to_char(lengthc({e})), '{rowtext.NULL_LEN}') || ':' ||"
-            f" {e}" for e in parts)
+            f" {e}" for e, _ in parts)
         if salt:
             # Oracle to Oracle: salted SHA-256, 64 bits of it
             row, how, digits = f"'{salt}' || {row}", "SHA256", SHA_HEX
@@ -1146,29 +1176,49 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
         return self._digest(side, db, table, columns, where, salt)
 
     def _digest(self, side, db, table, columns, where, salt):
-        got = None
+        """One rung of `decide.oracle_digest_rungs`, climbed on the table's
+        facts: summed in the server where they hold, the sum refused or a
+        value found outside what the server renders exactly switching to
+        the fold here - said once, and kept in the choice's record."""
+        from .. import canon, decide
         try:
-            got = self._digest_sql(side, db, table, columns, where, salt)
-        except Exception:  # noqa: BLE001 - folded here instead
-            got = None
-        if got is not None:
-            rows = self._rows(side, db, got[0], got[1])
-            n, total, outside = rows[0]
-            if not outside:
-                self.__dict__["digested_in_server"] = \
-                    self.__dict__.get("digested_in_server", 0) + 1
-                return (int(n), str(int(total)))
-        from .. import canon
-        self.__dict__["digested_here"] = \
-            self.__dict__.get("digested_here", 0) + 1
-        classes = [c for _, c in columns]
-        total, n = 0, 0
-        for batch in self.neutral_batches(side, db, table, columns,
-                                          size=5000, where=where):
-            k, total = (self._sha_fold(classes, batch, salt, total) if salt
-                        else canon.fold_rows(classes, batch, total))
-            n += k
-        return (n, str(total))
+            facts, parts = self._digest_facts(side, db, table, columns, salt)
+        except Exception:  # noqa: BLE001 - unread: folded here instead
+            facts, parts = decide.Facts({"charset": None, "rendered": [],
+                                         "width": 0, "limit": 0,
+                                         "version": None}), []
+
+        def server():
+            got = self._digest_sql(side, db, table, columns, where, salt,
+                                   facts=(facts, parts))
+            if got is None:
+                raise decide.Blocked("no exact rendering in the server")
+            n, total, outside = self._rows(side, db, got[0], got[1])[0]
+            if outside:
+                raise decide.Blocked(f"{int(outside)} values lie outside"
+                                     " what the server renders exactly")
+            self.__dict__["digested_in_server"] = \
+                self.__dict__.get("digested_in_server", 0) + 1
+            return (int(n), str(int(total)))
+
+        def here():
+            self.__dict__["digested_here"] = \
+                self.__dict__.get("digested_here", 0) + 1
+            classes = [c for _, c in columns]
+            total, n = 0, 0
+            for batch in self.neutral_batches(side, db, table, columns,
+                                              size=5000, where=where):
+                k, total = (self._sha_fold(classes, batch, salt, total)
+                            if salt else canon.fold_rows(classes, batch,
+                                                         total))
+                n += k
+            return (n, str(total))
+
+        choice, got = self._attempt(
+            "the table's digest", decide.oracle_digest_rungs(),
+            lambda c: server() if c.path == "server" else here(), facts)
+        self.__dict__.setdefault("digest_choices", {})[table] = choice
+        return got
 
     # ---- writing -----------------------------------------------------------
     #
@@ -1264,10 +1314,8 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
         big = any(b.lob and v is not None and len(v) > PIECE
                   for r in rows for b, v in zip(binds, r))
         way = self._write_way(db, table, len(rows), binds, big)
-        # a writer that lost its hold is refused by the target first
-        # (`fencing`)
-        from .. import fencing
-        fencing.hold(self, side, db, None)
+        # a writer that lost its hold is refused by the target in the
+        # batch's own transaction, last before its commit (`fencing.hold`)
         write = (self._staged if way == "direct" else self._arrayed)
         self._timed(db, table, way, len(rows), lambda: write(
             side, db, table, names, key, binds, rows))
@@ -1304,6 +1352,8 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
                     [self._row(binds, r) for r in group])
             for r in large:
                 self._insert_in_pieces(conn, quoted, names, binds, r)
+            from .. import fencing
+            fencing.hold(self, side, db, conn.cursor())
             conn.commit()
         finally:
             conn.close()
@@ -1415,6 +1465,8 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
             else:
                 cur.execute(f"insert into {quoted} ({cols}) select {src}"
                             f" from {staged} s")
+            from .. import fencing
+            fencing.hold(self, side, db, cur)
             conn.commit()
             cur.execute(f"truncate table {staged}")
         finally:

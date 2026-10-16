@@ -6180,6 +6180,46 @@ def fence_way(facts, costs=None):
         f, costs=costs or None, prove=False)
 
 
+# ---- how an Oracle table's digest is made (DEC30.sweep) -------------------
+
+def oracle_digest_rungs():
+    """The ways an Oracle table's rows are summed into one digest
+    (`OracleEngine._digest`): in the server, each row's canonical text
+    hashed by `standard_hash` and summed, so no row crosses the network -
+    where the database's character set is the UTF-8 every other engine
+    hashes, the server is one that has the function (12.1 on), every
+    column has an exact rendering in its SQL and a row's text fits what a
+    hash takes (`max_string_size`); folded here otherwise, a large value
+    read in pieces. Facts: `charset`, `version` (major, None where it
+    could not be read - the server is asked and a refusal switches),
+    `rendered` (the columns without an exact rendering, by kind), `width`
+    and `limit` (bytes of a row's text against what a hash takes). The
+    built-in needs no grant, so the account's rights to the crypto
+    package are not asked."""
+    return (
+        Rung("server", "summed in the server, no row read here",
+             needs=(Need("the database's character set is UTF-8",
+                         lambda f: str(f["charset"]).upper() == "AL32UTF8",
+                         lambda f: "the server hashes the bytes it holds,"
+                         f" which are in {f['charset']}, not the UTF-8 the"
+                         " other side hashes"),
+                    Need("a server with standard_hash",
+                         lambda f: f["version"] is None
+                         or int(f["version"]) >= 12,
+                         lambda f: f"the server is release {f['version']},"
+                         " which has no standard_hash (12.1 on)"),
+                    Need("every column rendered exactly in SQL",
+                         lambda f: not f["rendered"],
+                         lambda f: "no exact rendering in Oracle's SQL for "
+                         + ", ".join(f["rendered"])),
+                    Need("a row's text within what a hash takes",
+                         lambda f: f["width"] <= f["limit"],
+                         lambda f: f"a row's text may take {f['width']}"
+                         f" bytes, past the {f['limit']} a hash takes")),
+             because="no row crosses the network"),
+        Rung("here", "folded here, large values read in pieces",
+             footprint=1, because="every value is read whole"))
+
 # ---- how a seed's rows are held in its parts (`ship`, backlog DEC1001) ------
 
 #: the targets that read a Parquet file as it is: a part held in Parquet

@@ -4,10 +4,21 @@ tail (`ready.gate`) stops the start with the reason and the figures, unless
 the operator said to go on (`MIGKIT_PREFLIGHT=warn`); a reader that could
 not be measured is said as unknown, never a pass.
 
-Stand-ins only: no Oracle server runs here, so the measurement against a
-real database is not proved by this module - the verdict's use is.
+The verdict's use is held on stand-ins; on the Oracle lane (Oracle Free
+in the VM, archiving its redo: `tests/test_oracle_is_a_whole_side.py`'s
+sandbox) both figures are measured for real - a quiet source goes on, a
+burst of redo the test writes raises the measured busiest hour, and an
+account that may not read the archived logs is unknown and warns (lead
+decision: an unmeasured reader warns). A reader slower than the lane can
+write redo is not something one machine can make: there the reader's
+figure is a stand-in under the real measured redo, which is what stops.
 """
 import pytest
+
+from tests.conftest import needs_docker
+from tests.test_oracle_follows_and_resumes_on_its_lane import lane  # noqa: F401
+from tests.test_oracle_is_a_whole_side import (  # noqa: F401 - fixtures
+    DST, PW, SRC, _ep, alone, engine, ora, sandbox)
 
 MB = 2 ** 20
 
@@ -201,8 +212,13 @@ def test_assess_and_the_gate_read_the_same_verdict(monkeypatch):
     lm = _measure(monkeypatch, (40 * MB, 12 * MB), (25 * MB, "log1"))
 
     class _E:
+        hop = _hop()
+
         def _rows(self, *a):
             return []
+
+        def _endpoint(self, side):
+            return self.hop.source
     rows = lm.assess(_E(), "src", "app")
     rate = [r for r in rows if r["item"].endswith("reader rate")]
     level, detail, _ = lm.reader_check(_E(), "src", "app")
@@ -222,3 +238,79 @@ def test_the_engine_hands_over_the_measure_unless_the_redo_files_are_read(
         "fail", "x", True)
     monkeypatch.setattr(oracle_redo, "chosen", lambda *a: oracle_redo.RUNG)
     assert OracleEngine.change_reader_check(object(), "app") is None
+
+
+# ---- on the Oracle lane ---------------------------------------------------
+
+def _burst(rows):
+    """Redo the test writes: `rows` rows of 400 bytes, committed, the log
+    switched so the archive holds them."""
+    alone("redoburst")
+    ora("begin execute immediate 'drop table app.redoburst purge';"
+        " exception when others then null; end;")
+    ora("create table app.redoburst (id number(10) primary key,"
+        " s varchar2(400))")
+    ora("insert into app.redoburst select level, rpad('r', 400, 'x') from"
+        " dual connect by level <= :1", rows)
+    ora("alter system archive log current", user="sys", sysdba=True,
+        root=True)
+
+
+@needs_docker
+def test_on_the_lane_a_quiet_source_measured_against_its_reader_goes_on(
+        lane):
+    from migkit import ready
+    alone()
+    ora("alter system archive log current", user="sys", sysdba=True,
+        root=True)
+    eng = engine()
+    level, detail, measured = eng.change_reader_check("app")
+    assert measured is True and level in ("pass", "warn"), detail
+    assert "MB of redo a second" in detail and "the reader mined" in detail
+    its = ready._change_reader(eng.hop, eng, ["app"], "cdc")
+    assert its and not any(i.gates for i in its), its
+    ready.gate(eng.hop, eng, None, "full+cdc", False, lambda m: None)
+
+
+@needs_docker
+def test_on_the_lane_a_burst_of_redo_stops_a_reader_slower_than_it(
+        lane, monkeypatch):
+    from migkit import ready
+    from migkit.engines import oracle_logminer as miner
+    eng = engine()
+    before = miner.redo_rate(eng, "src", "app")
+    _burst(200000)
+    after = miner.redo_rate(eng, "src", "app")
+    # the burst is in the measured busiest hour
+    assert after and after[0] > (before[0] if before else 0), (before, after)
+    real = miner.reader_rate(eng, "src", "app")
+    assert real and real[0] > 0, real
+    # a reader slower than the measured redo: the redo's figure is real
+    peak = after[0]
+    monkeypatch.setattr(miner, "reader_rate",
+                        lambda *a: (peak / 2, "the stand-in reader"))
+    with pytest.raises(SystemExit) as e:
+        ready.gate(eng.hop, eng, None, "full+cdc", False, lambda m: None)
+    text = str(e.value)
+    assert "nothing was written" in text, text
+    assert f"{peak / MB:.2f} MB of redo a second" in text, text
+    assert f"mined {peak / 2 / MB:.2f} MB a second" in text, text
+
+
+@needs_docker
+def test_on_the_lane_a_reader_that_cannot_be_measured_warns(lane):
+    from migkit import ready
+    from migkit.config import Endpoint, Hop
+    from migkit.engines.oracle import OracleEngine
+    ep = _ep(SRC)
+    # an account that may not read the archived logs: unknown, a warning
+    eng = OracleEngine(Hop(name="ora", engine="oracle", source=Endpoint(
+        host=ep.host, port=ep.port, user="app", password=PW,
+        options=ep.options), target=_ep(DST), databases=["app"],
+        options={}))
+    level, detail, measured = eng.change_reader_check("app")
+    assert (level, measured) == ("warn", False), (level, detail)
+    assert detail.startswith("not measured"), detail
+    its = ready._change_reader(eng.hop, eng, ["app"], "cdc")
+    assert [i.level for i in its] == ["warn"] and not its[0].gates, its
+    assert ready.stops(eng.hop, eng, None, "cdc", False) == []

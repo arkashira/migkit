@@ -5699,6 +5699,25 @@ real account (`cosmosdb.UNPROVED_ON`). Left: both run on a real account.
   the reader is the decision's (`decide.oracle_reader_rungs`), LogMiner
   refused where it was measured mining slower than the source's busiest
   hour. Still unproved on a real Oracle with the program or a standby.
+  *2026-10-16 (W18L: S1.e, DEC30.sweep, LT.C4, LT.C5 on the Oracle lane):*
+  S1.e DONE on the lane: both figures measured on Oracle Free in the VM,
+  a quiet source goes on, a burst the test writes raises the measured
+  busiest hour and a reader under it stops the start with both figures
+  (the reader's figure a stand-in: one machine cannot mine slower than it
+  writes), an account that may not read the archived logs warns (lead
+  decision 3) (`tests/test_a_slow_oracle_reader_stops_the_start.py`).
+  DEC30.sweep: Oracle's digest is a climb (`decide.oracle_digest_rungs`:
+  character set, release, columns without an exact rendering, row width
+  against `max_string_size`) run by `Engine._attempt`, a refusal or a value
+  outside what the server renders switching to the fold here; the choice
+  kept (`digest_choices`). LT.C4 DONE on the lane: followed, stopped,
+  resumed from the saved SCN, the target's trigger shows no row applied
+  twice (`tests/test_oracle_follows_and_resumes_on_its_lane.py`). LT.C5:
+  a named standby is where the redo is mined (`oracle_logminer.place`),
+  a named database that is not this source's physical standby refused
+  against the real server's role; unproved on a real Data Guard standby.
+  Oracle's batch fence is held in the batch's own transaction, last
+  before its commit (`fencing.hold` with the batch's cursor).
   *Built 2026-10-16 (LT.C4, LT.C6, P0-PARITY.tail on Redis):* `redis.
   ReplicaStream` (migkit a replica: offsets, resume by +CONTINUE),
   `KeyspaceStates` (joining/live/left/parked per database, seam = offset,
