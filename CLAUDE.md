@@ -101,6 +101,37 @@ P0-WORKFLOW-DEPTH, P0-MINIMAL-INPUT, P0-AUTO-RESOURCES, P0-VALIDATE and the
 platform-wide engine contract. This rule is mandatory design and review
 criteria; it does not claim that current implementation meets them.
 
+## Implementation rules
+
+Owner rule, 2026-10-17. Binding for every change, in this order:
+
+1. Core engine first: breadth (a new engine, dialect or service) waits until
+   every decision-engine row the change touches is DONE.
+2. A choice is a rung: anything that picks a way, order, size, depth,
+   concurrency, check set, timeout or default is a rung appended to
+   `decide.py`, with a `Need` reading a fact the code produced. No literal,
+   no fixed default, no engine switch outside `decide`, no worker or port
+   ceiling. The guards define this; a red guard is a defect, not an owed list.
+3. Measured over assumed: a rung's facts come from the system under
+   migration (a probe, two reads a measured time apart, the driver's limit,
+   the last run's recorded value), bounded and safe. A constant is allowed
+   only for a protocol limit, cited in a comment. A derived bound carries a
+   margin from the measurement's own spread.
+4. Both branches proved: every rung is held and refused under
+   `tests.rung_branches.watched()` on fakes and declared in `PROVES_RUNGS`;
+   server behaviour is proved on the docker sandbox lane, or built and
+   declared `UNPROVED_ON` / `UNPROVED_ITEMS` in its module, never assumed.
+5. One owner: logic lives once (see "One place"); a lint that keeps it so
+   comes with the change.
+6. Safety is a hard constraint: ordering, transaction boundaries, deletes,
+   duplicates, full values, idempotent resume with checkpoints only after
+   durable effects; an unknown failure ends in a safe state with a blocker.
+7. Worklists come from the guards and the inventories (`autonomous.gaps`,
+   the `OWED` lists, `docs/agents/STATE.md`), not from a search; a site a
+   guard cannot see is made visible to it first.
+8. The hand-back is honest: commit, files, rows done / split / left with the
+   exact remainder, cells moved, what was not run. Built without a run is left.
+
 ## Tests
 
 Write tests with every change; run them once, at the end (`tools/final_suite.py`). Mid-way, run only `python -m compileall -q migkit tests` and the guards: `tests/test_the_report_does_not_name_its_tools.py`, `tests/test_no_method_is_said_twice.py`, `tests/test_the_code_map_is_current.py`, `tests/test_every_engine_is_as_deep_as_postgres_and_mysql.py` (the depth matrix: a way you add needs a test naming it in its module's `PROVES`, or an `UNPROVED` entry; a gap you close loses its declaration in `capabilities.DEPTH_GAPS`), and `tests/test_the_scope_reads_alike_everywhere.py::test_a_listed_table_is_asked_of_the_scope_one_way`. Never connect to a real database: the docker sandbox only.
