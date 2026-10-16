@@ -827,6 +827,12 @@ HOP_OPTIONS = {
                              "ca_bundle", "model", "capacity", "load_from",
                              "load_endpoint", "load_region", "load_profile",
                              "shipping", "signers"),
+                            gather=Key("other places carriers' parts of the"
+                                       " one seed are read from at the far"
+                                       " end, gathered once by the"
+                                       " manifest", "list",
+                                       each=Key("a directory or object"
+                                                " store location", "str")),
                             credential=Key("a reference to the carrier's"
                                            " credential", "secret"),
                             load_credential=Key("a reference to the far"

@@ -101,6 +101,7 @@ import math
 import os
 import pickle
 import shutil
+import struct
 import threading
 import time
 import zoneinfo
@@ -132,6 +133,7 @@ MANIFEST = "manifest.json.age"
 SIGNATURE = MANIFEST + ".sig"
 EXPORT_STATE = "seed-export.json"
 LOAD_STATE = "seed-load.json"
+GATHER_STATE = "seed-gather.json"
 SPOOL = "seed-spool"
 
 #: a part's rows, as batches the unpickler reads back: the classes a
@@ -447,8 +449,8 @@ FORMATS = (
                              lambda f: f["client"],
                              "the source's own client is not installed -"
                              " migkit doctor --install"),
-                       _need("a target that takes a bulk load",
-                             lambda f: f["loads"],
+                       _need("a target that does not refuse a bulk load",
+                             lambda f: f["loads"] is not False,
                              "{rung} needs the target to take a bulk load"
                              " (local_infile on)"),
                        _need("columns the load reads back as they were",
@@ -934,10 +936,87 @@ def _plan_table(w, src_t):
         sch, tbl = w.eng._split(src_t)
         entry["copy_columns"] = w.eng._copy_cols(db, sch, tbl)
     elif fmt.path == "load lines":
-        got = w.eng._pass_columns(db, w.pair._leaf(src_t))
+        leaf = w.pair._leaf(src_t)
+        types = w.eng._q("src", "select column_name, data_type, extra from"
+                         " information_schema.columns where table_schema ="
+                         " %s and table_name = %s order by ordinal_position",
+                         (db, leaf))
+        got = w.eng._pass_columns(db, leaf, rows=types, there=None)
         entry["load"] = {"names": [n for n, _ in got],
-                         "kinds": [k for _, k in got]}
+                         "kinds": [k for _, k in got],
+                         "types": {c: str(t).lower() for c, t, _ in types}}
+    elif fmt.path == "rows":
+        _hold_rows(w, src_t, entry)
     return entry
+
+
+def _hold_rows(w, src_t, entry):
+    """How the rows of a table in the rows' format are held in its parts
+    (`decide.rows_container`): a first batch of its own rows carried
+    through Arrow and read back, its size against the pickled rows', and
+    the target's engine decide."""
+    import zstandard
+    declared = dict(w.src.neutral_columns("src", w.db, src_t))
+    entry["arrow"] = {n: list(canon.params(declared[n]))
+                      for n, c in entry["columns"]
+                      if c == "decimal" and n in declared}
+    sample, why = None, "the table holds no rows to carry through it"
+    try:
+        first = next(_batches(w, {**entry, "per": 1000}), None)
+    except Exception as e:  # noqa: BLE001 - nothing measured, then
+        first, why = None, f"its rows could not be read to try it: {_first(e)}"
+    if first and first[0]:
+        rows = [list(r) for r in first[0]]
+        data = _parquet_frame(rows, entry)
+        if data is None or _parquet_rows(data) != rows:
+            why = "Arrow's types do not carry every column of its rows" \
+                  " exactly"
+        else:
+            z = zstandard.ZstdCompressor(level=ZSTD_LEVEL)
+            sample = {"parquet": len(z.compress(data)),
+                      "pickled": len(z.compress(_dumps(rows))),
+                      "rows": len(rows)}
+    got = decide.rows_container(decide.Facts({
+        "sample": sample, "why": why, "target": w.dst.CANON_ENGINE}))
+    entry["container"] = "parquet" if got.path == "parquet" else "pickled"
+    entry["because"]["container"] = got.reason
+
+
+def _target_loads(w):
+    """Whether the target takes the bulk load - True or False as it answers,
+    None where it cannot be asked from here (an export beside the source
+    may not reach it: the load asks it again, `_lines_unfit`)."""
+    eng = w.dst
+    conn = eng._conn("dst")
+    try:
+        return bool(eng._loads(conn))
+    finally:
+        conn.close()
+
+
+def _lines_unfit(w, tgt, entry):
+    """Why the target's table does not take the manifest's lines, or "":
+    the columns the lines hold travel in the manifest (names, kinds and
+    the source's types), so the target's table is held to them and the
+    export read nothing of the target."""
+    load = entry["load"]
+    try:
+        loads = _target_loads(w)
+    except Exception:  # noqa: BLE001 - not asked, then the load says
+        loads = None
+    if loads is False:
+        return ("the target takes no bulk load (local_infile is off); set"
+                " it on and run the load again")
+    if "types" not in load:
+        # a manifest from before the columns travelled in it
+        return w.eng._pass_unfit(w.db, tgt.dst_t)
+    got = w.eng._pass_columns(w.db, tgt.dst_t, rows=[
+        (n, load["types"][n], "") for n in load["names"]])
+    if isinstance(got, str):
+        return got
+    if [n for n, _ in got] != list(load["names"]):
+        return "its columns are not those the parts hold"
+    return ""
 
 
 def _format_facts(w, src_t, entry):
@@ -963,9 +1042,12 @@ def _format_facts(w, src_t, entry):
                      and bool(pg._copy_cols(db, *pg._split(src_t)))
                      and pg.passes_through(db, src_t), False),
         client=lambda: bool(which("mysql")),
-        loads=asked(lambda: my is not None and my._loads_here(), False),
-        unfit=asked(lambda: my._pass_unfit(db, leaf) if my is not None
-                    else "not MySQL",
+        loads=asked(lambda: _target_loads(w) if my is not None else False,
+                    None),
+        unfit=asked(lambda: my._pass_unfit(
+            db, leaf, there=None,
+            digestible={n for n, _ in entry["digest_columns"]})
+            if my is not None else "not MySQL",
                     lambda e: f"the columns could not be read: {_first(e)}"))
 
 
@@ -1055,6 +1137,95 @@ def _rows_pieces(batches, at, classes, stats, way="md5"):
     stats["rows"], stats["digest"] = n, str(total)
 
 
+#: a frame of a part held in Parquet: its kind - a Parquet file, or the
+#: batch's rows pickled where Arrow does not carry them exactly - and its
+#: length
+_FRAME = struct.Struct(">cQ")
+_PARQUET, _PICKLED = b"P", b"R"
+
+
+def _parquet_frame(rows, entry):
+    """The Parquet file of a batch of rows, or None where Arrow's types
+    cannot hold them."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from .engines.parquet import _arrow
+    try:
+        schema = pa.schema([(n, _arrow(c, tuple(
+            (entry.get("arrow") or {}).get(n) or ()))[0])
+            for n, c in entry["columns"]])
+        table = pa.table([[r[i] for r in rows] for i in range(len(schema))],
+                         schema=schema)
+        out = io.BytesIO()
+        pq.write_table(table, out, compression="none")
+    except (Exception, SystemExit):  # noqa: BLE001 - then pickled
+        return None
+    return out.getvalue()
+
+
+def _parquet_rows(data):
+    import pyarrow.parquet as pq
+    table = pq.read_table(io.BytesIO(data))
+    return [list(r) for r in zip(*(table.column(i).to_pylist()
+                                   for i in range(table.num_columns)))]
+
+
+def _parquet_pieces(batches, at, classes, stats, entry):
+    """The plain bytes of a part held in Parquet: a frame a batch, the
+    batch's Parquet file when it reads back as the rows it was made from -
+    by their digest and by their values - else the batch pickled, counted.
+    The digest is the rows' as the source gave them."""
+    way = _way(entry)
+    total, n, pickled = 0, 0, 0
+    for rows in batches:
+        before = total
+        _, total = canon.fold_rows(classes, ([r[i] for i in at]
+                                             for r in rows), total, way)
+        data = _parquet_frame(rows, entry)
+        if data is not None:
+            back = _parquet_rows(data)
+            _, again = canon.fold_rows(classes, ([r[i] for i in at]
+                                                 for r in back), before, way)
+            if again != total or back != [list(r) for r in rows]:
+                data = None
+        kind, body = (_PARQUET, data) if data is not None \
+            else (_PICKLED, _dumps(rows))
+        pickled += kind == _PICKLED
+        n += len(rows)
+        yield _FRAME.pack(kind, len(body))
+        yield body
+    stats["rows"], stats["digest"], stats["pickled"] = n, str(total), pickled
+
+
+def _read_exact(reader, n):
+    out = bytearray()
+    while len(out) < n:
+        got = reader.read(n - len(out))
+        if not got:
+            break
+        out += got
+    return bytes(out)
+
+
+def _frames_of(reader):
+    """Every batch of rows a part held in Parquet holds."""
+    while True:
+        head = _read_exact(reader, _FRAME.size)
+        if not head:
+            return
+        if len(head) < _FRAME.size:
+            raise EOFError("a frame is torn")
+        kind, size = _FRAME.unpack(head)
+        body = _read_exact(reader, size)
+        if len(body) < size:
+            raise EOFError("a frame is torn")
+        try:
+            yield _parquet_rows(body) if kind == _PARQUET else _loads(body)
+        except Exception as e:  # noqa: BLE001 - a part read again
+            raise EOFError(f"a frame could not be read ({_first(e)})") from e
+
+
 def _way(entry):
     """The row hash a table's part digests were taken by: md5 for a
     manifest written before the hash was chosen."""
@@ -1133,6 +1304,8 @@ class _Exporter:
                 "plain": plain, "carrier": self.carrier.said,
                 "seconds": round(time.monotonic() - began, 3),
                 "at": _stamp(), **extra,
+                **({"pickled_batches": stats["pickled"]}
+                   if stats.get("pickled") else {}),
                 **(late() if late else {})}
         with self.state.lock:
             cs = self.state.data.setdefault("carriers", {})
@@ -1163,6 +1336,9 @@ class _Exporter:
 
     def rows_part(self, entry, n, batches, extra, late=None):
         at, classes = _digest_at(entry)
+        if entry.get("container") == "parquet":
+            return self._put(entry, n, lambda stats: _parquet_pieces(
+                batches, at, classes, stats, entry), extra, late)
         return self._put(entry, n, lambda stats: _rows_pieces(
             batches, at, classes, stats, _way(entry)), extra, late)
 
@@ -1642,6 +1818,103 @@ def read_manifest(w, store, seal):
     return got
 
 
+def others_of(s):
+    """The places besides the one the far end reads the seed from that
+    carriers' parts are read from (`ship: gather:`), as stores."""
+    got = s.get("gather") or []
+    if isinstance(got, (str, os.PathLike)):
+        got = [got]
+    return [carriers.at(g, s.get("load_endpoint"), s.get("load_region"),
+                        s.get("load_profile"), None, s.get("ca_bundle"),
+                        f"a carrier's place ({g})") for g in got]
+
+
+def _held(w, store, name):
+    """(sha256, bytes) of a part as `store` keeps it: read in place, or
+    fetched into the spool for the one look."""
+    local = store.local(name)
+    if local is not None:
+        return sha256_of(local)
+    tmp = w.spool / ("gather-" + os.path.basename(name))
+    try:
+        carriers.move_file(store, name, carriers.LocalStore(tmp.parent),
+                           tmp.name)
+        return sha256_of(tmp)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def gather(w, store, manifest, seal, others):
+    """{part name: the store that holds it} for every part the manifest
+    names, parts of one seed being on several carriers: each place listed
+    once, a part taken from the first place that holds the bytes the
+    manifest names, and none read twice. A part held in more than one place
+    is held to the manifest's sha256 in each - the copy whose digest is not
+    the manifest's is refused, the others are one part - and two parts of
+    the manifest that digest alike are refused, as a seed made of one
+    carrier written twice. What no place holds is left to the load, which
+    reads it again from the source over the link. Kept beside the hop's
+    reports by the manifest's hash, so a load that goes on does not look
+    again."""
+    want = {p["name"]: p for e in manifest["tables"]
+            for p in e["parts"].values()}
+    alike = {}
+    for name, p in want.items():
+        if alike.setdefault(p["sha256"], name) != name:
+            raise SystemExit(
+                f"{w.db}: the manifest names {alike[p['sha256']]} and"
+                f" {name} with the same digest - one carrier's part written"
+                " twice under two names; the seed is refused")
+    state = _State(w.dir / GATHER_STATE)
+    if state.data.get("seal") != seal["manifest_sha256"]:
+        state.data = {"seal": seal["manifest_sha256"], "where": {},
+                      "refused": {}}
+    shut = state.data.setdefault("refused", {})
+    places = [store, *others]
+    prefix = f"{w.prefix()}parts/"
+    held, stray = {}, 0
+    for st in places:
+        for name, size in st.listing(prefix).items():
+            if name not in want:
+                stray += 1
+            elif size == want[name]["bytes"]:
+                held.setdefault(name, []).append(st)
+    out, refused, twice = {}, [], 0
+    for name, there in held.items():
+        if len(there) == 1:
+            out[name] = there[0]
+            continue
+        # held in more than one place: only a copy that is the manifest's
+        # own digest is the part
+        good = []
+        for st in there:
+            if st.said in shut.get(name, ()):
+                refused.append(f"{name} at {st.said}")
+            elif state.data["where"].get(name) == st.said:
+                good.append(st)
+            elif _held(w, st, name)[0] == want[name]["sha256"]:
+                good.append(st)
+            else:
+                refused.append(f"{name} at {st.said}")
+                shut.setdefault(name, []).append(st.said)
+        if good:
+            out[name] = good[0]
+            twice += len(good) - 1
+            state.data["where"][name] = good[0].said
+    state.save()
+    missing = len(want) - len(out)
+    w.log(f"{w.db}: {len(out):,} of {len(want):,} parts gathered from"
+          f" {len(places)} places, each read once"
+          + (f"; {twice:,} held in more than one place, kept once"
+             if twice else "")
+          + (f"; {len(refused):,} copies refused, their digest is not the"
+             f" manifest's ({', '.join(refused[:3])})" if refused else "")
+          + (f"; {stray:,} files are no part of this seed" if stray else "")
+          + (f"; {missing:,} on no place here, read again from the source"
+             " over the link" if missing else ""))
+    return out
+
+
 class _Target:
     """One table as the load writes it: its name there, the columns the
     parts' rows land in, how a batch is read back, and what its digest
@@ -1715,8 +1988,10 @@ class _Loader:
     """The load half of one database: the manifest, its state, and each
     part read, written and proved."""
 
-    def __init__(self, w, store, manifest, seal):
+    def __init__(self, w, store, manifest, seal, where=None):
         self.w, self.store, self.manifest = w, store, manifest
+        #: the store of each part where the carriers' parts were gathered
+        self.where = where or {}
         self.state = _State(w.dir / LOAD_STATE)
         if self.state.data.get("seal") != seal["manifest_sha256"]:
             if self.state.data:
@@ -1738,7 +2013,7 @@ class _Loader:
     def file(self, part, store=None):
         """The part's file as kept, its hash and size held to the
         manifest's before a byte of it is read."""
-        store = store or self.store
+        store = store or self.where.get(part["name"]) or self.store
         local = store.local(part["name"])
         fetched = None
         if local is None:
@@ -1775,7 +2050,8 @@ class _Loader:
         n, fold_m, fold_s = 0, 0, 0
         with opened(path) as r:
             try:
-                for batch in _batches_of(r):
+                for batch in (_frames_of(r) if tgt.entry.get("container")
+                              == "parquet" else _batches_of(r)):
                     _, fold_m = canon.fold_rows(
                         tgt.m_classes, ([row[i] for i in tgt.m_at]
                                         for row in batch), fold_m, tgt.way)
@@ -2015,7 +2291,7 @@ class _Loader:
                                  " binary copy format, and the target's"
                                  f" table does not take it: {why}")
         elif entry["format"] == "load lines":
-            why = w.eng._pass_unfit(w.db, tgt.dst_t)
+            why = _lines_unfit(w, tgt, entry)
             if why:
                 raise SystemExit(f"{entry['table']}: the parts are the bulk"
                                  " load's lines, and the target's table"
@@ -2165,7 +2441,7 @@ def _in_scope_now(w, manifest, entries):
     return keep
 
 
-def load(w, store, seal, go):
+def load(w, store, seal, go, others=()):
     """The load half of one database, from `store`: every part read,
     written and proved, every table held as a whole, and the position the
     stream starts from - a new one where the source no longer keeps its
@@ -2187,7 +2463,9 @@ def load(w, store, seal, go):
               " target, then the stream from the seed's position")
         return Done("load", position=manifest.get("position"),
                     said="planned")
-    ld = _Loader(w, store, manifest, seal)
+    ld = _Loader(w, store, manifest, seal,
+                 gather(w, store, manifest, seal, list(others))
+                 if others else None)
     if ld.state.data.get("loaded") is None:
         _load_tables(w, ld, entries)
         ld.state.data["loaded"] = {"at": _stamp(),
@@ -2321,7 +2599,8 @@ def carry(hop, eng, db, mode, go, log, via=None):
                                                                    d))
         if store is not None:
             log(f"{d}: the sealed seed is at {store.said} - {why}")
-            out[d] = load(w, store, seal_at(store, hop, d), go)
+            out[d] = load(w, store, seal_at(store, hop, d), go,
+                          others_of(s))
         else:
             todo.append(w)
     if not todo:

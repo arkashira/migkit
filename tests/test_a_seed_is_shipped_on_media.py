@@ -107,7 +107,11 @@ def _rows(path, table):
     with sqlite3.connect(path) as con:
         order = "code" if table == "tags" else "id" if table == "orders" \
             else "at, what"
-        return con.execute(f"select * from {table} order by {order}"
+        # the target's table has its columns in the order its maker chose:
+        # compared by name, in the source's order
+        cols = {"orders": "id, item, qty, price, note",
+                "tags": "code, label", "log": "at, what"}[table]
+        return con.execute(f"select {cols} from {table} order by {order}"
                            ).fetchall()
 
 
@@ -484,3 +488,75 @@ def test_the_whole_move_through_the_command_is_two_runs(tmp_path,
         assert _rows(dst, table) == _rows(src, table), table
     got, said = run("check", "lite")
     assert got.exit_code == 0, said
+
+
+# ---- Parquet parts (DEC1001.media) -------------------------------------------
+
+def _parquet_seed(seed, monkeypatch, reads=True):
+    from migkit import decide
+    if reads:
+        # the target is one that reads Parquet itself
+        monkeypatch.setattr(decide, "READS_PARQUET",
+                            decide.READS_PARQUET + ("sqlite",))
+    return seed
+
+
+def test_the_rows_container_is_a_rung_on_the_batch_and_the_targets_loader():
+    from migkit import decide
+    small = {"parquet": 400, "pickled": 900, "rows": 100}
+    big = {"parquet": 900, "pickled": 400, "rows": 100}
+    got = decide.rows_container({"sample": small, "target": "sqlite"})
+    assert got.path == "parquet", got.reason
+    got = decide.rows_container({"sample": big, "target": "sqlite"})
+    assert got.path == "pickled rows"
+    assert "takes 9 bytes against 4 as pickled rows" in got.reason + str(got.passed), \
+        (got.reason, got.passed)
+    # a target that reads Parquet takes it even where it is the larger
+    assert decide.rows_container(
+        {"sample": big, "target": "parquet"}).path == "parquet"
+    got = decide.rows_container({"sample": None, "why": "no rows",
+                                 "target": "parquet"})
+    assert got.path == "pickled rows" and "no rows" in str(got.passed)
+
+
+def test_parts_held_in_parquet_load_exactly_under_the_signed_manifest(
+        seed, monkeypatch):
+    tmp_path, src, dst, hop = _parquet_seed(seed, monkeypatch)
+    got, said = _carry(hop)
+    assert got["main"].half == "export", said
+    manifest, store, seal = _manifest(tmp_path, hop)
+    tables = {e["table"]: e for e in manifest["tables"]}
+    assert tables["orders"]["container"] == "parquet", tables["orders"]
+    part = tables["orders"]["parts"]["0"]
+    with ship.opened(store.local(part["name"])) as r:
+        assert r.read(1) == b"P"
+    # the manifest's signature still holds, and the load proves each part
+    assert ship.read_manifest(ship._Work(hop, _eng(hop), "main", "full",
+                                         lambda m: None), store, seal)
+    got, said = _carry(hop)
+    assert got["main"].half == "load", said
+    for t in ("orders", "tags", "log"):
+        assert _rows(dst, t) == _rows(src, t), t
+
+
+def test_a_batch_arrow_cannot_carry_exactly_is_pickled_and_counted(
+        seed, monkeypatch):
+    tmp_path, src, dst, hop = _parquet_seed(seed, monkeypatch)
+    real, calls = ship._parquet_frame, []
+
+    def flaky(rows, entry):
+        calls.append(1)
+        # the plan's sample goes through; every second batch after it
+        # is one Arrow would not hold
+        return None if len(calls) > 1 and len(calls) % 2 else real(rows,
+                                                                  entry)
+    monkeypatch.setattr(ship, "_parquet_frame", flaky)
+    _carry(hop)
+    manifest, _, _ = _manifest(tmp_path, hop)
+    orders = next(e for e in manifest["tables"] if e["table"] == "orders")
+    assert orders["container"] == "parquet"
+    assert sum(p.get("pickled_batches", 0)
+               for p in orders["parts"].values()) >= 1
+    got, said = _carry(hop)
+    assert got["main"].half == "load", said
+    assert _rows(dst, "orders") == _rows(src, "orders")

@@ -9685,12 +9685,17 @@ class MySQLEngine(Engine):
             out.append((name, k))
         return out
 
-    def _pass_unfit(self, db, t):
-        got = self._pass_columns(db, t)
+    def _pass_unfit(self, db, t, there=..., digestible=None):
+        """Why the pass-through cannot carry a table, or "". `there` and
+        `digestible` (the names the digest takes) are given by an export
+        beside the source, which cannot read the target's tables."""
+        got = self._pass_columns(db, t, there=there)
         if isinstance(got, str):
             return got
-        sc, _, _ = self._comparable_columns(db, self, t, self, t)
-        missing = sorted({n for n, _ in got} - {n for n, _ in sc})
+        if digestible is None:
+            sc, _, _ = self._comparable_columns(db, self, t, self, t)
+            digestible = {n for n, _ in sc}
+        missing = sorted({n for n, _ in got} - set(digestible))
         if missing:
             return (f"{', '.join(missing[:3])} cannot be digested, so a"
                     " range could not be proved")

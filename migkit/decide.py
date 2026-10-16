@@ -6178,3 +6178,55 @@ def fence_way(facts, costs=None):
              because="no atomic compare here: the target keeps the highest"
                      " number and every batch reads it first")),
         f, costs=costs or None, prove=False)
+
+
+# ---- how a seed's rows are held in its parts (`ship`, backlog DEC1001) ------
+
+#: the targets that read a Parquet file as it is: a part held in Parquet
+#: needs no decoding by a loader there
+READS_PARQUET = ("parquet", "iceberg", "delta", "duckdb", "clickhouse",
+                 "bigquery", "redshift")
+
+
+def rows_container(facts, costs=None):
+    """How the rows of a seed's part are held on the carrier where the
+    pair has no native format of its own: as Parquet, a file a batch,
+    or as the batches' rows pickled. Parquet is taken only where a batch
+    of the table's own rows was carried through it and read back as
+    the very rows - Arrow's types hold every column exactly - and then
+    where the target reads Parquet itself, or where the batch measured
+    smaller held that way than as pickled rows (the table's row width
+    and shape decide, not a default). `facts`: `sample` ({"parquet",
+    "pickled": bytes of the same batch, compressed as a part is;
+    "rows"}; None: no batch was carried through it), `why` (why not,
+    where none was), `target` (the target's engine)."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+
+    def smaller(x):
+        got = x.get("sample") or {}
+        return bool(got) and got["parquet"] < got["pickled"]
+
+    def width(x):
+        got = x.get("sample") or {}
+        if not got or not got.get("rows"):
+            return "no batch of its rows was measured"
+        return (f"held as Parquet a row takes"
+                f" {got['parquet'] / got['rows']:.0f} bytes against"
+                f" {got['pickled'] / got['rows']:.0f} as pickled rows")
+    return climb("how a seed's rows are held in its parts", (
+        Rung("parquet", "Parquet files, one a batch, each carried through"
+             " Arrow and read back as the rows it was given", needs=(
+                 Need("a batch of the table's rows carried exactly through"
+                      " Arrow's types", lambda x: bool(x.get("sample")),
+                      lambda x: x.get("why") or "no batch of its rows was"
+                      " read to carry through it"),
+                 Need("the target reads Parquet itself, or it holds the"
+                      " rows smaller",
+                      lambda x: x.get("target") in READS_PARQUET
+                      or smaller(x), width)),
+             because="its types carry every column of a batch exactly, and"
+                     " the target reads the file as it is or the file is"
+                     " the smaller"),
+        Rung("pickled rows", "each batch's rows pickled as the source's"
+             " reader hands them over", because="the first way that holds")),
+        f, costs=costs or None, prove=False)

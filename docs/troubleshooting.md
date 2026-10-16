@@ -2219,6 +2219,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: the manifest's signature does not hold (<...>) - nothing is loaded from it
 
+* <...>: the manifest names <...> and <...> with the same digest - one carrier's part written twice under two names; the seed is refused
+
 * <...>: the seed was exported under another scope than the hop's now, and <...> of its tables cannot be held to this one at the load: <...> ... | <...>. Export it again under this scope
 
 * <...>: after the rows that changed were copied, <...> still differ - `migkit check` names the rows

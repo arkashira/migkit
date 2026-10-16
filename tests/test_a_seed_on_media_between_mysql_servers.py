@@ -6,8 +6,8 @@ load in one transaction, committed only where the target's digest of the
 range is the manifest's; a part changed on the way is read again from the
 source over the link.
 
-Two servers in containers of this test's own (127.0.0.1:16412, 16413),
-removed after.
+Two servers in containers of this test's own, on its lane's private
+ports, removed after.
 """
 import socket
 import subprocess
@@ -18,6 +18,7 @@ import pytest
 from migkit import carriers, ship
 from migkit.config import Endpoint, Hop
 from migkit.util import which
+from tests import servers
 from tests.conftest import needs_docker
 
 pytestmark = [needs_docker,
@@ -25,8 +26,9 @@ pytestmark = [needs_docker,
                                  reason="the source's own client is not"
                                         " installed here")]
 
-SRC, DST = "migkit-ship-my-src", "migkit-ship-my-dst"
-PORT = {SRC: 16412, DST: 16413}
+SRC = servers.name("migkit-ship-my-src")
+DST = servers.name("migkit-ship-my-dst")
+PORT = {SRC: servers.private_port(0), DST: servers.private_port(1)}
 
 TABLE = ("create table orders (id bigint primary key, item varchar(40)"
          " not null, qty int, at datetime(6), note varbinary(16),"
@@ -71,7 +73,8 @@ def pair():
             _ready(name)
             _my(name, "create database app", "mysql")
             _my(name, TABLE)
-        _my(SRC, "insert into orders with recursive g(n) as (select 1 union"
+        _my(SRC, "set session cte_max_recursion_depth = 20000;"
+                 "insert into orders with recursive g(n) as (select 1 union"
                  " all select n + 1 from g where n < 12000) select n,"
                  " concat('item-', n), n % 7, timestamp('2026-10-01') +"
                  " interval n minute, unhex(md5(n)), n / 3 from g")
@@ -154,3 +157,40 @@ def test_ranges_go_as_the_bulk_loads_lines_and_are_proved_by_the_target(
     assert any("read again from the source over the link" in m
                for m in said), said
     assert _same()
+
+
+def test_the_export_reads_nothing_of_the_target_and_the_schema_travels(hop):
+    """The target is down, and its table not there, while the seed is
+    exported beside the source: the lines' columns come from the source
+    alone and travel in the manifest, and the load beside the target holds
+    its table to them."""
+    from migkit.engines.mysql import MySQLEngine
+    _my(DST, "drop table orders")
+    subprocess.run(["docker", "stop", DST], check=True, capture_output=True)
+    try:
+        got, said = _carry(hop)
+        assert got["app"].half == "export", said
+    finally:
+        subprocess.run(["docker", "start", DST], check=True,
+                       capture_output=True)
+        _ready(DST)
+    store = carriers.LocalStore(hop.options["ship"]["path"])
+    w = ship._Work(hop, MySQLEngine(hop), "app", "full", lambda m: None)
+    manifest = ship.read_manifest(w, store, ship.seal_at(store, hop, "app"))
+    (orders,) = manifest["tables"]
+    assert orders["format"] == "load lines", orders["because"]
+    assert orders["load"]["types"]["amount"] == "decimal"
+    assert orders["load"]["names"] == ["id", "item", "qty", "at", "note",
+                                       "amount"]
+    got, said = _carry(hop)
+    assert got["app"].half == "load", said
+    assert _same()
+    # a target that cannot take the lines is refused by name, not loaded
+    # wrongly: its column is another type than the manifest's
+    _my(DST, "drop table orders")
+    _my(DST, "create table orders (id bigint primary key, item varchar(40),"
+             " qty int, at datetime(6), note varbinary(16), amount text)")
+    (hop.report_dir("app") / ship.LOAD_STATE).unlink()
+    with pytest.raises(SystemExit) as e:
+        _carry(hop)
+    assert "amount" in str(e.value), e.value
