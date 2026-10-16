@@ -150,7 +150,7 @@ What is written for someone to hand over:
 `docs/web.md`). It listens on 127.0.0.1 unless `MIGKIT_UI_BIND` says
 otherwise, and then only with TLS - its own certificate, or a reverse
 proxy named in `MIGKIT_WEB_PROXIES`, the only connection answered and
-the only forwarded headers read. It answers only to the name in
+the only forwarded headers read. The one exception is `MIGKIT_WEB_PLAIN=on`, which the shipped container sets and which is said again at every start (`migkit/web/server.py`). It answers only to the name in
 `MIGKIT_WEB_URL` and those `MIGKIT_UI_HOSTS` adds.
 * Who: signed in by the organisation's provider (OpenID Connect with
   PKCE, the ID token checked against the provider's keys; or SAML, only a
