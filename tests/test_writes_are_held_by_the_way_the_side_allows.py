@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from migkit import decide, freeze
+from migkit import capabilities as caps, decide, freeze
 from migkit.config import Endpoint, Hop
 
 
@@ -82,8 +82,11 @@ def test_an_engine_migkit_does_not_hold_says_why():
     assert [r.name for r in freeze.hold_for(hop, _Eng("dsql"),
                                             "dst").keep_rungs()] == [
         "pgw_grants"]
-    # an engine nobody declared falls to the gap's item, never to a way
-    assert decide.WAYS["writes held"]["*"] == (decide.NOT_YET, "F2")
+    # an engine nobody declared falls to the gap's item, never to a way:
+    # the freeze's own open row (F2 is done; a not-yet cell names an open
+    # row, `decide.unowned_gaps`)
+    assert decide.WAYS["writes held"]["*"] == (decide.NOT_YET, "F2.freeze")
+    assert not caps.backlog_status()["F2.freeze"].startswith("DONE")
 
 
 def test_the_whole_server_goes_first_where_it_is_all_the_hops(

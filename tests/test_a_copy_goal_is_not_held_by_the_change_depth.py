@@ -130,10 +130,6 @@ def test_a_copy_on_a_source_without_row_metadata_is_not_held(
 
 
 @needs_docker
-@pytest.mark.xfail(strict=True, reason=(
-    "W15J-MYBULK (W16L): past the assessment, the MySQL bulk copy's one"
-    " trial on the default profile stops with 'a failure no class here"
-    " describes' and the copy is held"))
 def test_a_copy_on_a_source_without_row_metadata_completes(
         my_pair, tmp_path):  # noqa: F811
     """The same copy completes, every row equal on both sides."""

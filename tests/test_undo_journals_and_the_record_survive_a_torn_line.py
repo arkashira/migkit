@@ -18,10 +18,18 @@ ST12, ST13, ST15, ST16, SEC9, SEC15).
 """
 import hashlib
 import json
+import pathlib
 
 import pytest
 
 from migkit import audit, durable, evidence, repairlog
+
+
+def _on_disk(path):
+    """The bytes on the disk, read by a plain path: the hop's own path
+    opens what it sealed (`EvidencePath.read_bytes`), so it cannot show
+    them sealed."""
+    return pathlib.Path(str(path)).read_bytes()
 
 
 def _sealed_root(tmp_path, monkeypatch):
@@ -94,7 +102,7 @@ def test_every_way_a_value_file_is_opened_seals_or_is_refused(
     with (root / "data-t.bin").open("wb") as f:
         f.write(b"secret-value")
     for name in ("undo.sql", "data-t.bin"):
-        raw = (root / name).read_bytes()
+        raw = _on_disk(root / name)
         assert raw.startswith(evidence.AGE) and b"secret" not in raw, name
     assert (root / "data-t.bin").read_bytes() == b"secret-value"
     with (root / "data-t.bin").open("rb") as f:
@@ -105,8 +113,7 @@ def test_every_way_a_value_file_is_opened_seals_or_is_refused(
         assert "at_rest" in str(e.value), mode
     # a file migkit writes whole through `durable` is sealed too
     durable.write_json(root / "conflicts-parked.json", {"rows": "secret"})
-    assert (root / "conflicts-parked.json").read_bytes().startswith(
-        evidence.AGE)
+    assert _on_disk(root / "conflicts-parked.json").startswith(evidence.AGE)
     assert durable.read_state(root / "conflicts-parked.json", "state") == \
         {"rows": "secret"}
     durable.append_lines(root / "conflicts.jsonl", ['{"k": "secret"}'])

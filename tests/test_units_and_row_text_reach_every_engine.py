@@ -220,9 +220,17 @@ def test_sql_server_charset_says_from_the_shared_plan_alone():
     assert "U+FFFD" in bad.detail
 
 
-def test_sql_server_row_parity_climbs_to_row_text():
+def _mssql_parity(tmp_path):
+    # the row text rung keeps the ranges it proved beside the hop's reports
     eng = MSSQLEngine.__new__(MSSQLEngine)
+    eng.hop = SimpleNamespace(report_dir=lambda db=None: tmp_path,
+                              options={})
     eng._qualified = lambda side, db, t: t
+    return eng
+
+
+def test_sql_server_row_parity_climbs_to_row_text(tmp_path):
+    eng = _mssql_parity(tmp_path)
     held = {"src": [['{"id":1}'], ['{"id":2}']],
             "dst": [['{"id":1}'], ['{"id":3}']]}
 
@@ -239,9 +247,8 @@ def test_sql_server_row_parity_climbs_to_row_text():
     assert a == b
 
 
-def test_sql_server_row_parity_says_when_no_way_is_left():
-    eng = MSSQLEngine.__new__(MSSQLEngine)
-    eng._qualified = lambda side, db, t: t
+def test_sql_server_row_parity_says_when_no_way_is_left(tmp_path):
+    eng = _mssql_parity(tmp_path)
 
     def cmd(side, db, sql):
         raise RuntimeError("refused")
@@ -316,7 +323,7 @@ def _mysql(monkeypatch, held, ranges=((None, None),), col=None):
     eng._scope = lambda side, db, t: t
     eng.row_filter = lambda db, t: None
     eng.hop = SimpleNamespace(report_dir=lambda db=None: Path(str(held[
-        "dir"])))
+        "dir"])), options={})
     eng.read = []
 
     def q(side, sql, args=None):
@@ -368,9 +375,9 @@ def test_mysql_row_parity_says_when_no_way_is_left(tmp_path, monkeypatch):
     assert r.status == "error" and (a, b) == (0, 0)
 
 
-def test_sql_server_row_text_reads_a_key_range_at_a_time(monkeypatch):
-    eng = MSSQLEngine.__new__(MSSQLEngine)
-    eng._qualified = lambda side, db, t: t
+def test_sql_server_row_text_reads_a_key_range_at_a_time(tmp_path,
+                                                        monkeypatch):
+    eng = _mssql_parity(tmp_path)
     monkeypatch.setattr(scanplan, "plan_most", lambda e, db: 2)
     eng.scan_cuts = lambda db, t, most: ["[id] < 10", "[id] >= 10"]
     read = []
@@ -391,6 +398,9 @@ def _generic(path, fits, ranged):
     from migkit.engines.base import Result
     from migkit.engines.generic import GenericEngine
     eng = GenericEngine.__new__(GenericEngine)
+    # a hop writing no column transformed: the server digest may stand
+    eng.hop = SimpleNamespace(engine="generic", options={},
+                              masks=lambda db, *parts: {})
     eng.compare_way = lambda t: (SimpleNamespace(path=path, reason="r"), {})
     eng._fits = lambda f: fits
     eng._ranged_result = ranged

@@ -24,19 +24,7 @@ plain = servers.fixture("mysql")
 HOP = types.SimpleNamespace(name="t")
 
 
-#: left after W16L: the server case is not yet met on either profile -
-#: the default one is held back before any copy by its D0 change reading
-#: (W15J-D0, W16M), and on the rowmeta one the fallback's run fails a
-#: check of this case (W16L-LEFT, said in the ticket's report)
-LEFT = "W16L-LEFT: the fallback run on the rowmeta pair is not yet whole"
-D0 = "W15J-D0: the default profile's copy is held back by its D0 reading"
-
-
-@pytest.fixture(params=[
-    pytest.param("rowmeta", marks=pytest.mark.xfail(strict=True,
-                                                     reason=LEFT)),
-    pytest.param("plain", marks=pytest.mark.xfail(strict=True,
-                                                  reason=D0))])
+@pytest.fixture(params=["rowmeta", "plain"])
 def pair(request):
     got = request.getfixturevalue(request.param)
     return Side("mysql", got.src, got.dst)

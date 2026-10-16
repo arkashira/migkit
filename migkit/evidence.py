@@ -105,27 +105,42 @@ class EvidencePath(type(pathlib.Path())):
                 return recipients
         return None
 
+    def _raw_read(self):
+        """The bytes on disk as they lie. `pathlib` reads and writes through
+        `open`, which this class answers sealed: a read or write of the
+        file's own bytes goes beneath it, or each called the other until
+        the stack ran out."""
+        import io
+        with io.open(self, "rb") as f:
+            return f.read()
+
+    def _raw_write(self, data):
+        import io
+        data = bytes(data)
+        with io.open(self, "wb") as f:
+            f.write(data)
+        return len(data)
+
     def write_bytes(self, data):
         who = self._sealing()
-        return super().write_bytes(_seal(bytes(data), who) if who
-                                   else data)
+        return self._raw_write(_seal(bytes(data), who) if who else data)
 
     def write_text(self, data, encoding=None, errors=None, newline=None):
         who = self._sealing()
         if not who:
             return super().write_text(data, encoding=encoding,
                                       errors=errors, newline=newline)
-        super().write_bytes(_seal(data.encode(encoding or "utf-8"), who))
+        self._raw_write(_seal(data.encode(encoding or "utf-8"), who))
         return len(data)
 
     def read_bytes(self):
-        raw = super().read_bytes()
+        raw = self._raw_read()
         if raw.startswith(AGE):
             return _open(raw)
         return raw
 
     def read_text(self, encoding=None, errors=None):
-        raw = super().read_bytes()
+        raw = self._raw_read()
         if raw.startswith(AGE):
             return _open(raw).decode(encoding or "utf-8",
                                      errors or "strict")
