@@ -20,7 +20,12 @@ Rows are read by key ranges: a digest reads the ranges the table's own
 sample of its keys splits it into side by side. A row is written whole:
 deleted and its cells set again in one mutation, which the service
 applies atomically, so a batch written again lands on itself; each row's
-own status is read back, and a refused row stops the write.
+own status is read back, and a refused row stops the write. Requests are
+sized to what the target takes (`decide.request_limit`: the limit a
+refusal named, else half of a request refused for its size, else the
+documented bound); a row too wide for one goes as `decide.cell_way` says -
+its cells across requests, or a cell too wide appended in pieces and read
+back whole - or is refused before anything of it is sent.
 
 Its changes are its change stream's (a table's `change_stream_config`),
 read partition by partition by the change-topic reader: each partition a
@@ -48,6 +53,53 @@ KEY = "row_key"
 FAMILY = "c"
 #: rows written in one call, each with its own status back
 ROWS = 500
+#: the service's documented bound on one cell's value (Bigtable's quotas and
+#: limits: 100 MB a cell, 256 MB a row) - the last rung of
+#: `decide.request_limit`, held only until a request is refused for its size
+DOCUMENTED_CELL = 100 * 2 ** 20
+#: what a request takes beside its cells' bytes, and a cell beside its value
+SLACK = 1024
+CELL = 32
+#: the status a request refused for its size carries
+_EXHAUSTED = 8
+_TOO_LARGE = re.compile(r"larger than max \((\d+) vs\.? (\d+)\)")
+
+
+def size_refusal(text, sent):
+    """(the limit a refusal names, the bound one refused for its size
+    gives) - each None where it says neither: a request refused for its
+    size without a figure bounds the limit below half of what it carried."""
+    m = _TOO_LARGE.search(text or "")
+    if m:
+        return int(m.group(2)), None
+    said = (text or "").lower()
+    if "resource_exhausted" in said or "resource exhausted" in said \
+            or "too large" in said:
+        return None, max(1, int(sent) // 2)
+    return None, None
+
+
+def _bytes(key, cells):
+    """What a row's request carries: its key and each cell's family,
+    qualifier and value."""
+    return len(key) + sum(len(f) + len(q) + len(v) + CELL
+                          for f, q, v, _ in cells)
+
+
+def _whole_client(**kw):
+    """The SDK's client with its data client made beside it: the SDK makes
+    that one on the first write and reads the emulator's address then, so
+    made later it would leave the emulator for the service itself."""
+    from google.cloud import bigtable
+    made = bigtable.Client(**kw)
+    made._veneer_data_client  # noqa: B018 - made while the address is set
+    return made
+
+
+def _one_ms(ts):
+    from google.cloud.bigtable.row_filters import TimestampRange
+    return TimestampRange(start=ts, end=ts + datetime.timedelta(
+        milliseconds=1))
 
 
 def qualifier_text(q):
@@ -76,6 +128,21 @@ class BigtableEngine(NeutralCopier, Engine):
     CHANGE_POINT_READS_ONLY = True
     READS_AHEAD = False
 
+    @property
+    def _sizes(self):
+        """{(side, db): what refusals of this run said of a request's size}"""
+        return self.__dict__.setdefault("_size_seen", {})
+
+    @property
+    def request_limits(self):
+        """{(side, db): the `Choice` of the bytes a request carries}"""
+        return self.__dict__.setdefault("_request_limits", {})
+
+    @property
+    def cell_ways(self):
+        """[(table, `Choice`)] of each row too wide for one request"""
+        return self.__dict__.setdefault("_cell_ways", [])
+
     # ---- where it is ------------------------------------------------------
 
     def tail_where(self, db, token):
@@ -99,7 +166,7 @@ class BigtableEngine(NeutralCopier, Engine):
 
             from . import gcp
             ep = self._ep(side)
-            held[side] = gcp.client(bigtable.Client, "BIGTABLE_EMULATOR_HOST",
+            held[side] = gcp.client(_whole_client, "BIGTABLE_EMULATOR_HOST",
                                     ep, project=gcp.project(ep), admin=True)
         return held[side]
 
@@ -338,51 +405,177 @@ class BigtableEngine(NeutralCopier, Engine):
         return json.dumps(spec)
 
     def _direct(self, side, db, table, names, classes, values):
-        """A row's mutation: the row deleted and every cell set again,
-        applied as one."""
+        """(row key, [(family, qualifier, value, timestamp)]) of a row as it
+        is written: deleted and every cell set again."""
         from .. import described as desc
-        t = self._table(side, db, table)
         got = self._described(side, db, table)
         row = dict(zip(names, values))
         if got is not None:
             cols, key = got
             kc = dict(cols)
-            direct = t.direct_row(desc.key_text(kc, key, row).encode("utf-8"))
-            direct.delete()
-            for n, v in row.items():
-                if n in key or v is None:
-                    continue
-                direct.set_cell(FAMILY, n.encode("utf-8"),
-                                desc.cell_of(kc.get(n), v),
-                                timestamp=_EPOCH)
-            return direct
-        direct = t.direct_row(bytes(row[KEY]))
-        direct.delete()
-        for fam, cells in row.items():
-            if fam == KEY or not cells:
+            return desc.key_text(kc, key, row).encode("utf-8"), [
+                (FAMILY, n.encode("utf-8"), desc.cell_of(kc.get(n), v),
+                 _EPOCH) for n, v in row.items()
+                if n not in key and v is not None]
+        cells = []
+        for fam, versions_of in row.items():
+            if fam == KEY or not versions_of:
                 continue
-            if isinstance(cells, str):
-                cells = json.loads(cells)
-            for q, versions in cells.items():
-                for ts, value in versions:
-                    direct.set_cell(fam, qualifier_bytes(q),
-                                    base64.b64decode(value),
-                                    timestamp=_EPOCH + datetime.timedelta(
-                                        microseconds=int(ts)))
+            if isinstance(versions_of, str):
+                versions_of = json.loads(versions_of)
+            for q, versions in versions_of.items():
+                cells.extend((fam, qualifier_bytes(q), base64.b64decode(v),
+                              _EPOCH + datetime.timedelta(
+                                  microseconds=int(ts)))
+                             for ts, v in versions)
+        return bytes(row[KEY]), cells
+
+    def _limit(self, side, db):
+        """The bytes one request to `side` carries (`decide.request_limit`),
+        from what its refusals of this run said, else the documented bound."""
+        from .. import decide
+        seen = self._sizes.setdefault((side, db), {})
+        got, choice = decide.request_limit({**seen,
+                                            "documented": DOCUMENTED_CELL})
+        self.request_limits[(side, db)] = choice
+        return got
+
+    def _learn(self, side, db, text, sent):
+        """Whether a refusal was for a request's size and lowered the limit:
+        the figure it names, or half of what it refused. A refusal that
+        lowers nothing is not one to plan again on."""
+        before = self._limit(side, db)
+        named, bound = size_refusal(text, sent)
+        seen = self._sizes.setdefault((side, db), {})
+        if named:
+            seen["reported"] = named
+        elif bound:
+            seen["probed"] = min(bound, seen.get("probed") or bound)
+        else:
+            return False
+        return self._limit(side, db) < before
+
+    def _mutate(self, t, side, db, table, rows, size):
+        """True where every row of one request was applied; False where the
+        request was refused for its size and the limit lowered (it applied
+        nothing, and a row applied beside it lands on itself again); any
+        other refusal stops the write."""
+        try:
+            statuses = t.mutate_rows(rows)
+        except Exception as e:  # the transport's own refusal of the request
+            if self._learn(side, db, str(e), size):
+                return False
+            raise
+        sized = [s for s in statuses if getattr(s, "code", 0) == _EXHAUSTED]
+        if sized and self._learn(side, db, str(sized[0]), size):
+            return False
+        bad = [(r.row_key, s) for r, s in zip(rows, statuses)
+               if getattr(s, "code", 0)]
+        if bad:
+            raise SystemExit(f"{table}: the target refused {len(bad)}"
+                             f" rows: {str(bad[0][1])[:150]}")
+        return True
+
+    @staticmethod
+    def _row_of(t, key, cells, delete=True):
+        direct = t.direct_row(key)
+        if delete:
+            direct.delete()
+        for fam, q, value, ts in cells:
+            direct.set_cell(fam, q, value, timestamp=ts)
         return direct
 
+    def _wide(self, t, side, db, table, key, cells, stamps):
+        """A row too wide for one request, written as `decide.cell_way`
+        says, in order from its delete; False where a request of it was
+        refused for its size (the limit lowered: the row is planned again
+        from its delete)."""
+        from .. import decide
+        limit = self._limit(side, db)
+        got = decide.cell_way({
+            "row": _bytes(key, cells), "limit": limit, "slack": SLACK,
+            "widest": max((_bytes(b"", [c]) for c in cells), default=0),
+            "appends": True, "timestamps": stamps})
+        self.cell_ways.append((table, got))
+        if got.path == "refused":
+            raise SystemExit(f"{table}: a row is not written - {got.reason}."
+                             " Nothing of it was sent")
+        room = limit - SLACK - len(key)
+        steps, group, used = [], [], 0
+        for cell in cells:
+            n = _bytes(b"", [cell])
+            if group and used + n > room:
+                steps.append(("set", group))
+                group, used = [], 0
+            if n <= room:
+                group.append(cell)
+                used += n
+                continue
+            fam, q, value, ts = cell
+            piece = room - (n - len(value))
+            steps.append(("set", [(fam, q, value[:piece], ts)]))
+            steps.extend(("append", (fam, q, value[at:at + piece], ts),
+                          value if at + piece >= len(value) else None)
+                         for at in range(piece, len(value), piece))
+        if group:
+            steps.append(("set", group))
+        for i, step in enumerate(steps):
+            if step[0] == "set":
+                part = step[1]
+                if not self._mutate(t, side, db, table, [self._row_of(
+                        t, key, part, delete=i == 0)],
+                        _bytes(key, part) + SLACK):
+                    return False
+                continue
+            (fam, q, piece_of, ts), whole = step[1], step[2]
+            ar = t.append_row(key)
+            ar.append_cell_value(fam, q, piece_of)
+            try:
+                back = ar.commit()
+            except Exception as e:
+                if self._learn(side, db, str(e), len(piece_of) + SLACK):
+                    return False
+                raise
+            if whole is None:
+                continue
+            have = (back.get(fam, {}).get(q) or [(None,)])[0][0]
+            if have != whole:
+                raise SystemExit(f"{table}: a value written in pieces read"
+                                 " back other than it was sent; the row is"
+                                 " written again from its delete next run")
+            # the first piece's own version, under the whole value
+            done = t.direct_row(key)
+            done.delete_cell(fam, q, time_range=_one_ms(ts))
+            if not self._mutate(t, side, db, table, [done], SLACK):
+                return False
+        return True
+
     def _send(self, side, db, table, rows):
-        """Rows mutated in calls of `ROWS`, each row's own status read
-        back: a row the service refused stops the write."""
+        """Rows ((key, cells)) written in order, each deleted and its cells
+        set again, in requests the target takes (`decide.request_limit`); a
+        row too wide for one as `decide.cell_way` says. Each row's own
+        status is read back and a refused row stops the write. A request
+        refused for its size applied nothing: the limit is lowered and its
+        rows sent again from their deletes, so a repeat lands on itself."""
         t = self._table(side, db, table)
-        for i in range(0, len(rows), ROWS):
-            part = rows[i:i + ROWS]
-            statuses = t.mutate_rows(part)
-            bad = [(r.row_key, s) for r, s in zip(part, statuses)
-                   if getattr(s, "code", 0)]
-            if bad:
-                raise SystemExit(f"{table}: the target refused {len(bad)}"
-                                 f" rows: {str(bad[0][1])[:150]}")
+        stamps = self._described(side, db, table) is None
+        i = 0
+        while i < len(rows):
+            limit = self._limit(side, db)
+            batch, size = [], SLACK
+            while i + len(batch) < len(rows) and len(batch) < ROWS:
+                need = _bytes(*rows[i + len(batch)])
+                if batch and size + need > limit:
+                    break
+                batch.append(rows[i + len(batch)])
+                size += need
+            if len(batch) == 1 and size > limit:
+                done = self._wide(t, side, db, table, *batch[0], stamps)
+            else:
+                done = self._mutate(t, side, db, table, [
+                    self._row_of(t, k, c) for k, c in batch], size)
+            if done:
+                i += len(batch)
 
     def neutral_write(self, side, db, table, columns, rows):
         self._target_only(side, "write rows")
@@ -409,13 +602,9 @@ class BigtableEngine(NeutralCopier, Engine):
     def _apply_deletes(self, side, db, table, keys):
         t = self._table(side, db, table)
         pk = self.neutral_key(side, db, table)
-        out = []
-        for key in keys:
-            direct = t.direct_row(self._row_key(side, db, table,
-                                                [key[k] for k in pk]))
-            direct.delete()
-            out.append(direct)
-        self._send(side, db, table, out)
+        self._send(side, db, table, [
+            (self._row_key(side, db, table, [key[k] for k in pk]), [])
+            for key in keys])
 
     def _apply_delete(self, side, db, table, key):
         self._apply_deletes(side, db, table, [key])

@@ -2,7 +2,7 @@
   "note": "Internal. What each wrapped tool can do, taken from its pinned release's documentation, set against the tool-use registry (migkit/tooluse.py). A capability names the registry options it covers as 'command option' (command empty for a program without subcommands); its state is computed, never written. 'candidate' marks a capability that would deepen the rung named in 'rung' and is worth a backlog row while it is unused. 'unaccounted' holds the libraries and programs called with no tool-use account: capabilities from the pinned release and no options, so no state; each gets an account option by option once one exists.",
   "import_aliases": {
     "boto3": "aws-sdk", "botocore": "aws-sdk", "azure": "azure-sdk",
-    "google": "google-api-client", "googleapiclient": "google-api-client",
+    "google": "google-api-client", "snowflake.ingest": "snowpipe-streaming", "googleapiclient": "google-api-client",
     "data_validation": "dvt", "gremlin_python": "gremlinpython",
     "Tea": "alibabacloud-sdk", "alibabacloud_credentials": "alibabacloud-sdk",
     "alibabacloud_tea_openapi": "alibabacloud-sdk",

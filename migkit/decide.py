@@ -7316,3 +7316,85 @@ class ServerRung(Rung):
         """The first need that does not hold, in words, or None."""
         _, out = prune([self], facts)
         return out[0][1] if out else None
+
+# ---- what one write request carries to a target, and how a row too wide for
+# ---- it arrives (backlog BIGTABLE.cell-limit) --------------------------------
+def request_limit(facts):
+    """(the bytes one write request may carry to the target, `Choice`), the
+    figure standing on what was seen of the target: "reported" where it
+    refused a request naming its own limit; "probed" where a request it
+    refused for its size and a smaller one it took bound it (the writer
+    halves from the refused size, and a request refused for its size
+    applied nothing); "documented" - last, and said so - the service's
+    documented bound, where no request of the run has been refused yet.
+    `facts`: {"reported", "probed", "documented": bytes, or None}."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    got = climb("the most one write request carries to the target", (
+        Rung("reported", "the limit the target named when it refused a"
+             " request", needs=(
+                 Need("a refusal that named the target's limit",
+                      lambda x: bool(x.get("reported")),
+                      "no request was refused naming the target's limit"),)),
+        Rung("probed", "below the smallest request the target refused for"
+             " its size", needs=(
+                 Need("a request refused for its size",
+                      lambda x: bool(x.get("probed")),
+                      "no request was refused for its size, so none bounds"
+                      " what the target takes"),)),
+        Rung("documented", "the service's documented bound, until a request"
+             " of the run is refused for its size",
+             because="nothing of the target has bounded a request yet; the"
+                     " documented figure is the service's, which an"
+                     " emulator or a proxy may hold lower")), f)
+    return int(f.get(got.path) or 0), got
+
+
+def cell_way(facts):
+    """The `Choice` for how a row reaches a target whose request holds at
+    most `limit` bytes: "whole" - the row in one request, applied as one;
+    "cells" - the row deleted and its cells set across requests in order,
+    each cell whole with its own timestamp, where every cell fits a
+    request; "pieces" - a cell wider than a request set from its first
+    piece and the rest appended in order, read back whole, where the target
+    appends to a cell and the table carries no cell timestamps (an appended
+    cell takes the server's time); else "refused" before anything of the
+    row is written. A row split across requests is not applied as one: a
+    stop part-way leaves it partial until the batch is written again, which
+    starts from its delete, so a repeat lands on itself. `facts`: {"row":
+    the row's request bytes, "widest": its widest cell's, "limit", "slack":
+    what a request takes beside its cells, "appends", "timestamps"}."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    limit, slack = int(f.get("limit") or 0), int(f.get("slack") or 0)
+    said = (f"the row {int(f.get('row') or 0):,} bytes, its widest cell"
+            f" {int(f.get('widest') or 0):,}; the target takes {limit:,}"
+            " bytes a request")
+    return climb("how a row reaches a target that bounds a request", (
+        Rung("whole", "the row in one request, applied as one",
+             because=said, needs=(
+                 Need("the row within one request",
+                      lambda x: int(x.get("row") or 0) + slack <= limit,
+                      lambda x: f"the row, {int(x.get('row') or 0):,} bytes,"
+                      f" is past the {limit:,} bytes a request takes"),)),
+        Rung("cells", "the row's cells across requests, each whole with its"
+             " timestamp", because=said, needs=(
+                 Need("every cell within one request",
+                      lambda x: int(x.get("widest") or 0) + slack <= limit,
+                      lambda x: f"a cell of {int(x.get('widest') or 0):,}"
+                      f" bytes is past the {limit:,} bytes a request"
+                      " takes"),)),
+        Rung("pieces", "a cell too wide for a request set from its first"
+             " piece and the rest appended, read back whole", because=said,
+             needs=(
+                 Need("the target appends to a cell",
+                      lambda x: bool(x.get("appends")),
+                      "the target has no way to append to a cell"),
+                 Need("the table carries no cell timestamps",
+                      lambda x: not x.get("timestamps"),
+                      "this table carries each cell's timestamp, and a cell"
+                      " appended to takes the server's time"),
+                 Need("room for a piece beside a request's own bytes",
+                      lambda x: limit > 2 * slack,
+                      f"a request of {limit:,} bytes leaves no room for a"
+                      " piece"))),
+        Rung("refused", "refused before anything of the row is written",
+             because=said)), f)

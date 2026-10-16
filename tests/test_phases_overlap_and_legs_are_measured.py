@@ -9,7 +9,7 @@ import re
 
 import pytest
 
-from migkit import carriers, movers, planner
+from migkit import carriers, legs, movers, planner
 from migkit.guarantees import Semantics
 
 

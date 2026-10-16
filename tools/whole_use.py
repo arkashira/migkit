@@ -81,11 +81,13 @@ def walk():
             if isinstance(node, ast.Import):
                 mods = [a.name for a in node.names]
             elif isinstance(node, ast.ImportFrom) and node.level == 0:
-                mods = [node.module or ""]
+                # each name a module may be (`from google.cloud import
+                # bigtable`): a namespace package's libraries share a top
+                mods = [f"{node.module}.{a.name}" for a in node.names]
             for m in mods:
                 top = m.split(".")[0]
                 if top and top not in std and top != "migkit":
-                    imports[top].add(rel)
+                    imports[m].add(rel)
             if not isinstance(node, ast.Call):
                 continue
             fn = node.func
@@ -108,10 +110,22 @@ def walk():
 
 
 def _tool_for_import(imp, cat, names):
-    alias = cat["import_aliases"].get(imp)
-    if alias in names:
-        return alias
-    return next((n for n in names if _matches(imp, n)), None)
+    """The tool a dotted import is a call of: its longest prefix an alias
+    names, or a tool it is (or is inside of) - the longest such, so
+    `google.cloud.bigquery_storage_v1` is the storage library, not the
+    query one - else the first tool its top package may stand for."""
+    parts = imp.split(".")
+    for i in range(len(parts), 0, -1):
+        p = ".".join(parts[:i])
+        alias = cat["import_aliases"].get(p)
+        if alias in names:
+            return alias
+        a = _norm(p)
+        inside = [n for n in names
+                  if a == _norm(n) or a.startswith(_norm(n) + "_")]
+        if inside:
+            return max(inside, key=lambda n: len(_norm(n)))
+    return next((n for n in names if _matches(parts[0], n)), None)
 
 
 def sites(cat, names):
@@ -126,13 +140,15 @@ def sites(cat, names):
         reads = tooluse.REGISTRY[n].reads
         for rel in (reads[0] if reads else ()):
             out[n].add("migkit/" + rel.partition("::")[0])
-    loose = []
+    loose, unnamed = [], collections.defaultdict(set)
     for imp, files in sorted(imports.items()):
         tool = _tool_for_import(imp, cat, names)
         if tool:
             out[tool] |= files
         else:
-            loose.append(("library", imp, sorted(files)))
+            unnamed[imp.split(".")[0]] |= files
+    loose += [("library", imp, sorted(f)) for imp, f in sorted(
+        unnamed.items())]
     for prog, files in sorted(programs.items()):
         tool = cat["program_aliases"].get(prog, prog)
         if tool in out:

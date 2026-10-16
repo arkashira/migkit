@@ -1529,6 +1529,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: the target refused <...> rows: <...>
 
+* <...>: a row is not written - <...>. Nothing of it was sent
+
+* <...>: a value written in pieces read back other than it was sent; the row is written again from its delete next run
+
 * <...>: <...> were made by migkit from another engine's rows, and are followed from that engine, not from here
 
 ## Firestore (native mode) and Firestore in Datastore mode
