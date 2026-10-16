@@ -678,7 +678,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
         whether an index holds anything."""
         rows = []
         for batch in self.neutral_batches(side, db, table, columns,
-                                          limit or 1000, where):
+                                          limit, where):
             rows += batch
             if limit and len(rows) >= limit:
                 return rows[:limit], None
@@ -709,7 +709,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
         from .. import canon
         classes = [c for _, c in columns]
         total, n = 0, 0
-        for batch in self.neutral_batches(side, db, table, columns, 2000,
+        for batch in self.neutral_batches(side, db, table, columns, None,
                                           where):
             k, total = canon.fold_rows(classes, batch, total)
             n += k

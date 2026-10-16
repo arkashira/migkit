@@ -940,7 +940,7 @@ class TeradataEngine(DbapiRows, Engine):
         classes = [c for _, c in columns]
         total, n = 0, 0
         for batch in self.neutral_batches(side, db, table, columns,
-                                          size=5000, where=where):
+                                          where=where):
             k, total = canon.fold_rows(classes, batch, total)
             n += k
         return (n, str(total))

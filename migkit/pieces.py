@@ -377,7 +377,9 @@ def sample_sizes(eng, side, db, table, columns, most_rows,
             if not rows or after is None:
                 return lengths, True
         return lengths, False
-    for batch in eng.neutral_batches(side, db, table, columns, 16):
+    from . import decide
+    for batch in eng.neutral_batches(side, db, table, columns,
+                                decide.cursor_rows(most_rows)):
         for r in batch:
             n = row_bytes(r)
             lengths.append(n)

@@ -110,7 +110,7 @@ class ProvedDigest:
             if choice.rung.name == "here":
                 self.folded_last = True
                 return canon.fold_batches(columns, self.neutral_batches(
-                    side, db, table, columns, 5000, where))
+                    side, db, table, columns, None, where))
             row = canon.row_expr(self.PROVED_DIALECT, list(columns))
             got = self._proved_rows(
                 side, db, f"select count(*),"

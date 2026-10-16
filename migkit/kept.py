@@ -184,8 +184,12 @@ class Store:
             return {int(b): _leaf(v) for b, v in rows}
         out = {}
         order = sorted(buckets)
-        for i in range(0, len(order), 500):
-            part = order[i:i + 500]
+        # page: the variables one statement of this store takes, as its
+        # library says, less the one its name takes
+        at_once = max(1, self.conn.getlimit(
+            sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) - 1)
+        for i in range(0, len(order), at_once):
+            part = order[i:i + at_once]
             rows = self.conn.execute(
                 f"select b, v from leaves where name = ? and b in"
                 f" ({', '.join('?' * len(part))})", [name] + part)

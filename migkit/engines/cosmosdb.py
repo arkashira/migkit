@@ -432,7 +432,7 @@ class CosmosEngine(NeutralCopier, Engine):
                      where=None):
         rows = []
         for batch in self.neutral_batches(side, db, table, columns,
-                                          limit or 1000, where):
+                                          limit, where):
             rows += batch
             if limit and len(rows) >= limit:
                 return rows[:limit], None

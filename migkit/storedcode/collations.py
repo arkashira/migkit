@@ -77,6 +77,10 @@ from dataclasses import dataclass, field
 
 from .. import decide, masking
 
+#: SQL Server's own limits to one insert: 2,100 parameters a request and
+#: 1,000 rows one VALUES list takes (SQL Server docs)
+MSSQL_PARAMETERS, MSSQL_VALUES_ROWS = 2100, 1000
+
 #: text columns asked per database, keys and unique columns first: each
 #: is a table made and asked on both sandbox servers, and on the target's
 #: again for every other collation tried
@@ -826,9 +830,12 @@ class _Side:
                 cur.executemany(f"insert into {table} (id, cls, v) values"
                                 " (:1, :2, :3)", rows)
             elif self.engine == "mssql":
-                # a thousand rows is the most one VALUES takes
-                for k in range(0, len(rows), 300):
-                    part = rows[k:k + 300]
+                # the most one VALUES takes: SQL Server's own limits
+                at_once = decide.batch_rows({
+                    "kind": decide.WRITE, "params": 3,
+                    "limit": MSSQL_PARAMETERS, "page": MSSQL_VALUES_ROWS})[0]
+                for k in range(0, len(rows), at_once):
+                    part = rows[k:k + at_once]
                     cur.execute(f"insert into {table} (id, cls, v) values "
                                 + ", ".join(["(%s, %s, %s)"] * len(part)),
                                 tuple(x for r in part for x in r))

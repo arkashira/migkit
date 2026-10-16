@@ -480,8 +480,10 @@ class CockroachEngine(PgWireEngine):
             cur = conn.cursor()
             one = "(%s, " + ", ".join(f"%s::{declared[k]}" for k in key) + ")"
             names = ", ".join(self._q(f"k{i}") for i in range(len(key)))
-            for at in range(0, len(keys), 500):
-                part = keys[at:at + 500]
+            from .. import decide
+            at_once = self.batch_size(decide.BY_KEY, len(key) + 1)
+            for at in range(0, len(keys), at_once):
+                part = keys[at:at + at_once]
                 cur.execute(f"select {names} from (values "
                             + ", ".join([one] * len(part))
                             + f") as v(n, {names}) order by n",

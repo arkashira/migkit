@@ -1682,8 +1682,10 @@ class GenericEngine(Engine):
             # resolved in place the first time it is compiled, and a list
             # held over from the previous query raises `Already resolved!`
             got = {}
-            for at in range(0, len(key_texts), self.REPAIR_BATCH):
-                batch = key_texts[at:at + self.REPAIR_BATCH]
+            from .. import decide
+            at_once = self.batch_size(decide.BY_KEY, len(key))
+            for at in range(0, len(key_texts), at_once):
+                batch = key_texts[at:at + at_once]
                 query = tbl.where(or_(*[where(k) for k in batch])).select(
                     *[getattr(this, c) for c in columns])
                 for row in conn.query(query, list):
@@ -1794,9 +1796,6 @@ class GenericEngine(Engine):
     #: nor are a span's or a table's replaced whole (`repairways`)
     ROWS_PUT_BACK = False
 
-    #: how many keys go into one `where` - the drilldown can be long and a
-    #: query per row would be a round trip per row
-    REPAIR_BATCH = 200
 
     #: what the borrowed writer's `update` will take, read off `UpdateTable`
     #: and measured: a `Decimal` raises, and so does anything else not here.
@@ -2558,7 +2557,7 @@ class GenericEngine(Engine):
     # ---- rows compared by key, and only the changed ones -------------------
 
     def _rows_by_keys(self, side, table, columns, keys):
-        """{key text: row} of the rows with these keys, `REPAIR_BATCH` keys
+        """{key text: row} of the rows with these keys, the decision's list
         a statement."""
         call, style = self._dbapi(side)
         key = self._key()
@@ -2566,9 +2565,11 @@ class GenericEngine(Engine):
         cols = ", ".join(self._quote(side, c) for c in columns)
         src = self._from(self._connect(side), table)
         got = {}
-        for i in range(0, len(keys), self.REPAIR_BATCH):
+        from .. import decide
+        at_once = self.batch_size(decide.BY_KEY, len(key))
+        for i in range(0, len(keys), at_once):
             ors, values = [], []
-            for k in keys[i:i + self.REPAIR_BATCH]:
+            for k in keys[i:i + at_once]:
                 where, _ = self._keyed_where(side, style, key, list(k),
                                              start=len(values) + 1)
                 ors.append(f"({where})")

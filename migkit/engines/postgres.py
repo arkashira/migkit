@@ -2381,10 +2381,12 @@ select json_build_object(
         values, out = list(values), []
         with self._connect(side, db) as conn:
             with conn.cursor() as cur:
-                for i in range(0, len(values), 1000):
+                from .. import decide
+                at_once = self.batch_size(decide.BY_KEY, len(match))
+                for i in range(0, len(values), at_once):
                     sql, args = self._by_key_query(
                         f'{_ident(sch)}.{_ident(tbl)}', columns, list(match),
-                        values[i:i + 1000], lambda n: f'{_ident(n)}', "%s", None,
+                        values[i:i + at_once], lambda n: f'{_ident(n)}', "%s", None,
                         "postgres")
                     cur.execute(sql, args)
                     out += [list(r) for r in cur.fetchall()]
@@ -2607,8 +2609,10 @@ select json_build_object(
         way the server allows."""
         return self._write_rules(side, db, table)["generated"]
 
-    #: Rows in one applied statement (`Engine._apply_each`).
-    APPLY_ROWS = 1000
+    #: values one statement may carry: the protocol's Bind message counts
+    #: its parameters in two bytes (PostgreSQL docs, Frontend/Backend
+    #: Protocol, Bind), so 65,535 at most (`decide.batch_rows`)
+    STATEMENT_VALUES = 65535
 
     def _keys_off(self, side, db, edges):
         """Whether the applier's sessions write without checking foreign
@@ -2730,14 +2734,17 @@ select json_build_object(
             piped.on()
 
     def _in_statements(self, conn, head, tail, values):
-        """`values` as rows of `head (...), (...) tail`, `APPLY_ROWS` a
-        statement. Where the batch's statements are piped (`_apply_net`)
+        """`values` as rows of `head (...), (...) tail`, the decision's write
+        (`batch_size`) a statement. Where the batch's statements are piped (`_apply_net`)
         none of them waits for its answer."""
         mark = "(" + ", ".join(["%s"] * len(values[0])) + ")"
         self._piping()
         with conn.cursor() as cur:
-            for at in range(0, len(values), self.APPLY_ROWS):
-                part = values[at:at + self.APPLY_ROWS]
+            from .. import decide
+            at_once = self.batch_size(decide.WRITE, len(values[0]),
+                                      rows=values)
+            for at in range(0, len(values), at_once):
+                part = values[at:at + at_once]
                 cur.execute(head + ", ".join([mark] * len(part)) + tail,
                             [v for r in part for v in r])
 
@@ -5063,7 +5070,7 @@ select json_build_object(
         text = [n for n, c in columns if c == "json"
                 and str(declared.get(n, "")).lower() in ("json", "jsonb")]
         return canon.fold_batches(columns, self.neutral_batches(
-            side, db, table, columns, 5000, where=where, as_text=text), way)
+            side, db, table, columns, None, where=where, as_text=text), way)
 
     @staticmethod
     def _quote_ident(name):
@@ -5864,8 +5871,10 @@ select json_build_object(
                  f" from {_ident(s)}.{_ident(t)}"
                  for k, (s, t, c) in owned.items()]
         out = {}
-        for i in range(0, len(parts), 200):
-            chunk = " union all ".join(parts[i:i + 200])
+        from .. import decide
+        at_once = decide.batch_rows({"kind": decide.BY_KEY})[0]
+        for i in range(0, len(parts), at_once):
+            chunk = " union all ".join(parts[i:i + at_once])
             for l in self._psql(side, db, chunk).splitlines():
                 if "|" in l:
                     key, _, v = l.rpartition("|")
@@ -5893,8 +5902,10 @@ select json_build_object(
             parts.append(f"select {_literal(k)}||e'\\t'||last_value||e'\\t'||is_called"
                          f' from {_ident(sch)}.{_ident(name)}')
         out = {}
-        for i in range(0, len(parts), 200):
-            chunk = " union all ".join(parts[i:i + 200])
+        from .. import decide
+        at_once = decide.batch_rows({"kind": decide.BY_KEY})[0]
+        for i in range(0, len(parts), at_once):
+            chunk = " union all ".join(parts[i:i + at_once])
             for l in self._psql(side, db, chunk).splitlines():
                 p = l.split("\t")
                 if len(p) == 3:
@@ -6947,11 +6958,13 @@ select json_build_object(
         """{oid: (md5, length)} of one piece of each of these objects."""
         out = {}
         with conn.cursor() as cur:
-            for i in range(0, len(oids), 500):
+            from .. import decide
+            at_once = self.batch_size(decide.BY_KEY)
+            for i in range(0, len(oids), at_once):
                 cur.execute(
                     "select o, md5(p), length(p) from (select o,"
                     " lo_get(o::oid, %s, %s) p from unnest(%s::bigint[]) o)"
-                    " x", (off, self.LO_PIECE, oids[i:i + 500]))
+                    " x", (off, self.LO_PIECE, oids[i:i + at_once]))
                 out.update({int(o): (h, int(n or 0))
                             for o, h, n in cur.fetchall()})
         conn.rollback()
@@ -7626,8 +7639,10 @@ select json_build_object(
                             f" {self._scope(db, t)}"
                             + (f" where {pred}" if pred else "")
                             + f" order by {order}")
+                from .. import decide
+                at_once = decide.cursor_rows(None)
                 while True:
-                    batch = cur.fetchmany(5000)
+                    batch = cur.fetchmany(at_once)
                     if not batch:
                         return
                     yield from batch
@@ -9929,11 +9944,13 @@ select json_build_object(
 
         def maxes(side, triples):
             out = {}
-            for i in range(0, len(triples), 200):
+            from .. import decide
+            at_once = decide.batch_rows({"kind": decide.BY_KEY})[0]
+            for i in range(0, len(triples), at_once):
                 parts = [f"select {_literal(f'{s}.{t}|')}"
                          f"||coalesce(max({_ident(c)}), 0)"
                          f" from {_ident(s)}.{_ident(t)}"
-                         for s, t, c in triples[i:i + 200]]
+                         for s, t, c in triples[i:i + at_once]]
                 for l in self._psql(side, db,
                                     " union all ".join(parts)).splitlines():
                     k, _, v = l.rpartition("|")
@@ -10500,9 +10517,6 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                    " give)" if locked else ""))
         return made, said
 
-    #: leaf partitions read in one statement at most: the statement is one
-    #: argument to psql, and Linux caps a single argument at 128 KB
-    PARTITIONS_PER_READ = 200
 
     def _deep_partitions(self, db):
         """Every partitioned table's key on both sides, and every leaf
@@ -10603,9 +10617,11 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                                     canon.row_expr("postgres", columns))
                   + "::text" if columns else "''")
         out = {}
-        for at in range(0, len(leaves), self.PARTITIONS_PER_READ):
+        from .. import decide
+        at_once = decide.batch_rows({"kind": decide.BY_KEY})[0]
+        for at in range(0, len(leaves), at_once):
             reads = []
-            for lsch, lname, bound in leaves[at:at + self.PARTITIONS_PER_READ]:
+            for lsch, lname, bound in leaves[at:at + at_once]:
                 name = f"{lsch}.{lname}"
                 out[name] = {"rows": 0, "digest": None, "bound": bound,
                              "catchall": bound == "DEFAULT"}
@@ -11365,8 +11381,11 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
             try:
                 conn.set_session(readonly=True)
                 with conn.cursor() as cur:
-                    for i in range(0, len(wanted), 1000):
-                        rows = [line.split("\t") for line in wanted[i:i + 1000]]
+                    from .. import decide
+                    at_once = self.batch_size(decide.BY_KEY, len(pks))
+                    for i in range(0, len(wanted), at_once):
+                        rows = [line.split("\t")
+                                for line in wanted[i:i + at_once]]
                         vals = ", ".join(
                             "(" + ", ".join(["%s"] * len(pks)) + ")"
                             for _ in rows)
@@ -12105,8 +12124,10 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         def fetch(side):
             out = {}
             klist = sorted(keys)
-            for i in range(0, len(klist), 500):
-                chunk = klist[i:i + 500]
+            from .. import decide
+            at_once = self.batch_size(decide.BY_KEY, len(cols))
+            for i in range(0, len(klist), at_once):
+                chunk = klist[i:i + at_once]
                 if len(cols) == 1:
                     inlist = ", ".join(esc(self._pk_unescape(k))
                                        for k in chunk)

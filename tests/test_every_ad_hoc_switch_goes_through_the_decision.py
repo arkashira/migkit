@@ -1081,10 +1081,18 @@ def test_the_page_guard_sees_a_page_passed_by_place_or_by_a_constant():
 # never a literal (READ.batch-literals) --------------------------------------
 
 #: the calls a list by key or a write chunk is passed to: name -> (the
-#: place its list takes, the keyword it goes by). A cursor's batch is read
-#: at its reader's default; the numbers callers still pass a cursor are
-#: owed (backlog READ.batch-literals, its remainder)
+#: place its list takes, the keyword it goes by)
 CHUNKED = {"neutral_rows_by_key": (5, "keys"), "neutral_write": (4, "rows")}
+#: the calls a cursor's batch is passed to: name -> (the place its number
+#: takes, the keyword it goes by) - a number a caller passes one is the
+#: decision's (`decide.cursor_rows`/`batch_rows`), READ.cursor-literals
+CURSORS = {"neutral_batches": (4, "size"), "fetchmany": (0, "size")}
+#: a cursor's attributes whose number is the rows it fetches at a time
+CURSOR_ATTRS = ("arraysize", "itersize")
+#: the calls that make a chunk loop's step a batch the server is handed: a
+#: `for _ in range(.., .., step)` whose body calls one of these cuts a list
+#: into statements or writes by that step
+BATCHING = ("neutral_", "execute", "executemany", "_sql", "_run", "_psql")
 
 
 def _reasoned(lines, node):
@@ -1092,6 +1100,18 @@ def _reasoned(lines, node):
     while top > 0 and lines[top - 1].strip().startswith("#"):
         top -= 1
     return "# page:" in "\n".join(lines[top:node.end_lineno])
+
+
+def _sends(body):
+    """Whether a loop's body hands a server what it cuts: it names a call
+    that makes a statement or a write (`BATCHING`)."""
+    import ast
+    for n in (x for b in body for x in ast.walk(b)):
+        name = getattr(n, "attr", None) or (
+            n.id if isinstance(n, ast.Name) else "")
+        if any(str(name).startswith(b) for b in BATCHING):
+            return True
+    return False
 
 
 def _fixed_batches(tree, lines):
@@ -1111,6 +1131,42 @@ def _fixed_batches(tree, lines):
             d = a.defaults[at] if at >= 0 else None
             if isinstance(d, ast.Constant) and isinstance(d.value, int):
                 out.append((fn.lineno, f"neutral_batches size={d.value}"))
+        for call in ast.walk(fn):
+            name = isinstance(call, ast.Call) and (
+                getattr(call.func, "attr", None)
+                or getattr(call.func, "id", None))
+            if name not in CURSORS:
+                continue
+            place, kw = CURSORS[name]
+            given = [k.value for k in call.keywords if k.arg == kw]
+            if len(call.args) > place:
+                given.append(call.args[place])
+            for v in given:
+                what = _fixed(v, constants)
+                if what and not _reasoned(lines, call):
+                    out.append((call.lineno, f"{name} {kw}={what}"))
+        for st in ast.walk(fn):
+            if isinstance(st, ast.Assign) and not _reasoned(lines, st):
+                for t in st.targets:
+                    what = (isinstance(t, ast.Attribute)
+                            and t.attr in CURSOR_ATTRS
+                            and _fixed(st.value, constants))
+                    if what:
+                        out.append((st.lineno, f"{t.attr}={what}"))
+            if isinstance(st, ast.For):
+                loops = [(st.iter, st.body)]
+            elif isinstance(st, (ast.ListComp, ast.GeneratorExp,
+                                 ast.SetComp, ast.DictComp)):
+                loops = [(g.iter, [st]) for g in st.generators]
+            else:
+                continue
+            for it, body in loops:
+                if not (isinstance(it, ast.Call) and len(it.args) == 3
+                        and getattr(it.func, "id", None) == "range"):
+                    continue
+                what = _fixed(it.args[2], constants)
+                if what and _sends(body) and not _reasoned(lines, st):
+                    out.append((st.lineno, f"a chunk loop step={what}"))
         calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
                  and getattr(n.func, "attr", None) in CHUNKED]
         for call in calls:
@@ -1138,7 +1194,7 @@ def test_a_fixed_list_by_key_write_or_cursor_batch_is_refused():
     found = []
     for path in sorted(home.rglob("*.py")):
         text = path.read_text()
-        if not any(name in text for name in (*CHUNKED, "neutral_batches")):
+        if not any(name in text for name in (*CHUNKED, *CURSORS, "range(")):
             continue
         for line, what in _fixed_batches(ast.parse(text), text.split("\n")):
             found.append(f"{path.relative_to(home)}:{line} {what}")
@@ -1160,8 +1216,30 @@ def test_the_batch_guard_sees_a_fixed_list_write_and_cursor():
            "        x.neutral_write('d', db, t, c, rows[i:i + n])\n"
            "        x.neutral_rows_by_key('s', db, t, c, k, keys[i:i + n])\n"
            "        # page: one row answers whether any exists\n"
-           "        x.neutral_write('d', db, t, c, rows[i:i + 1])\n")
+           "        x.neutral_write('d', db, t, c, rows[i:i + 1])\n"
+           "        x.neutral_batches('s', db, t, c, 5000, None)\n"
+           "        x.neutral_batches('s', db, t, c, size=BATCH)\n"
+           "        x.neutral_batches('s', db, t, c, n)\n"
+           "        cur.fetchmany(1000)\n"
+           "        cur.arraysize = 2000\n"
+           "        cur.arraysize = n\n"
+           "        for i in range(0, len(keys), 500):\n"
+           "            cur.execute('select', keys[i:i + 500])\n"
+           "        for i in range(0, len(keys), n):\n"
+           "            cur.execute('select', keys[i:i + n])\n"
+           "        for i in range(0, len(text), 2):\n"
+           "            out.append(text[i:i + 2])\n"
+           "        # page: the protocol takes 25 items a call\n"
+           "        for i in range(0, len(keys), 25):\n"
+           "            x._send(keys[i:i + 25])\n"
+           "        return [x.neutral_read(p) for i in range(0, 9, BATCH)]\n")
     got = _fixed_batches(ast.parse(src), src.split("\n"))
     assert got == [(3, "neutral_batches size=1000"),
                    (6, "neutral_rows_by_key keys=BATCH"),
-                   (7, "neutral_write rows=5000")]
+                   (7, "neutral_write rows=5000"),
+                   (12, "neutral_batches size=5000"),
+                   (13, "neutral_batches size=BATCH"),
+                   (15, "fetchmany size=1000"),
+                   (16, "arraysize=2000"),
+                   (18, "a chunk loop step=500"),
+                   (27, "a chunk loop step=BATCH")]

@@ -502,8 +502,9 @@ def range_counts(s, spec, buckets):
     here."""
     order = sorted({int(b) for b in buckets})
     out = {}
-    for i in range(0, len(order), 200):
-        part = order[i:i + 200]
+    at_once = in_list(s.eng, 2 * len(s.key))
+    for i in range(0, len(order), at_once):
+        part = order[i:i + at_once]
         pred = _range_pred(s, spec, part)
         where = [w for w in (s.where, pred) if w]
         if s.eng.CANON_ENGINE in SQL_ENGINES or s.dialect or s.sql:
@@ -736,9 +737,10 @@ def _scan_sqls(s, spec, want):
         return []
     order = sorted(want)
     if spec.kind == "range":
+        at_once = in_list(s.eng, 2 * len(s.key))
         return [_scan_sql(s, spec, extra=_range_pred(s, spec,
-                                                     order[i:i + 200]))
-                for i in range(0, len(order), 200)]
+                                                     order[i:i + at_once]))
+                for i in range(0, len(order), at_once)]
     return [_scan_sql(s, spec, only=order)]
 
 
@@ -777,8 +779,9 @@ def leaf_rows(s, spec, buckets):
         return out
     order = sorted(want)
     if spec.kind == "range":
-        for i in range(0, len(order), 200):
-            part = order[i:i + 200]
+        at_once = in_list(s.eng, 2 * len(s.key))
+        for i in range(0, len(order), at_once):
+            part = order[i:i + at_once]
             names = ", ".join(f"k{j}" for j in range(len(s.key)))
             sql = (f"select rh, kh, {names} from"
                    f" ({_inner(s, spec, _range_pred(s, spec, part), True)}) x")

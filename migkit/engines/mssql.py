@@ -96,6 +96,11 @@ def _tracking_on(rows):
 
 class MSSQLEngine(DbapiRows, Engine):
     checks = ("schema", "counts", "autoinc", "data")
+    #: values one statement may carry: a request takes at most 2,100
+    #: parameters (SQL Server docs, Maximum capacity specifications), less
+    #: the two a prepared call takes for its statement and its declarations
+    STATEMENT_VALUES = 2098
+
     CHARSETS = True
     #: a change tracking version only says where a read begins: one of its
     #: own reads from an older one again, while the retention keeps it
@@ -2755,7 +2760,9 @@ class MSSQLEngine(DbapiRows, Engine):
             cur.execute("SET LOCK_TIMEOUT 5000")
             began = time.perf_counter()
             cur.execute(sql)
-            while cur.fetchmany(10000):
+            from .. import decide
+            at_once = decide.cursor_rows(None)
+            while cur.fetchmany(at_once):
                 pass
             return (time.perf_counter() - began) * 1000.0
         finally:

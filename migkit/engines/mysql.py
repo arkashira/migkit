@@ -1090,8 +1090,10 @@ class MySQLEngine(Engine):
             cache[ident] = {r[0] for r in rows}
         return cache[ident]
 
-    #: Rows in one applied statement (`Engine._apply_each`).
-    APPLY_ROWS = 1000
+    #: values one statement may carry: a prepared statement counts its
+    #: placeholders in two bytes (MySQL docs, COM_STMT_PREPARE; error
+    #: ER_PS_MANY_PARAM), so 65,535 at most (`decide.batch_rows`)
+    STATEMENT_VALUES = 65535
 
     def _fk_edges(self, side, db):
         return [(str(a), str(b)) for a, b in self._q(
@@ -1181,8 +1183,11 @@ class MySQLEngine(Engine):
                     if choice.path == "staged":
                         self._staged(cur, ddb, table, names, values, key)
                     else:
-                        for at in range(0, len(values), self.APPLY_ROWS):
-                            part = values[at:at + self.APPLY_ROWS]
+                        from .. import decide
+                        at_once = self.batch_size(decide.WRITE, len(names),
+                                                  rows=values)
+                        for at in range(0, len(values), at_once):
+                            part = values[at:at + at_once]
                             cur.execute(
                                 f"insert into `{ddb}`.`{table}`"
                                 f" ({cols}) values "
@@ -1344,8 +1349,10 @@ class MySQLEngine(Engine):
         kcols = ", ".join(f"`{k}`" for k in key)
         one = "(" + ", ".join(["%s"] * len(key)) + ")"
         there = set()
-        for i in range(0, len(rows), self.APPLY_ROWS):
-            part = rows[i:i + self.APPLY_ROWS]
+        from .. import decide
+        at_once = self.batch_size(decide.BY_KEY, len(key))
+        for i in range(0, len(rows), at_once):
+            part = rows[i:i + at_once]
             cur.execute(f"select {kcols} from {qt} where ({kcols}) in ("
                         + ", ".join([one] * len(part)) + ")",
                         [r[j] for r in part for j in at])
@@ -1376,8 +1383,10 @@ class MySQLEngine(Engine):
         mark = "(" + ", ".join(["%s"] * len(names)) + ")"
         with self._writer(side, db) as conn:
             with conn.cursor() as cur:
-                for at in range(0, len(keys), self.APPLY_ROWS):
-                    part = keys[at:at + self.APPLY_ROWS]
+                from .. import decide
+                at_once = self.batch_size(decide.BY_KEY, len(names))
+                for at in range(0, len(keys), at_once):
+                    part = keys[at:at + at_once]
                     cur.execute(
                         f"delete from `{self._d(side, db)}`.`{table}`"
                         f" where ({cols}) in ("
@@ -3258,7 +3267,7 @@ class MySQLEngine(Engine):
         def folded():
             with pieces.hashing(self):
                 return canon.fold_batches(columns, self.neutral_batches(
-                    side, db, table, columns, 5000, where=where), way)
+                    side, db, table, columns, None, where=where), way)
         jsons = self._json_in_sql(side, db, table, columns)
         if jsons is None:
             return folded()
@@ -9376,8 +9385,10 @@ class MySQLEngine(Engine):
                         f" {q(d)}.{q(table)}{where} limit {rows_wanted}")
             n = size = 0
             kept, held = [], 0
+            from .. import decide
+            at_once = decide.cursor_rows(None)
             while time.monotonic() - began < seconds and size < budget:
-                got = cur.fetchmany(1000)
+                got = cur.fetchmany(at_once)
                 if not got:
                     break
                 for r in got:
@@ -9437,7 +9448,9 @@ class MySQLEngine(Engine):
             began = time.monotonic()
             with conn.cursor(pymysql.cursors.SSCursor) as rd:
                 rd.execute(f"select {collist} from {q(ddb)}.{q(name)}")
-                while rd.fetchmany(1000):
+                from .. import decide
+                at_once = decide.cursor_rows(None)
+                while rd.fetchmany(at_once):
                     pass
             read = time.monotonic() - began
             applied, took = 0, None
@@ -10460,8 +10473,10 @@ class MySQLEngine(Engine):
             with sconn.cursor(pymysql.cursors.SSCursor) as cur:
                 cur.execute(f"select {collist} from `{db}`.`{t}`" + where,
                             args or None)
+                from .. import decide
+                at_once = decide.cursor_rows(None)
                 while True:
-                    rows = cur.fetchmany(5000)
+                    rows = cur.fetchmany(at_once)
                     if not rows:
                         break
                     for r in rows:
@@ -10537,8 +10552,10 @@ class MySQLEngine(Engine):
             with dconn.cursor(pymysql.cursors.SSCursor) as cur:
                 cur.execute(f"select {collist} from `{ddb}`.`{t}`" + where,
                             args or None)
+                from .. import decide
+                at_once = decide.cursor_rows(None)
                 while True:
-                    rows = cur.fetchmany(5000)
+                    rows = cur.fetchmany(at_once)
                     if not rows:
                         break
                     for r in rows:

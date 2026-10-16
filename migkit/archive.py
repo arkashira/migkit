@@ -49,7 +49,7 @@ import time
 GOAL = "archive"
 OPTION = "archive"
 CHANGE = "archived_rows"
-BATCH = 1000
+
 EXAMPLES = 3
 
 
@@ -66,14 +66,15 @@ def settings(hop):
     if not isinstance(raw, dict):
         raise SystemExit("archive: is a mapping - remove, restore, batch")
     try:
-        batch = int(raw.get("batch") or BATCH)
+        batch = int(raw["batch"]) if raw.get("batch") else None
     except (TypeError, ValueError):
         raise SystemExit(f"archive: batch: {raw.get('batch')!r} is not a"
                          " number of rows")
     if raw.get("remove") and raw.get("restore"):
         raise SystemExit("archive: remove and restore both - one of the two")
     return {"remove": bool(raw.get("remove")),
-            "restore": bool(raw.get("restore")), "batch": max(batch, 1)}
+            "restore": bool(raw.get("restore")), "batch": max(batch, 1) if batch
+            else None}
 
 
 def _pair(eng):
@@ -331,9 +332,10 @@ def _copy(hop, pair, db, t, rule, batch, log):
                          " removed from the source would lose them. Nothing"
                          " was written")
     wrote, kept, held = 0, 0, []
+    per = batch or pair.dst_engine.batch_size("write", len(tb.dst_cols))
     for rows in pair.src_engine._every_row("src", db, t, tb.src_cols, rule):
-        for i in range(0, len(rows), batch):
-            part = rows[i:i + batch]
+        for i in range(0, len(rows), per):
+            part = rows[i:i + per]
             mine = _keyed(pair, tb, part)
             theirs = _there(pair, db, tb, part)
             new = [r for k, (h, r) in mine.items() if k not in theirs]
@@ -460,9 +462,12 @@ def remove(hop, eng, db, names, go, log, ask=None):
     total, stayed = 0, []
     for t in order:
         tb = _table(pair, db, t, rules[t], there)
+        per = batch or min(
+            src.batch_size("by key", len(tb.key)),
+            pair.dst_engine.batch_size("by key", len(_dst_key(tb))))
         for rows in src._every_row("src", db, t, tb.src_cols, tb.rule):
-            for i in range(0, len(rows), batch):
-                part = rows[i:i + batch]
+            for i in range(0, len(rows), per):
+                part = rows[i:i + per]
                 mine = _keyed(pair, tb, part)
                 theirs = _there(pair, db, tb, part)
                 go_ = {k: h for k, (h, _) in mine.items()
@@ -609,8 +614,9 @@ def prove(hop, eng, db):
         if removed:
             cls = dict(tb.src_cols)
             keys = list(removed)
-            for i in range(0, len(keys), BATCH):
-                part = keys[i:i + BATCH]
+            at_once = dst.batch_size("by key", len(_dst_key(tb)))
+            for i in range(0, len(keys), at_once):
+                part = keys[i:i + at_once]
                 got = dst.neutral_rows_by_key(
                     "dst", db, tb.target, tb.dst_cols, _dst_key(tb),
                     [tuple(canon.from_text(cls[c], v)

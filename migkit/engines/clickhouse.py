@@ -437,7 +437,7 @@ class ClickHouseEngine(NeutralCopier, Engine):
         total, n = 0, 0
         with pieces.hashing(self):
             for batch in self.neutral_batches(side, db, table, columns,
-                                              10000, where):
+                                              None, where):
                 k, total = canon.fold_rows(classes, batch, total)
                 n += k
         return (n, str(total))

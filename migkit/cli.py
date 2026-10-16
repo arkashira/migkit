@@ -5397,7 +5397,7 @@ def _keyed_digests(eng, side, db, tables):
         names = [n for n, _ in cols]
         at = [names.index(k) for k in spec["key"]]
         got = {}
-        for batch in eng.neutral_batches(side, db, t, cols, 5000):
+        for batch in eng.neutral_batches(side, db, t, cols):
             for row in batch:
                 k = tuple(row[i] for i in at)
                 got[k[0] if len(k) == 1 else k] = \

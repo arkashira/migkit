@@ -430,6 +430,10 @@ WRITE_WAYS = (
 class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
                    Engine):
     checks = ("schema", "counts", "autoinc", "data")
+    #: values one list may carry: at most 1,000 expressions in one list
+    #: (Oracle docs, ORA-01795) - fewer than a statement's 65,535 binds
+    STATEMENT_VALUES = 1000
+
     CANON_ENGINE = "oracle"
     OWN_PREFIX = OWN_PREFIX
     BRAND_FAMILY = "oracle"
@@ -938,7 +942,7 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
         conn = self._connect(side, db)
         try:
             cur = conn.cursor()
-            cur.arraysize = max(int(size), 100)
+            cur.arraysize = size
             cur.prefetchrows = cur.arraysize + 1
             self._run(cur, sql, args)
             while True:
@@ -961,8 +965,10 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
         select, finish = self._read_plan(side, db, table, columns)
         one = "(" + " and ".join(f"{self._q(k)} = {MARK}" for k in key) + ")"
         found = []
-        for i in range(0, len(keys), self.DELETE_BATCH):
-            part = keys[i:i + self.DELETE_BATCH]
+        from .. import decide
+        at_once = self.batch_size(decide.BY_KEY, len(key))
+        for i in range(0, len(keys), at_once):
+            part = keys[i:i + at_once]
             cond = " or ".join([one] * len(part))
             if where:
                 cond = f"({cond}) and ({where})"
@@ -1233,7 +1239,7 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
             classes = [c for _, c in columns]
             total, n = 0, 0
             for batch in self.neutral_batches(side, db, table, columns,
-                                              size=5000, where=where):
+                                              where=where):
                 k, total = (self._sha_fold(classes, batch, salt, total)
                             if salt else canon.fold_rows(classes, batch,
                                                          total))

@@ -453,12 +453,12 @@ class CopybookEngine(NeutralCopier, Engine):
         names = [n for n, _ in columns]
         key = [k for k in self.neutral_key(side, db, table) if k in names]
         if after is None and limit == 1:
-            for batch in self.neutral_batches(side, db, table, columns, 1,
+            for batch in self.neutral_batches(side, db, table, columns, limit,
                                               where):
                 return batch[:1], None
             return [], None
         rows = [r for b in self.neutral_batches(side, db, table, columns,
-                                                5000, where) for r in b]
+                                                None, where) for r in b]
         if not key:
             return rows, None
         at = [names.index(k) for k in key]
@@ -479,7 +479,7 @@ class CopybookEngine(NeutralCopier, Engine):
         want = {tuple(canon.render_value(cls[k], v) for k, v in zip(key, kk))
                 for kk in keys}
         found = []
-        for batch in self.neutral_batches(side, db, table, columns, 5000,
+        for batch in self.neutral_batches(side, db, table, columns, None,
                                           where):
             found += [r for r in batch
                       if self._key_of(columns, key, r) in want]

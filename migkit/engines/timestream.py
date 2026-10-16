@@ -195,7 +195,7 @@ class TimestreamEngine(NeutralCopier, Engine):
                      where=None):
         rows = []
         for batch in self.neutral_batches(side, db, table, columns,
-                                          limit or 1000, where):
+                                          limit, where):
             rows += batch
             if limit and len(rows) >= limit:
                 return rows[:limit], None
@@ -224,9 +224,11 @@ class TimestreamEngine(NeutralCopier, Engine):
             return {}
         keys = list(keys)
         found = []
-        for i in range(0, len(keys), 100):
+        from .. import decide
+        at_once = self.batch_size(decide.BY_KEY, len(key))
+        for i in range(0, len(keys), at_once):
             cond = " or ".join(self._match(side, db, table, key, k)
-                               for k in keys[i:i + 100])
+                               for k in keys[i:i + at_once])
             if where:
                 cond = f"({cond}) and ({where})"
             found += self.neutral_batches_all(side, db, table, columns, cond)
@@ -239,7 +241,7 @@ class TimestreamEngine(NeutralCopier, Engine):
     def neutral_digest(self, side, db, table, columns, where=None):
         from .. import canon
         return canon.fold_batches(columns, self.neutral_batches(
-            side, db, table, columns, 5000, where), engine="timestream")
+            side, db, table, columns, None, where), engine="timestream")
 
     # ---- writing -------------------------------------------------------------
 
@@ -495,7 +497,7 @@ class TimestreamEngine(NeutralCopier, Engine):
         text, count = io.StringIO(), 0
         out = csv.writer(text, lineterminator="\n")
         out.writerow(heads)
-        for batch in self.neutral_batches("src", db, table, cols, 5000):
+        for batch in self.neutral_batches("src", db, table, cols):
             for row in batch:
                 values = dict(zip([n for n, _ in cols], row))
                 cells = [values.get(d) for d in dims]

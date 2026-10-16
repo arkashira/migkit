@@ -176,7 +176,7 @@ class QdrantEngine(NeutralCopier, Engine):
                      where=None):
         rows = []
         for batch in self.neutral_batches(side, db, table, columns,
-                                          limit or BATCH, where):
+                                          limit, where):
             rows += batch
             if limit and len(rows) >= limit:
                 return rows[:limit], None
@@ -202,7 +202,7 @@ class QdrantEngine(NeutralCopier, Engine):
     def neutral_digest(self, side, db, table, columns, where=None):
         from .. import canon
         return canon.fold_batches(columns, self.neutral_batches(
-            side, db, table, columns, 1000, where), engine="qdrant")
+            side, db, table, columns, None, where), engine="qdrant")
 
     # ---- making a collection ---------------------------------------------------
 

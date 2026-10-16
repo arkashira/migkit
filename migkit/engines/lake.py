@@ -138,7 +138,7 @@ class _Lake(NeutralCopier, Engine):
         names = [n for n, _ in columns]
         key = [k for k in self.neutral_key(side, db, table) if k in names]
         rows = [r for b in self.neutral_batches(side, db, table, columns,
-                                                5000, where) for r in b]
+                                                None, where) for r in b]
         if not key:
             return rows[:limit] if limit else rows, None
         at = [names.index(k) for k in key]
@@ -190,7 +190,7 @@ class _Lake(NeutralCopier, Engine):
             return int(got[0]), str(got[1])
         self.folded_last = True
         total, n = 0, 0
-        for batch in self.neutral_batches(side, db, table, columns, 5000,
+        for batch in self.neutral_batches(side, db, table, columns, None,
                                           where):
             k, total = canon.fold_rows([c for _, c in columns], batch, total)
             n += k

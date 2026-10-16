@@ -34,6 +34,11 @@ from .dbapi import MARK, DbapiRows
 
 class PgWireEngine(DbapiRows, Engine):
     checks = ("schema", "counts", "data")
+    #: values one statement may carry: the protocol's Bind message counts
+    #: its parameters in two bytes (PostgreSQL docs, Frontend/Backend
+    #: Protocol, Bind), so 65,535 at most (`decide.batch_rows`)
+    STATEMENT_VALUES = 65535
+
     ENGINE_FAMILY = "postgres"
     SQL_DIALECT = "postgres"
     PARAMSTYLE = "pyformat"
@@ -453,8 +458,10 @@ class PgWireEngine(DbapiRows, Engine):
         conn = self._connect(side, db)
         try:
             cur = conn.cursor()
-            for i in range(0, len(keys), 500):
-                part = keys[i:i + 500]
+            from .. import decide
+            at_once = self.batch_size(decide.BY_KEY, len(key))
+            for i in range(0, len(keys), at_once):
+                part = keys[i:i + at_once]
                 sql = (f"select {cols} from {self._qualified(side, db, table)}"
                        f"{self._as_of(fence)} where ("
                        + ", ".join(self._q(k) for k in key) + ") in ("

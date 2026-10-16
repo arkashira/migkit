@@ -640,8 +640,10 @@ class TiDBEngine(MySQLEngine):
                         raise
                     at_fence = False
                 where = "(" + ", ".join(f"`{k}`" for k in key) + ") in ("
-                for i in range(0, len(rows), 500):
-                    part = rows[i:i + 500]
+                from .. import decide
+                at_once = self.batch_size(decide.BY_KEY, len(key))
+                for i in range(0, len(rows), at_once):
+                    part = rows[i:i + at_once]
                     args = [v for r in part for v in raw(r)]
                     tail = (f" from `{db}`.`{table}` where " + where
                             + ", ".join("(" + ", ".join(["%s"] * len(key))

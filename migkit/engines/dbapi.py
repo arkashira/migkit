@@ -24,8 +24,6 @@ class DbapiRows(NeutralCopier):
     #: how a read is limited: "top" (select top (n) ...), "fetch"
     #: (... fetch first n rows only) or "limit" (... limit n)
     LIMIT = "fetch"
-    #: rows per statement when deleting by key before a write
-    DELETE_BATCH = 500
     #: fixed-length character types, whose values come back padded with
     #: spaces to the column's length: read without them, as PostgreSQL's
     #: `char(n)` reads and as every other engine's is compared
@@ -268,8 +266,10 @@ class DbapiRows(NeutralCopier):
         one = "(" + " and ".join(f"{self._q(k)} = {MARK}" for k in key) + ")"
         found = []
         plan = self._read_plan(side, db, table, columns)
-        for i in range(0, len(keys), self.DELETE_BATCH):
-            part = keys[i:i + self.DELETE_BATCH]
+        from .. import decide
+        at_once = self.batch_size(decide.BY_KEY, len(key))
+        for i in range(0, len(keys), at_once):
+            part = keys[i:i + at_once]
             cond = " or ".join([one] * len(part))
             if where:
                 cond = f"({cond}) and ({where})"
@@ -283,7 +283,8 @@ class DbapiRows(NeutralCopier):
 
     def neutral_rows_matching(self, side, db, table, columns, match, values):
         """Every row whose `match` columns hold one of `values`, asked of
-        the server as a read by key asks, `DELETE_BATCH` values a
+        the server as a read by key asks, the decision's list by key
+        (`batch_size`) a
         statement."""
         from .. import canon
         if not match or not values:
@@ -294,8 +295,10 @@ class DbapiRows(NeutralCopier):
         wide = self._wide_times(side, db, table)
         cols = ", ".join(wide.get(n, self._q(n)) for n, _ in columns)
         found = []
-        for i in range(0, len(values), self.DELETE_BATCH):
-            part = values[i:i + self.DELETE_BATCH]
+        from .. import decide
+        at_once = self.batch_size(decide.BY_KEY, len(match))
+        for i in range(0, len(values), at_once):
+            part = values[i:i + at_once]
             found += self._rows(
                 side, db, f"select {cols} from"
                           f" {self._qualified(side, db, table)} where "
@@ -314,7 +317,7 @@ class DbapiRows(NeutralCopier):
         total, n = 0, 0
         with pieces.hashing(self):
             for batch in self.neutral_batches(side, db, table, columns,
-                                              size=5000, where=where):
+                                              where=where):
                 k, total = canon.fold_rows(classes, batch, total)
                 n += k
         return (n, str(total))
@@ -349,8 +352,10 @@ class DbapiRows(NeutralCopier):
                 at = [names.index(k) for k in key]
                 one = "(" + " and ".join(f"{self._q(k)} = {MARK}"
                                          for k in key) + ")"
-                for i in range(0, len(rows), self.DELETE_BATCH):
-                    part = rows[i:i + self.DELETE_BATCH]
+                from .. import decide
+                at_once = self.batch_size(decide.BY_KEY, len(key))
+                for i in range(0, len(rows), at_once):
+                    part = rows[i:i + at_once]
                     self._run(cur, f"delete from {quoted} where "
                                    + " or ".join([one] * len(part)),
                               [canon.write_value(self.CANON_ENGINE,

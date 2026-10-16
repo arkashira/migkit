@@ -1,4 +1,5 @@
 import hashlib
+import sqlite3
 import time
 
 from .. import pieces
@@ -8,6 +9,11 @@ from .base import (Engine, NeutralCopier, RepairAction, Result, clauses,
 
 
 class SQLiteEngine(NeutralCopier, Engine):
+    #: values one statement may carry: SQLITE_MAX_VARIABLE_NUMBER, 999
+    #: before library 3.32.0 and 32,766 since (SQLite docs, Limits In
+    #: SQLite, item 9)
+    STATEMENT_VALUES = 32766 if sqlite3.sqlite_version_info >= (3, 32) else 999
+
     #: one writer at a time: a second waits on the file's lock and fails
     WRITES_IN_PARALLEL = False
     checks = ("schema", "counts", "autoinc", "data")

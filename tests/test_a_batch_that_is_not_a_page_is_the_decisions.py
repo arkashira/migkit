@@ -10,7 +10,9 @@ import json
 import pathlib
 from types import SimpleNamespace
 
-from migkit import decide, leaves, movers, repairlog, subset
+import pytest
+
+from migkit import decide, leaves, movers, pieces, repairlog, subset
 from migkit.engines.base import Engine
 from tests.rung_branches import HOLDS, REFUSES, branch, watched, why
 
@@ -208,3 +210,116 @@ def test_no_schema_option_line_is_written_out_beside_its_owner():
             for e in items or ():
                 assert not (isinstance(e, ast.Constant)
                             and e.value in said), (rel, node.lineno, e.value)
+
+
+# --- the numbers callers passed a cursor, the chunk loops and the engines'
+# statement limits are the decision's (READ.cursor-literals) ---------------
+
+#: the engines whose server says a limit to one statement's values, and it
+STATED = [("postgres", "PostgresEngine", 65535),
+          ("pgwire", "PgWireEngine", 65535),
+          ("cockroachdb", "CockroachEngine", 65535),
+          ("mysql", "MySQLEngine", 65535),
+          ("tidb", "TiDBEngine", 65535),
+          ("mssql", "MSSQLEngine", 2098),
+          ("oracle", "OracleEngine", 1000),
+          ("db2", "Db2Engine", 32767),
+          ("sqlite", "SQLiteEngine", None)]
+
+
+@pytest.mark.parametrize("module,name,limit", STATED)
+def test_an_engine_with_a_statement_limit_says_it_and_its_lists_keep_it(
+        module, name, limit):
+    import importlib
+    import sqlite3
+    cls = getattr(importlib.import_module(f"migkit.engines.{module}"), name)
+    if limit is None:   # the library's own, as its version says
+        limit = 32766 if sqlite3.sqlite_version_info >= (3, 32) else 999
+    assert cls.STATEMENT_VALUES == limit
+    eng = cls.__new__(cls)
+    with watched() as seen:
+        assert eng.batch_size(decide.BY_KEY, 3) == limit // 3
+    assert branch(seen, "the statement's limit") == [HOLDS]
+    # a key wider than the statement still goes, one row a statement
+    assert eng.batch_size(decide.BY_KEY, 2 * limit) == 1
+
+
+def test_a_cursor_a_caller_opens_is_the_decisions_and_follows_its_facts(
+        monkeypatch):
+    sizes = []
+
+    class Eng:
+        RESUMES_BY_KEY = False
+
+        def neutral_batches(self, side, db, table, columns, size=None,
+                            where=None):
+            sizes.append(size)
+            yield [(1, "x")] * 3
+    cols = [("id", "integer"), ("v", "text")]
+    pieces.sample_sizes(Eng(), "src", "d", "t", cols, 50)
+    pieces.sample_sizes(Eng(), "src", "d", "t", cols, 9)
+    assert sizes == [50, 9]             # the page the sample was given
+    asked = Asked(monkeypatch, rows=7)
+    pieces.sample_sizes(Eng(), "src", "d", "t", cols, 50)
+    assert sizes[-1] == 7 and asked.facts[-1]["kind"] == decide.CURSOR
+
+
+class Cur:
+    """A cursor that counts the values of every statement."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, args=None):
+        self.calls.append(len(args or ()))
+
+
+def test_a_write_loop_cuts_by_the_engines_limit_and_the_rows_values(
+        monkeypatch):
+    from migkit.engines.postgres import PostgresEngine
+    eng = PostgresEngine.__new__(PostgresEngine)
+    eng._piping = lambda: None
+    cur = Cur()
+    conn = SimpleNamespace(cursor=lambda: cur)
+    values = [(i, "x") for i in range(10)]
+    eng.STATEMENT_VALUES = 8            # 4 rows of 2 values a statement
+    eng._in_statements(conn, "insert into t values ", "", values)
+    assert cur.calls == [8, 8, 4]
+    cur.calls.clear()
+    eng.STATEMENT_VALUES = PostgresEngine.STATEMENT_VALUES
+    eng._in_statements(conn, "insert into t values ", "", values)
+    assert cur.calls == [20]
+    cur.calls.clear()
+    monkeypatch.setattr(pieces, "BATCH_BYTES", 3 * 10 ** 6)
+    wide = [(i, "x" * 10 ** 6) for i in range(10)]
+    eng._in_statements(conn, "insert into t values ", "", wide)
+    # the rows' width holds a batch to the bytes one batch may take
+    assert cur.calls == [4, 4, 4, 4, 4]
+
+
+def test_a_delete_by_key_loop_cuts_by_the_engines_limit_per_key():
+    from contextlib import contextmanager
+    from migkit.engines.mysql import MySQLEngine
+    eng = MySQLEngine.__new__(MySQLEngine)
+    eng.local_table = lambda t: t
+    eng._d = lambda side, db: db
+    cur = Cur()
+
+    @contextmanager
+    def writer(side, db):
+        yield SimpleNamespace(cursor=lambda: cur)
+    eng._writer = writer
+    keys = [{"id": i, "k": i} for i in range(9)]
+    eng.STATEMENT_VALUES = 6            # 3 keys of 2 columns a statement
+    eng._apply_deletes("dst", "d", "t", keys)
+    assert cur.calls == [6, 6, 6]
+    cur.calls.clear()
+    eng.STATEMENT_VALUES = 9
+    eng._apply_deletes("dst", "d", "t", keys)
+    assert cur.calls == [8, 8, 2]

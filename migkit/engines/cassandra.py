@@ -376,7 +376,7 @@ class CassandraEngine(NeutralCopier, Engine):
         callers that ask whether a table holds anything."""
         rows = []
         for batch in self.neutral_batches(side, db, table, columns,
-                                          limit or 1000, where):
+                                          limit, where):
             rows += batch
             if limit and len(rows) >= limit:
                 return rows[:limit], None
@@ -412,7 +412,7 @@ class CassandraEngine(NeutralCopier, Engine):
         from .. import canon
         classes = [c for _, c in columns]
         total, n = 0, 0
-        for batch in self.neutral_batches(side, db, table, columns, 5000,
+        for batch in self.neutral_batches(side, db, table, columns, None,
                                           where):
             k, total = canon.fold_rows(classes, batch, total)
             n += k
@@ -1279,7 +1279,7 @@ class CassandraEngine(NeutralCopier, Engine):
         if not [1 for n, _ in cols if n not in key]:
             return None
         rows, whole = [], True
-        for batch in self.neutral_batches("src", db, table, cols, 1000):
+        for batch in self.neutral_batches("src", db, table, cols):
             rows += batch
             if len(rows) > self.VALUES_SAMPLE:
                 whole = False

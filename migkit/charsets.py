@@ -1611,8 +1611,9 @@ def _rewrite(hop, dst, db, target, key, columns, found):
                                   default=str) + "\n")
             write.append(new)
     from . import consolidate, decide
-    for i in range(0, len(write), BATCH):
-        part = write[i:i + BATCH]
+    at_once = dst.batch_size(decide.WRITE, len(columns), rows=write)
+    for i in range(0, len(write), at_once):
+        part = write[i:i + at_once]
 
         def run(choice, part=part):
             put = (dst.neutral_write if choice.rung.name == "bulk"

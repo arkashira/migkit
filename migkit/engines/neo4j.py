@@ -278,7 +278,7 @@ class Neo4jEngine(NeutralCopier, Engine):
                      where=None):
         rows = []
         for batch in self.neutral_batches(side, db, table, columns,
-                                          limit or BATCH, where):
+                                          limit, where):
             rows += batch
             if limit and len(rows) >= limit:
                 return rows[:limit], None
@@ -300,7 +300,7 @@ class Neo4jEngine(NeutralCopier, Engine):
     def neutral_digest(self, side, db, table, columns, where=None):
         from .. import canon
         return canon.fold_batches(columns, self.neutral_batches(
-            side, db, table, columns, 5000, where), engine="neo4j")
+            side, db, table, columns, None, where), engine="neo4j")
 
     def neutral_create_sql(self, side, db, table, columns, key=()):
         if table not in COLUMNS:
@@ -400,9 +400,11 @@ class Neo4jEngine(NeutralCopier, Engine):
         match = ("MATCH (x) WHERE x." if table == "nodes"
                  else "MATCH ()-[x]->() WHERE x.")
         drop = "DETACH DELETE x" if table == "nodes" else "DELETE x"
-        for i in range(0, len(ids), BATCH):
+        from .. import decide
+        at_once = self.batch_size(decide.BY_KEY)
+        for i in range(0, len(ids), at_once):
             self._run(side, db, f"UNWIND $ids AS i {match}{k} = i {drop}",
-                      ids=ids[i:i + BATCH])
+                      ids=ids[i:i + at_once])
 
     def _apply_delete(self, side, db, table, key):
         self._apply_deletes(side, db, table, [key])

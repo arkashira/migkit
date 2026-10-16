@@ -31,7 +31,7 @@ def _hop(opts=None, goal="archive"):
 
 def test_the_hop_says_what_it_does_with_the_source():
     assert archive.settings(_hop()) == {"remove": False, "restore": False,
-                                        "batch": archive.BATCH}
+                                        "batch": None}
     assert archive.settings(_hop({"archive": {"remove": True,
                                               "batch": "50"}}))["batch"] == 50
     with pytest.raises(SystemExit):

@@ -297,6 +297,10 @@ CATALOGUE = {
 
 class Db2Engine(CatalogChecks, FoldsToCapitals, DbapiRows, Engine):
     checks = ("schema", "counts", "autoinc", "data")
+    #: values one statement may carry: at most 32,767 host-variable or
+    #: parameter-marker references (Db2 docs, SQL and XML limits)
+    STATEMENT_VALUES = 32767
+
     CATALOGUE = CATALOGUE
     #: the types whose text the server writes in a way of its own
     RENDERED = ("xml", "decfloat")

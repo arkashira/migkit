@@ -460,7 +460,7 @@ class NeptuneEngine(NeutralCopier, Engine):
                      where=None):
         rows = []
         for batch in self.neutral_batches(side, db, table, columns,
-                                          limit or 1000, where):
+                                          limit, where):
             rows += batch
             if limit and len(rows) >= limit:
                 return rows[:limit], None
@@ -483,7 +483,7 @@ class NeptuneEngine(NeutralCopier, Engine):
     def neutral_digest(self, side, db, table, columns, where=None):
         from .. import canon
         return canon.fold_batches(columns, self.neutral_batches(
-            side, db, table, columns, 5000, where), engine="neptune")
+            side, db, table, columns, None, where), engine="neptune")
 
     def neutral_create_sql(self, side, db, table, columns, key=()):
         if table not in COLUMNS:

@@ -193,7 +193,7 @@ class _Masks:
         n, total = 0, 0
         classes = [c for _, c in columns]
         for batch in self.neutral_batches(
-                "src", db, table, columns, 5000,
+                "src", db, table, columns, None,
                 **({"where": where} if where else {})):
             k, total = canon.fold_rows(classes, batch, total, way)
             n += k
@@ -1801,8 +1801,6 @@ class HeteroEngine(Engine):
                    and text(sc, a[k]) != text(dc, b[k])]
         return missing, extra, changed
 
-    #: keys asked of the target at once when a batch is read back
-    READ_BACK = 5000
 
     def _read_back_plan(self, db, src_t, dst_t, src_cols, key):
         """What a written batch is read back and compared by: (source
@@ -1895,8 +1893,11 @@ class HeteroEngine(Engine):
         into = (dict(dc) if self.dst_engine.CANON_ENGINE == "mongodb"
                 and self.src_engine.CANON_ENGINE != "mongodb" else {})
         at_key = [dst_key[key.index(names[j])] for j in where]
-        for i in range(0, len(mine), self.READ_BACK):
-            part = mine[i:i + self.READ_BACK]
+        from .. import decide
+        at_once = min(self.src_engine.batch_size(decide.BY_KEY, len(key)),
+                      self.dst_engine.batch_size(decide.BY_KEY, len(key)))
+        for i in range(0, len(mine), at_once):
+            part = mine[i:i + at_once]
             a = self._by_key_map(sc, key, part)
             b = self.dst_engine.neutral_rows_by_key(
                 "dst", db, dst_t, dc, dst_key,
@@ -2170,7 +2171,7 @@ class HeteroEngine(Engine):
         def whole_part(where):
             rows = []
             for batch in self.src_engine.neutral_batches(
-                    "src", db, src_t, src_cols, 10 ** 9,
+                    "src", db, src_t, src_cols, None,
                     where=scoped(where, src_where)):
                 rows += batch
             rows, _ = self._flatten_absent(rows)

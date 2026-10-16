@@ -1098,8 +1098,9 @@ class Miner:
             f" options => {dictionary} +"
             " dbms_logmnr.committed_data_only); end;", [start, end])
         cur = self.conn.cursor()
-        cur.arraysize = 2000
-        cur.prefetchrows = 2001
+        from .. import decide
+        cur.arraysize = decide.cursor_rows(None)
+        cur.prefetchrows = cur.arraysize + 1
         codes = ", ".join(str(c) for c in (INSERT, DELETE, UPDATE, DDL,
                                            UNSUPPORTED) + LOB_OPS)
         sql = ("select scn, commit_scn, xidusn || '.' || xidslt || '.' ||"
@@ -1438,8 +1439,10 @@ class Miner:
         table_name = self.eng._qualified(self.side, self.db, table)
         cur = self._open().cursor()
         found = {}
-        for at in range(0, len(wanted_keys), 500):
-            part = wanted_keys[at:at + 500]
+        from .. import decide
+        at_once = self.eng.batch_size(decide.BY_KEY, len(key))
+        for at in range(0, len(wanted_keys), at_once):
+            part = wanted_keys[at:at + at_once]
             conds, args = [], []
             for k in part:
                 conds.append("(" + " and ".join(
@@ -1508,7 +1511,9 @@ def reader_rate(eng, side, db):
         miner._open()
         began = time.perf_counter()
         miner._start(int(first), int(nxt) - 1)
-        while miner.cur.fetchmany(5000):
+        from .. import decide
+        at_once = decide.cursor_rows(None)
+        while miner.cur.fetchmany(at_once):
             pass
         took = max(time.perf_counter() - began, 1e-3)
     finally:
