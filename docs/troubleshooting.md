@@ -355,6 +355,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the installed bulk copy program accepts none of <...>, which this move needs - `migkit doctor --install` puts a version in place that does
 
+* <...>: the bulk copy stopped on <...> (<...>: <...>: <...>); nothing it loaded is taken as done and no other way is tried over it. Next: <...>, then run the move of <...> again - the table copier replaces each range by key; `migrate --why` keeps the evidence
+
 * <...>: the hop asks to mask <...>. Nothing has been written: fix the rule, or drop it to copy the values as they are
 
 * <...>: <...>

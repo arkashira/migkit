@@ -58,6 +58,11 @@ MOVE_MODE = {"copy": "full", "sync": "full+cdc", "cutover": "full+cdc"}
 INTENT, ACCESS, BUSINESS, AUTHORIZE = ("intent", "access",
                                        "business choice", "authorization")
 
+#: the comparison's results that prove the target equal: "same" is the
+#: verdict's own green word (`verdict.VERDICTS`), the others older words
+PROVED = ("same", "equal", "pass")
+
+
 # --- each phase's contract (P0-WORKFLOW-DEPTH.model) -------------------------
 # A phase of the flow is a `planner.Phase` with its contract: what it leaves
 # true, the evidence a done one leaves in `workflow.json`, the evidence each
@@ -91,7 +96,7 @@ CONTRACTS = {
     "verify": ("the target proved equal to the source after its one repair",
                ("the verdict of the comparison",),
                (("the verdict is equal",
-                 lambda f: f.get("result") in ("equal", "pass")),)),
+                 lambda f: f.get("result") in PROVED),)),
     "ready": ("the cutover's readiness read, every check passing",
               ("the cutover's readiness read",),
               (("every readiness check passes",
@@ -1011,7 +1016,7 @@ def _step(u, ops, chunk, workers=None):
         return True
     if u.step == "verify":
         got = ops.verify(u.db)
-        if got not in ("equal", "pass"):
+        if got not in PROVED:
             raise decide.Verdict(f"{u.db} is {got} after its repair")
         return got
     if u.step == "ready":

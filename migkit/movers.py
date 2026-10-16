@@ -18,7 +18,8 @@ import threading
 import time
 from urllib.parse import quote
 
-from . import envkeys, evidence, leftovers, runner, toolversion, tooluse
+from . import (envkeys, evidence, failpoint, leftovers, runner,
+               toolversion, tooluse)
 from .runner import run
 from .config import scoped as _scoped
 from .tools import IMAGES, PROGRAM
@@ -4303,6 +4304,45 @@ def _shell_resumable(hop, db, tables, folder):
         and dumped.get("log_pos") == now["log_pos"] else None
 
 
+def _bulk_classed(hop, db, run):
+    """`run()`, a MySQL bulk program's part of the move, with its failure
+    told by the fault catalogue (`faults.classify`) before the move's
+    ladder reads it. A failure of a class another way may get past - the
+    way's own (`replan`) or one that clears (`transient`) - is the way
+    failing (`decide.Blocked`), said with its class and what reconciles
+    it: the table copier after it replaces each range by key, so a row the
+    program had loaded is counted by its key and never loaded twice. A
+    failure the catalogue cannot class, or of a class no other way gets
+    past, stops the move as a blocker naming the next action: nothing it
+    did is taken as done, and nothing is tried over it on a guess."""
+    from . import decide, faults
+    try:
+        return run()
+    except (decide.Verdict, SystemExit, KeyboardInterrupt):
+        raise
+    except Exception as e:  # noqa: BLE001 - classified, never success
+        told = faults.classify(e, writes=True, atomic=False)
+        f = told.fault
+        if f.name == "uncertain_commit" and told.by == "effect":
+            # a load is many transactions: its outcome is unknown by
+            # nature, and the copier's key replace is what reconciles it
+            f = faults.classify(e).fault
+        if decide.operational(e) and f.name == "unknown" or (
+                f.name != "unknown"
+                and ("replan" in f.admits or f.transient)):
+            raise decide.Blocked(
+                f"{f.said} ({f.name}: {decide._first(e)}); reconciled by"
+                " the table copier, which replaces each range by key, so a"
+                " row already loaded is not loaded twice") from e
+        raise SystemExit(
+            f"{db}: the bulk copy stopped on {f.said} ({f.name}:"
+            f" {type(e).__name__}: {decide._first(e)}); nothing it loaded"
+            f" is taken as done and no other way is tried over it. Next:"
+            f" {f.retry_after}, then run the move of {hop.name} again - the"
+            " table copier replaces each range by key; `migrate --why`"
+            " keeps the evidence") from e
+
+
 def mydumper_move(hop, db, workers, go, log, only=None):
     """The MySQL bulk copy: each table by the rung the engine's one table
     ladder gives it (`tableway.choose`), the parallel dump and load and the
@@ -4492,7 +4532,6 @@ def mydumper_move(hop, db, workers, go, log, only=None):
         raise SystemExit(
             f"{db}: " + "; ".join(f"{t}: {c.reason}" for t, c in
                                   sorted(choice.items()) if not c.rung))
-    _masked_record(hop, db).unlink(missing_ok=True)
     from . import durable
     # both sides' passwords: 0600 from its first byte, not after (SEC10)
     durable.write_atomic(cnf, settings)
@@ -4507,7 +4546,9 @@ def mydumper_move(hop, db, workers, go, log, only=None):
 
     def or_copier(rung, tables, run):
         """`run()`, or its tables handed to the copier after the move."""
-        fell = tableway.batch_or_copier(eng, db, rung, tables, run, log,
+        fell = tableway.batch_or_copier(eng, db, rung, tables,
+                                        lambda: _bulk_classed(hop, db, run),
+                                        log,
                                         masked=rules, picks=choice,
                                         facts=facts)
         fallen.extend(fell)
@@ -4584,9 +4625,9 @@ def mydumper_move(hop, db, workers, go, log, only=None):
                 if log:
                     log(load)
                 began = time.monotonic()
-                if or_copier(DUMP_LOAD, dump_tables, lambda: _sh(
+                if or_copier(DUMP_LOAD, dump_tables, lambda: (_sh(
                         load.argv, {"MYSQL_PWD": hop.target.password}, log,
-                        progress=loading)):
+                        progress=loading), failpoint.hit("bulk.loaded"))):
                     took[DUMP_LOAD] = took.get(DUMP_LOAD, 0) + (
                         time.monotonic() - began)
                     load_spans = loading.spans.seconds()
