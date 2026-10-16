@@ -37,6 +37,19 @@ def _hop(tmp_path, dbs=("app",), **options):
     return hop
 
 
+def _check_leaves(hop, dbs):
+    """What a finished check and a lag reading leave for the cutover's
+    recheck: the verdict the check writes, a fresh lag and no open work."""
+    from migkit import diagnostics, verdict
+    verdict.write(hop, [{"status": "ok", "category": "rows", "db": d,
+                         "scope": f"{d} rows"} for d in dbs])
+    taken = diagnostics.accumulator(hop)
+    for d in dbs:
+        taken.record("lag", d, ("0/16", True, 0.1, ""))
+        taken.record("open-work", f"{d}:src", [])
+        taken.record("open-work", f"{d}:dst", [])
+
+
 # --- which drain ---------------------------------------------------------------
 
 def test_the_drain_falls_back_to_a_mark_only_where_migkit_may_write_one(
@@ -397,6 +410,7 @@ def test_a_drop_that_failed_half_way_goes_on_at_the_next_run(monkeypatch,
 def test_at_the_flip_both_are_signed_before_the_clock_starts(monkeypatch,
                                                              tmp_path):
     hop = _hop(tmp_path, cutover={"budget": 30, "no_return": "at_flip"})
+    _check_leaves(hop, ["app"])
     order = []
 
     def preflight(hop, eng, dbs, leg, conf, chose=None):
