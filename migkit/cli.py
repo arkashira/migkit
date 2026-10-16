@@ -535,6 +535,20 @@ def _providers_untold(say):
         say(line)
 
 
+def _provider_lines(eng, dbs, say):
+    """The provider lines of a target, said by `say` and returned: the
+    tables the scope leaves out as a provider's own (`_not_your_data`),
+    then the note of the providers it cannot tell apart
+    (`_providers_untold`). The one place `check` and `scope` take them
+    from, and the lines the report reads back from the check's verdict."""
+    theirs = _not_your_data(eng, dbs)
+    if theirs:
+        for line in theirs:
+            say(line)
+        _providers_untold(say)
+    return theirs
+
+
 def _keep_out(hop, eng, d, tables, go, whole=False):
     """The interlock's word on a copy of `d` (`interlock.before_copy`):
     the tables whose rows the hop keeps as they are are left out of it.
@@ -1105,6 +1119,29 @@ def _holds_said(name, hop, chosen=None):
 
 
 _SIDE = {"src": "source", "dst": "target"}
+
+
+@main.command("scope")
+@click.argument("hop_name")
+@click.option("--db", default="", help="single database")
+def scope_cmd(hop_name, db):
+    """Say what the hop takes and leaves out - its include and exclude
+    lists, the rows, columns and names it narrows, the changes it does
+    not carry - and the target's tables left out as a transfer service's
+    own, by name and by whose they are. Reads only; writes nothing."""
+    from . import verdict as _verdict
+    hop = get_hop(hop_name)
+    _require_configured(hop)
+    eng = get_engine(hop)
+    dbs = [db] if db else eng.databases()
+    said = _verdict.scope_said(_verdict.hop_scope(hop))
+    if not said:
+        console.print(f"{_esc(hop_name)} takes everything, whole")
+    for what, names in said:
+        console.print(f"{_esc(hop_name)} {_esc(what)}:"
+                      f" {_esc(', '.join(names[:40]))}"
+                      + (" ..." if len(names) > 40 else ""))
+    _provider_lines(eng, dbs, lambda m: console.print(f"  {_esc(m)}"))
 
 
 @main.command("leftovers")
@@ -2637,12 +2674,10 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
                                                                 [])]
     # a provider's own tables on the target, left out as bookkeeping: said
     # by name, here and in the report (`leftovers.not_your_data`)
-    theirs = _not_your_data(eng, dbs)
+    theirs = _provider_lines(eng, dbs, lambda m: console.print(
+        f"  {_esc(m)}"))
     if theirs:
         coverage["not your data"] = theirs
-        for line in theirs:
-            console.print(f"  {_esc(line)}")
-        _providers_untold(lambda m: console.print(f"  {_esc(m)}"))
     # a check under a scope narrower than the one the move took is not a
     # whole check of what was moved (`_narrower_than_moved`)
     narrower = _narrower_than_moved(hop, dbs)

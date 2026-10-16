@@ -182,6 +182,7 @@ off for a hop where the time matters more.
 |---|---|
 | `init` | Set up a hop: in a terminal, asks for the two addresses and the passwords, connects, says what it found and what it will do, and writes the hop. |
 | `doctor` | What this machine can do, and whether the configured hops connect. |
+| `scope` | Say what the hop takes and leaves out - its include and exclude lists, the rows, columns and names it narrows, the changes it does not carry - and the target's tables left out as a transfer service's own, by name and by whose they are. |
 | `leftovers` | Give back the writes a run held on a side and left behind: each exactly as its record took it, where its holder is gone; one whose holder still runs is left, with why. |
 | `drain` | Drain the running change tail to a position and hold it there: it cannot be taken back, so it is shown first and taken with --go against the target the plan named. |
 | `change-sheet` | Write the plan's steps as a change sheet (CSV and JSON beside the hop's reports) with stable ids a team's task sheet can hold, or, with --back, write a run's evidence back to one step. |

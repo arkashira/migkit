@@ -161,16 +161,30 @@ def landing_text(value):
     return str(value).replace("\\", "\\\\")
 
 
-def land_csv(url, name, rows, options, client=None):
-    """Write `rows` as one CSV object under `url`; its URL. `options`: the
-    target's `stage_endpoint_url` / `stage_region` where the store is not
-    the machine's own."""
+class _Piece:
+    """The CSV writer's sink: the text written so far, as bytes."""
+
+    def __init__(self):
+        self.data = bytearray()
+
+    def write(self, text):
+        self.data += text.encode()
+        return len(text)
+
+
+def land_csv(url, name, rows, options, client=None, piece=None):
+    """Write `rows` (any iterable, read once) as one CSV object under
+    `url`; its URL. The object goes up a piece at a time as a multipart
+    upload - the piece `pieces.PIECE`, never under the store's own least
+    part, doubled at every 2,000 parts so the store's part count never
+    ends a large table - so what is held is a piece and a row, never the
+    file; a table that fits one piece is one request. An upload that
+    fails is abandoned, never left half-made. `options`: the target's
+    `stage_endpoint_url` / `stage_region` where the store is not the
+    machine's own."""
+    from .. import carriers, pieces
     scheme, _, rest = str(url).partition("://")
     bucket, _, prefix = rest.partition("/")
-    buf = io.StringIO()
-    out = csv.writer(buf, lineterminator="\n")
-    for row in rows:
-        out.writerow([landing_text(v) for v in row])
     key = "/".join(p for p in (prefix.strip("/"),
                                f"{name}-{uuid.uuid4().hex}.csv") if p)
     if client is None:
@@ -180,7 +194,46 @@ def land_csv(url, name, rows, options, client=None):
                                          ("region_name", "stage_region"))
               if options.get(o)}
         client = boto3.client("s3", **kw)
-    client.put_object(Bucket=bucket, Key=key, Body=buf.getvalue().encode())
+    least = max(int(piece or pieces.PIECE), carriers.S3_PART_LEAST)
+    sink = _Piece()
+    out = csv.writer(sink, lineterminator="\n")
+    upload, parts = None, []
+
+    def send():
+        nonlocal upload
+        if upload is None:
+            upload = client.create_multipart_upload(Bucket=bucket,
+                                                    Key=key)["UploadId"]
+        if len(parts) >= carriers.S3_PARTS:
+            raise ValueError(f"{name}: the landing store takes no more than"
+                             f" {carriers.S3_PARTS:,} parts of one object")
+        n = len(parts) + 1
+        got = client.upload_part(Bucket=bucket, Key=key, UploadId=upload,
+                                 PartNumber=n, Body=bytes(sink.data))
+        parts.append({"ETag": got["ETag"], "PartNumber": n})
+        sink.data.clear()
+
+    try:
+        for row in rows:
+            out.writerow([landing_text(v) for v in row])
+            if len(sink.data) >= least * (1 << (len(parts) // 2000)):
+                send()
+        if upload is None:
+            client.put_object(Bucket=bucket, Key=key, Body=bytes(sink.data))
+        else:
+            if sink.data:
+                send()
+            client.complete_multipart_upload(
+                Bucket=bucket, Key=key, UploadId=upload,
+                MultipartUpload={"Parts": parts})
+    except BaseException:
+        if upload is not None:
+            try:
+                client.abort_multipart_upload(Bucket=bucket, Key=key,
+                                              UploadId=upload)
+            except Exception:  # noqa: BLE001 - the first failure is said
+                pass
+        raise
     return f"{scheme}://{bucket}/{key}"
 
 
@@ -235,6 +288,23 @@ class LandsRows:
     def _source_columns(self, db, table):
         return [c[0] for c in self.neutral_columns("src", db, table)]
 
+    def _landed_rows(self, db, table, count):
+        """The table's rows in key order, a page at a time - each page
+        sized by the one decision (`decide.page_rows`) and asked again
+        before the next - so the landing holds a page, not the table;
+        `count[0]` the rows read. A table with no key is one read, as
+        `neutral_read` gives it."""
+        columns = self.neutral_columns("src", db, table)
+        after = None
+        while True:
+            rows, after = self.neutral_read("src", db, table, columns,
+                                            after=after)
+            for row in rows:
+                count[0] += 1
+                yield row
+            if after is None or not rows:
+                return
+
     def move_table(self, db, sch, tbl, chunk, ck, log):
         """The table through the target's own loader where the climb
         takes it, the parent's copier otherwise. The landed rows are
@@ -244,14 +314,14 @@ class LandsRows:
         if self.load_way(db, tbl, log).path != "landing":
             return super().move_table(db, sch, tbl, chunk, ck, log)
         names = self._source_columns(db, tbl)
-        rows = self._rows("src", db, "select " + ", ".join(
-            self._quoted(n) for n in names) + " from "
-            + self._qualified("src", db, tbl))
-        url = land_csv(self._landing(), tbl, rows, self._target_options())
+        count = [0]
+        url = land_csv(self._landing(), tbl,
+                       self._landed_rows(db, tbl, count),
+                       self._target_options())
         for statement in self.landing_sql(db, tbl, names, url):
             self._run_target(db, statement)
         if log:
-            log(f"{tbl}: {len(rows)} rows loaded from the landing store")
+            log(f"{tbl}: {count[0]} rows loaded from the landing store")
         return None
 
 
