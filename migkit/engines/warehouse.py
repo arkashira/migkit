@@ -348,6 +348,7 @@ class _Warehouse(warehouse_sql.DigestsInSQL, DbapiRows, Engine):
         self._target_only(side, "apply changes")
         seen = twoway.seen_of(twoway.batch_seen(self))
         by_table = {}
+        self._measure_changes(changes)
         changes = self._in_version_order(changes)
         for table, (kind, key, values) in self._net_rows(side, db, changes):
             if any(isinstance(v, canon.Added) for v in values.values()):
@@ -534,6 +535,7 @@ class _Warehouse(warehouse_sql.DigestsInSQL, DbapiRows, Engine):
         if sized is None:
             return limit
         rows, interval, lag = sized
+        rows = self._held_in_memory(rows, limit)
         self._landing_now = way
         if way != self.__dict__.get("_landing_said"):
             self._landing_said = way
@@ -546,6 +548,33 @@ class _Warehouse(warehouse_sql.DigestsInSQL, DbapiRows, Engine):
                                  f" {interval or 0:.1f}s, {lag:.1f}s lag"
                                  + was)
         return max(1, rows)
+
+    def _held_in_memory(self, rows, limit):
+        """`rows` no more than a quarter of this machine's free memory
+        holds at the widest change a batch measured (`neutral_apply`), the
+        way a copy's batch is cut (`Engine.copy_sizes`); before a batch was
+        measured, as the decision sized it, the read after the first batch
+        is bounded."""
+        from .. import sizing
+        width = self.__dict__.get("_change_width")
+        if not width:
+            return max(1, int(rows))
+        free = (sizing.host() or {}).get("memory")
+        if not free:
+            return rows
+        return max(1, min(int(rows), free // (4 * max(int(width), 1))))
+
+    def _measure_changes(self, changes):
+        """The widest change of `changes` in bytes as carried, kept as the
+        widest seen since: a batch is sized so that its widest fits."""
+        from .. import pieces
+        widest = 0
+        for c in changes:
+            values = c.get("values") or {}
+            widest = max(widest, pieces.row_bytes(
+                list(values.values()) + list((c.get("key") or {}).values())))
+        self._change_width = max(self.__dict__.get("_change_width") or 0,
+                                 widest)
 
     def _landing_probe(self, side, facts, now, limit):
         """The read size of a batch trying an offered landing not timed at
@@ -680,8 +709,11 @@ class _Warehouse(warehouse_sql.DigestsInSQL, DbapiRows, Engine):
         return dict(got or getattr(self.hop, "versions", None) or {})
 
     def _in_version_order(self, changes):
-        """`changes`, each versioned table's in its version order, the rest
-        where they were: the change a key is left with is its newest."""
+        """`changes`, each versioned table's rows of a key in its version
+        order, the rest where they were: the change a key is left with is
+        its newest. A key's rows are ordered only within the runs between
+        its deletes - a delete removes what came before it, so a row is
+        never moved across one - and rows without a version stay put."""
         by = self.versions()
         if not by:
             return changes
@@ -689,12 +721,22 @@ class _Warehouse(warehouse_sql.DigestsInSQL, DbapiRows, Engine):
         def version(c):
             col = by.get(str(self.local_table(c.get("table"))).split(".")[-1])
             return (c.get("values") or {}).get(col) if col else None
+
+        def key_of(c):
+            return (c.get("table"), tuple(sorted(
+                (str(k), repr(v)) for k, v in (c.get("key") or {}).items())))
         out = list(changes)
-        places = {}
+        runs, run_of = {}, {}
         for i, c in enumerate(out):
-            if not _is_ddl(c) and version(c) is not None:
-                places.setdefault(c.get("table"), []).append(i)
-        for at in places.values():
+            if _is_ddl(c) or not by.get(str(self.local_table(
+                    c.get("table"))).split(".")[-1]):
+                continue
+            k = key_of(c)
+            if "delete" in (c.get("op"), c.get("kind")):
+                run_of[k] = run_of.get(k, 0) + 1
+            elif version(c) is not None:
+                runs.setdefault((k, run_of.get(k, 0)), []).append(i)
+        for at in runs.values():
             ordered = sorted((out[i] for i in at), key=version)
             for i, c in zip(at, ordered):
                 out[i] = c

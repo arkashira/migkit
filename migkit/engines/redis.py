@@ -2534,17 +2534,21 @@ class RedisEngine(Engine):
                     spool.close()
             spec = self._key_spec(self._client("src", decode=False))
         done = 0
+        lands = self._landing_pace(where)
         try:
             for _ in stream.commands():
                 with guard:
                     spaces.route(stream.offset, stream.argv, spec)
-                    if stream.buffered() or not spaces.ready():
+                    if not spaces.ready() or not lands.due(
+                            stream.buffered()):
                         continue
                     batch = spaces.take()
+                began = lands.pace.clock()
                 for d, ops in batch.items():
                     tally = self._refresh_keys(d, ops)
                     with guard:
                         spaces.landed(d, tally)
+                lands.landed(sum(len(ops) for ops in batch.values()), began)
                 with guard:
                     for d in spaces.rejoin(stream.offset):
                         self._copy_again(d, log)
@@ -2562,6 +2566,14 @@ class RedisEngine(Engine):
         streams[where] = (stream, spaces, spec)
         self.__dict__["_drained"] = not stream.buffered()
         return spaces
+
+    def _landing_pace(self, where):
+        """The `_LandingPace` of the stream of `where` (a shard's first
+        slot, "" for one server), kept from one round to the next."""
+        paces = self.__dict__.setdefault("_paces", {})
+        if where not in paces:
+            paces[where] = _LandingPace()
+        return paces[where]
 
     def _started(self, db, state, spaces, got, spool, node, log):
         """The key spaces at the stream's start: those that join filled
@@ -3142,6 +3154,35 @@ class ReplicaStream:
             self.sock.close()
         except OSError:
             pass
+
+
+class _LandingPace:
+    """When a replica stream's pending keys land on the target. Always at
+    a command boundary and outside a transaction (the caller's), and then
+    where the stream has nothing more buffered, or where the stream was
+    read for as long as the last landing took - the target's round trip
+    and its writes, measured - so under writes without pause at most half
+    the time goes to landing and a batch holds what arrived meanwhile;
+    never longer than `tailctl.IDLE_MOST` (`tailctl.Pace` keeps the clock
+    and the bounds). A source written without pause still lands, saves
+    its offset and acknowledges it."""
+
+    def __init__(self, clock=None):
+        from .. import tailctl
+        self.pace = tailctl.Pace(0.0, tailctl.IDLE_MOST, clock=clock)
+        self.took = 0.0
+
+    def due(self, buffered):
+        if not buffered:
+            return True
+        read = self.pace.clock() - self.pace.at
+        return read >= min(self.pace.most, max(self.took, self.pace.least))
+
+    def landed(self, keys, began):
+        """A landing of `keys` begun at `began` ended: timed, and the
+        stream's reading counted from now."""
+        self.took = max(self.pace.clock() - began, 0.0)
+        self.pace.saw(keys)
 
 
 class KeyspaceStates:

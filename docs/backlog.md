@@ -7256,6 +7256,17 @@ researched:
   hops' own keys (hops that say different things are refused by name; what
   is passed in stands over them) and carries the measured link rates and
   the unmeasured links in the facts.
+  *The move's door 2026-10-16 (CRIT5FIX3):* `planner.move_topology` is
+  the one call a hop's move goes through: a hop whose `nodes:` names a
+  topology and whose hops sharing a site draw one runs every hop of it by
+  `run_topology` on `topology.facts_of`'s facts and per-link rates; any
+  other hop runs alone as before (`test_landings_keep_pace_order_and_memory.py`).
+  UNPROVED: the command's own move does not call it yet - the call site is
+  `cli.move` (migkit/cli.py, `def move(hop_name, db, table, mode, chunk,
+  do_drop, go)`), which moves one named hop; it should hand the hop, the
+  configuration's hops, the tables' keys and a `read_rows` reading each
+  node's rows to `planner.move_topology`, with its own body as `run_hop`.
+  `cli.py` lies outside this ticket's files.
 * Tested in docker: pairs of mysql:8.4 and mariadb:11, both directions
   writing, echoes counted (must be 0), both sides hashed equal.
 

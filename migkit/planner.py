@@ -1328,3 +1328,48 @@ def run_topology(hops, facts, layout, run_hop, read_rows, rows_by_hop=None,
         out.final = scenarios.topology_verify(facts, read_rows())
         out.lines += tuple(f"the whole: {x}" for x in out.final.lines)
     return out
+
+
+def move_topology(hop, hops, tables, run_hop, read_rows, rows_by_hop=None,
+                  speed=None, at_once=1):
+    """The move of `hop`: where its `nodes:` names a topology
+    (`scenarios.topology_settings`) and the hops that share a site with it
+    draw one (`topology.layout`), every hop of that topology through
+    `run_topology`, on the facts and per-link rates `topology.facts_of`
+    reads from them - a `TopologyRun`; otherwise `hop` alone by
+    `run_hop(hop, None)`, the way a two-node hop always moved - None."""
+    from . import scenarios, topology
+    said = scenarios.topology_settings(hop)
+    if not any(said.get(k) for k in ("spaces", "conflict", "route",
+                                     "marks")):
+        run_hop(hop, None)
+        return None
+    group_ = _sharing_sites(hop, hops)
+    if topology.layout(group_, speed).kind == "":
+        run_hop(hop, None)
+        return None
+    facts, lay = topology.facts_of(
+        group_, tables, spaces=said.get("spaces"),
+        conflict=said.get("conflict"), route=said.get("route"),
+        marks=said.get("marks"), speed=speed)
+    return run_topology(group_, facts, lay, run_hop, read_rows,
+                        rows_by_hop=rows_by_hop, at_once=at_once)
+
+
+def _sharing_sites(hop, hops):
+    """`hop` and every hop reached from it through a site two hops share:
+    the hops of its topology, in the configuration's order."""
+    from .topology import site
+    hops = list(hops)
+    sites = {site(hop.source), site(hop.target)}
+    group_ = {hop.name}
+    grew = True
+    while grew:
+        grew = False
+        for h in hops:
+            ends = {site(h.source), site(h.target)}
+            if h.name not in group_ and ends & sites:
+                group_.add(h.name)
+                sites |= ends
+                grew = True
+    return [h for h in hops if h.name in group_] or [hop]
