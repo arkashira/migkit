@@ -615,15 +615,183 @@ class MongoEngine(Engine):
                 return {}
             # a command only Azure Cosmos DB answers: MongoDB refuses it as
             # one it does not have, and its answer names the brand
+            from pymongo.errors import OperationFailure
+            asked = True
             try:
                 got = self._client(side).admin.command(
                     "getLastRequestStatistics")
                 out["cosmos_request_charge"] = str(got.get("RequestCharge",
                                                            ""))
+            except OperationFailure:
+                pass        # refused: an answer, and not Cosmos DB's
             except Exception:
-                pass
+                asked = False
+            # a stage only Amazon DocumentDB answers (`variants`), read-only
+            try:
+                out["list_change_streams"] = repr(list(
+                    self._client(side).admin.aggregate(
+                        [{"$listChangeStreams": 1}])))
+            except OperationFailure:
+                pass        # refused as unrecognised: MongoDB's answer
+            except Exception:
+                asked = False
+            ep = self.hop.source if side == "src" else self.hop.target
+            from .. import variants
+            out.update(variants.context(ep), _asked=str(asked))
             return out
         return (one("src"), one("dst"))
+
+    # ---- Amazon DocumentDB's pre-flight (`variants`: `documentdb`) ---------
+    #: DocumentDB's documented range of `change_stream_log_retention_duration`,
+    #: seconds (its developer guide, "Modifying the change stream log
+    #: retention duration")
+    DOCDB_RETENTION = (3600, 604800)
+
+    def catalogue_snapshot(self, side, db):
+        """{collection: (its options, its indexes)} as the server's
+        catalogue says now: what a schema change is seen by on a brand
+        whose change stream emits none (`decide.ddl_follow`)."""
+        d = self._client(side)[self._d(side, db)]
+        out = {}
+        for c in d.list_collections():
+            name = c["name"]
+            if name.startswith("system."):
+                continue
+            idx = tuple(sorted(
+                (i["name"], tuple((str(k), str(v)) for k, v in
+                                  dict(i["key"]).items()),
+                 bool(i.get("unique"))) for i in d[name].list_indexes()))
+            out[name] = (repr(sorted(dict(c.get("options") or {}).items())),
+                         idx)
+        return out
+
+    @staticmethod
+    def catalogue_changes(before, after):
+        """The schema changes between two catalogue snapshots, as
+        sentences: collections created and dropped, options changed,
+        indexes added and dropped."""
+        said = []
+        for name in sorted(set(after) - set(before)):
+            said.append(f"collection {name} was created")
+        for name in sorted(set(before) - set(after)):
+            said.append(f"collection {name} was dropped")
+        for name in sorted(set(before) & set(after)):
+            (o1, i1), (o2, i2) = before[name], after[name]
+            if o1 != o2:
+                said.append(f"collection {name}'s options changed")
+            was, now = {i[0]: i for i in i1}, {i[0]: i for i in i2}
+            for ix in sorted(set(now) - set(was)):
+                said.append(f"index {ix} was added on {name}")
+            for ix in sorted(set(was) - set(now)):
+                said.append(f"index {ix} was dropped from {name}")
+            for ix in sorted(set(was) & set(now)):
+                if was[ix] != now[ix]:
+                    said.append(f"index {ix} on {name} was rebuilt"
+                                " differently")
+        return said
+
+    def ddl_at_batch(self, side, db, held):
+        """The schema changes seen at a change-stream batch's boundary,
+        where `decide.ddl_follow` takes the catalogue's snapshots: the
+        catalogue read again and held to the last read (`held`, a dict
+        kept across batches); [] where the stream's own events say them."""
+        from .. import decide
+        brand = self._brands()[0 if side == "src" else 1]
+        major = int((str(brand.version).split(".") or ["0"])[0] or 0) \
+            if str(brand.version).split(".")[0].isdigit() else 0
+        way = decide.ddl_follow({
+            "told": brand.told, "brand": brand.name,
+            "expanded_events": brand.name == "mongodb" and major >= 6})
+        if way.rung is not None and way.rung.name == "events":
+            return []
+        now = self.catalogue_snapshot(side, db)
+        before = held.get("snapshot")
+        held["snapshot"] = now
+        return [] if before is None else self.catalogue_changes(before, now)
+
+    @classmethod
+    def documentdb_preflight(cls, db, collections, streams, retention_s,
+                             forecast_s, brand):
+        """The rows DocumentDB's pre-flight gives, from what was read:
+        `streams` (what `$listChangeStreams` answered: {database,
+        collection}, "" for all), `retention_s` (the cluster's change
+        stream log retention, None where unread) and `forecast_s` (the
+        move's forecast length, None where unknown). Each blocker carries
+        the exact command or setting the DBA applies."""
+        from .. import variants
+        scope = f"{db} DocumentDB change streams"
+        refused = variants.acts_on(brand, "the DocumentDB pre-flight")
+        if refused:
+            return [Result("schema", scope, "warn", refused)]
+        if brand.name != "documentdb":
+            return []
+        on = {(str(s.get("database", "")), str(s.get("collection", "")))
+              for s in streams or ()}
+        out = []
+        off = [c for c in collections
+               if not on & {("", ""), (db, ""), (db, c)}]
+        if off:
+            out.append(Result(
+                "schema", scope, "fail",
+                f"change streams are off for {len(off)} collection(s) in"
+                f" {db}: {', '.join(off[:5])}"
+                f"{' ...' if len(off) > 5 else ''} - their changes would"
+                " not be followed",
+                fix_hint="; ".join(
+                    f'db.adminCommand({{modifyChangeStreams: 1, database:'
+                    f' "{db}", collection: "{c}", enable: true}})'
+                    for c in off)))
+        else:
+            out.append(Result("schema", scope, "ok",
+                              f"change streams are on for every collection"
+                              f" in {db} ({brand.confidence})"))
+        low, high = cls.DOCDB_RETENTION
+        what = f"{db} change stream retention"
+        if retention_s is None or forecast_s is None:
+            out.append(Result(
+                "schema", what, "warn",
+                "the change stream log retention "
+                + ("was not read" if retention_s is None
+                   else f"is {int(retention_s)}s")
+                + " and the move's forecast length "
+                + ("is not known" if forecast_s is None
+                   else f"is {int(forecast_s)}s")
+                + " - not compared, unknown rather than clean",
+                fix_hint="read change_stream_log_retention_duration in the"
+                         " cluster parameter group"))
+        elif retention_s < forecast_s:
+            need = min(max(int(forecast_s + 0.999), low), high)
+            out.append(Result(
+                "schema", what, "fail",
+                f"the change stream log keeps {int(retention_s)}s, shorter"
+                f" than the move's forecast {int(forecast_s)}s: changes"
+                " made while it copies would be gone before they are"
+                " followed" + ("" if forecast_s <= high else
+                               f"; the longest it keeps is {high}s, so the"
+                               " move is to be split"),
+                fix_hint=f"set change_stream_log_retention_duration to"
+                         f" {need} in the cluster parameter group"))
+        else:
+            out.append(Result("schema", what, "ok",
+                              f"the change stream log keeps"
+                              f" {int(retention_s)}s, the move's forecast"
+                              f" is {int(forecast_s)}s"))
+        return out
+
+    def _documentdb_ready(self, db):
+        """DocumentDB's pre-flight on the source (`documentdb_preflight`):
+        its change streams per collection read off `$listChangeStreams`;
+        the retention and the forecast where they are known."""
+        brand = self._brands()[0]
+        if brand.told and brand.name != "documentdb":
+            return []
+        streams = []
+        if brand.told:
+            streams = list(self._client("src").admin.aggregate(
+                [{"$listChangeStreams": 1}]))
+        return self.documentdb_preflight(
+            db, self.neutral_tables("src", db) if brand.told else [],
+            streams, None, None, brand)
 
     def _server_versions(self):
         s, d = self._brands()
@@ -4595,7 +4763,26 @@ class MongoEngine(Engine):
         the programs the move would run."""
         inv = self._handwork()
         return (inv.rows() + inv.summary() + self._mover_leftovers()
-                + self._bulk_path_rows())
+                + self._bulk_path_rows() + self._documentdb_rows())
+
+    def _documentdb_rows(self):
+        """`_documentdb_ready` for every database, as `assess` rows: a
+        blocker fails the pre-flight, a read that could not run warns."""
+        level_of = {"fail": "fail", "warn": "warn", "ok": "pass"}
+        out = []
+        for db in self.databases():
+            try:
+                got = self._documentdb_ready(db)
+            except Exception as e:  # noqa: BLE001 - said, as a row
+                got = [Result("schema", f"{db} DocumentDB change streams",
+                              "warn", f"could not run: {str(e)[:90]}")]
+            out.extend({"level": level_of.get(r.status, "warn"),
+                        "scope": "before the move", "item": r.scope,
+                        "detail": r.detail + (f"  [fix] {r.fix_hint}"
+                                              if r.fix_hint
+                                              and r.status != "ok" else "")}
+                       for r in got)
+        return out
 
     #: what `assess` asks before anything moves (`Engine._preflight_items`)
     PREFLIGHT = ("_stream_ready", "_features_the_target_lacks")

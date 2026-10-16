@@ -88,6 +88,11 @@ class Brand:
     evidence: str = ""
     measured: bool = False
     limits: dict = field(default_factory=dict)
+    #: how sure migkit is that this is the brand: "sure", "likely" or
+    #: "not told apart" (`decide.brand_confidence`), and the facts it
+    #: stood on, each with where it was read
+    confidence: str = "not told apart"
+    sources: tuple = ()
 
     @property
     def identified(self):
@@ -101,6 +106,11 @@ class Brand:
         expected state.
         """
         return self.limits.get(capability, "")
+
+    @property
+    def told(self):
+        """Whether a brand-dependent step may act on this brand."""
+        return self.identified and self.confidence in ACTS_ON
 
     def label(self):
         return f"{self.name} {self.version}".strip() if self.version \
@@ -175,6 +185,12 @@ SIGNATURES = {
         ("mssql", [("banner", "microsoft sql server")], "product_version"),
     ],
     "mongodb": [
+        # Amazon DocumentDB answers an aggregation stage of its own,
+        # `$listChangeStreams`, with the collections whose change streams
+        # are on (its developer guide, "Using change streams"); MongoDB
+        # refuses the stage as unrecognised. The probe asks it read-only,
+        # and only an answer names the brand (`_brand_probes`)
+        ("documentdb", [("list_change_streams", "")], "version"),
         ("ferretdb", [("ferretdb", "")], "version"),
         # Azure Cosmos DB answers a command of its own, which MongoDB does
         # not know: the charge of the last request (Microsoft Learn, "Find
@@ -213,6 +229,11 @@ SIGNATURES = {
     # The bare form is all any Apache-Kafka-protocol broker reports, so it
     # names the implementation and not the distribution - see LIMITS.
     "kafka": [
+        # Amazon MSK's IAM listener advertises its own SASL mechanism,
+        # `AWS_MSK_IAM`, in the broker's answer to the SASL handshake (its
+        # developer guide, "IAM access control"); a self-run broker does
+        # not have it to advertise. Read off the wire (`kafka.mechanisms`)
+        ("msk", [("sasl_mechanisms", "aws_msk_iam")], ""),
         ("redpanda", [("cluster_id", "redpanda.")], ""),
         ("kafka", [("cluster_id", "")], ""),
     ],
@@ -235,6 +256,15 @@ SIGNATURES = {
          "dbc_version"),
     ],
     "redis": [
+        # Redis Enterprise runs its shards from its own install tree,
+        # `/opt/redislabs`, which INFO's Server section names in
+        # `executable` and `config_file`, and reports its software's own
+        # release beside the protocol number (`rlec_version`: assumed from
+        # the vendor's notes, not confirmed in its reference)
+        ("redis-enterprise", [("rlec_version", ""),
+                              ("executable", "/opt/redislabs"),
+                              ("config_file", "/opt/redislabs")],
+         "rlec_version"),
         # Valkey says both, and says them in the Server section of INFO where
         # the engine is already looking.
         ("valkey", [("server_name", "valkey"),
@@ -263,6 +293,29 @@ SIGNATURES = {
     "oracle": [
         ("oracle", [("product", "oracle database")], "version"),
     ],
+}
+
+#: the confidences a brand-dependent step acts on; "not told apart" is not
+#: one, whatever the server's family is
+ACTS_ON = ("sure", "likely")
+#: the managed brands, by the service name the address catalogue
+#: (`clouds.HOSTS`) and the hop's `managed.service` give them
+MANAGED = {"documentdb": "documentdb", "msk": "msk",
+           "redis-enterprise": "redis-enterprise"}
+#: the brands built here and run against no real service: what each one's
+#: rows say, and the cells it holds (`capabilities`' seam is per engine
+#: module, and these share their module with the open-source engine the
+#: sandbox proves)
+UNPROVED_ON = {
+    "documentdb": "built; not run against a real DocumentDB cluster",
+    "msk": "built; not run against a real MSK cluster",
+    "redis-enterprise": "built; not run against a real Redis Enterprise",
+}
+UNPROVED_ITEMS = {
+    "documentdb": "brand.told preflight.change-streams preflight.retention"
+                  " tail.ddl-snapshot",
+    "msk": "brand.told sign-in.iam sign-in.mechanisms",
+    "redis-enterprise": "brand.told",
 }
 
 # What migkit measured about a brand, keyed by capability. A brand absent
@@ -335,15 +388,56 @@ def _fields(raw):
     return out
 
 
+def _confidence(family, fields, server, evidence):
+    """(brand, confidence, sources) from the server's sign and what the
+    engine's probe read beside it: `_endpoint` (the service the address
+    catalogue names), `_named` (the hop's `managed.service`), `_api` (the
+    brand the provider's own API confirmed) and `_asked` (every question
+    that tells the family's brands apart was answered)."""
+    from . import decide
+    brands = {n for n, _, _ in SIGNATURES.get(family, [])}
+    by_service = {v: k for k, v in MANAGED.items()}
+    endpoint = fields.get("_endpoint", "").strip().lower()
+
+    def brand_of(word):
+        word = str(word or "").strip().lower()
+        return by_service.get(word, word if word in brands else "")
+    facts = {"server": server, "managed": server in MANAGED,
+             "endpoint": brand_of(endpoint), "address": endpoint,
+             "named": brand_of(fields.get("_named")),
+             "api": brand_of(fields.get("_api")),
+             # a family with no managed brand to tell apart has nothing
+             # more to ask; one with them, every question answered
+             "asked": (not brands & set(MANAGED)
+                       or fields.get("_asked", "") in ("1", "True", "true"))}
+    choice = decide.brand_confidence(facts)
+    sources = []
+    if server:
+        sources.append(f"the server ({evidence})")
+    if endpoint:
+        sources.append(f"the address (a {endpoint} name)")
+    if facts["named"]:
+        sources.append(f"the hop (managed.service {facts['named']})")
+    if facts["api"]:
+        sources.append(f"the provider's own API ({facts['api']})")
+    if choice.rung is None:
+        return server or "unknown", "not told apart", tuple(sources)
+    told = (facts["api"] or facts["named"] or server or facts["endpoint"])
+    return told, decide.BRAND_CONFIDENCE[choice.rung.name], tuple(sources)
+
+
 def identify(family, raw):
     """The brand behind a family, from what the server said about itself.
 
     `raw` is whatever the engine could read - a version banner, an INFO dict,
     a settings row. Nothing is required: a field that is missing simply does
     not match, and a server that said nothing recognisable comes back as
-    `unknown` rather than as the family's own software.
+    `unknown` rather than as the family's own software. How sure the name
+    is (`Brand.confidence`) is the decision engine's, from the sign and
+    what else was read; an absence is never a sign.
     """
     fields = _fields(raw)
+    found = None
     for name, sigs, version_key in SIGNATURES.get(family, []):
         for key, needle in sigs:
             got = fields.get(key)
@@ -351,15 +445,52 @@ def identify(family, raw):
                 continue
             if needle and needle not in got.lower():
                 continue
-            limits = LIMITS.get(name)
-            return Brand(name=name, family=family,
-                         version=fields.get(version_key, "").strip(),
-                         evidence=f"{key}={got[:60]}" if got else key,
-                         measured=limits is not None,
-                         limits=dict(limits or {}))
-    return Brand(name="unknown", family=family,
-                 version=str(fields.get("version", "")).strip(),
-                 evidence="nothing the server reported names a brand")
+            found = (name, version_key,
+                     f"{key}={got[:60]}" if got else key)
+            break
+        if found:
+            break
+    server, version_key, evidence = found or (
+        "", "version", "nothing the server reported names a brand")
+    name, confidence, sources = _confidence(family, fields, server,
+                                            evidence)
+    if name == "unknown":
+        return Brand(name="unknown", family=family,
+                     version=str(fields.get("version", "")).strip(),
+                     evidence=evidence, sources=sources)
+    limits = LIMITS.get(name)
+    if not server:
+        evidence = "; ".join(sources)
+    return Brand(name=name, family=family,
+                 version=fields.get(version_key, "").strip(),
+                 evidence=evidence, measured=limits is not None,
+                 limits=dict(limits or {}), confidence=confidence,
+                 sources=sources)
+
+
+def context(ep):
+    """What beside a side's server tells its brand, for `identify`: the
+    service its address names (`clouds.from_host`) and the one the hop
+    names (`managed.service`)."""
+    from . import clouds
+    named = (getattr(ep, "options", None) or {}).get("managed") or {}
+    return {"_endpoint": clouds.from_host(ep.host).service or "",
+            "_named": str(named.get("service") or "")
+            if isinstance(named, dict) else ""}
+
+
+def acts_on(brand, step):
+    """'' where a brand-dependent `step` may act on `brand`, else why not
+    and the next step: a brand not told apart is never acted on as one."""
+    if brand is not None and brand.told:
+        return ""
+    said = brand.label() if brand is not None and brand.identified \
+        else "the server"
+    return (f"{step} is not taken: {said} is not told apart from the"
+            " software it is compatible with (no sign the server gives,"
+            " its address or the provider's API names it). Next: name the"
+            " service in the hop (`managed: {service: <name>}` on the"
+            " side)")
 
 
 def mismatch(src, dst):
@@ -397,18 +528,26 @@ def rows(src, dst):
     for side, b in (("source", src), ("target", dst)):
         if b is None:
             continue
-        if not b.identified:
+        if not b.identified or not b.told:
             add("warn", f"{side} brand",
-                f"{b.evidence} - unknown, not clean:"
-                " migkit cannot say which software is answering")
+                f"{b.evidence} - unknown, not clean, not told apart:"
+                " migkit cannot say which software is answering. Next:"
+                " name the service in the hop (`managed: {service:"
+                " <name>}`)")
+            continue
+        sure = f"{b.confidence}, from {', '.join(b.sources) or b.evidence}"
+        if b.name in UNPROVED_ON:
+            add("warn", f"{side} brand",
+                f"{b.label()} ({sure}) - {UNPROVED_ON[b.name]}")
             continue
         if not b.measured:
             add("warn", f"{side} brand",
-                f"{b.label()} ({b.evidence}) - identified, but migkit has"
-                " not been measured against it, so its limits are unknown"
-                " rather than none")
+                f"{b.label()} ({b.evidence}; {sure}) - identified, but"
+                " migkit has not been measured against it, so its limits"
+                " are unknown rather than none")
             continue
-        add("pass", f"{side} brand", f"{b.label()} ({b.evidence})")
+        add("pass" if b.confidence == "sure" else "warn", f"{side} brand",
+            f"{b.label()} ({b.evidence}; {sure})")
     why = mismatch(src, dst)
     if why:
         add("warn", "brand pairing", why)

@@ -184,3 +184,14 @@ def test_a_brand_with_no_known_gtid_equivalent_says_it_is_guessing(servers):
     assert on is False
     assert "does not know this brand's equivalent" in note, note
     assert "may not be the true one" in note, note
+
+
+def test_a_mysql_family_brand_is_sure_from_its_own_banner():
+    """The MySQL family has no managed brand to tell apart here: its own
+    banner is the sign, and the brand is sure (`decide.brand_confidence`)."""
+    from migkit import variants
+    maria = variants.identify("mysql", {"version": "11.8.2-MariaDB"})
+    my = variants.identify("mysql", {"version": "8.4.0",
+                                     "version_comment": "MySQL Community"})
+    assert (maria.name, maria.confidence) == ("mariadb", "sure")
+    assert (my.name, my.confidence) == ("mysql", "sure")

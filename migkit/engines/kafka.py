@@ -6,6 +6,156 @@ import time
 from .. import kafkaclient, pieces
 from .base import Engine, RepairAction, Result
 
+#: the SASL handshake's API key and the error a listener without SASL
+#: answers it with (the protocol's own numbers)
+SASL_HANDSHAKE, ILLEGAL_SASL_STATE = 17, 34
+#: how long Amazon MSK's IAM token holds, seconds: the presigned request's
+#: `X-Amz-Expires` (the provider's token signer for this sign-in)
+MSK_TOKEN_LIFETIME = 900
+
+
+def sasl_mechanisms(host, port, tls=False, cafile=None, timeout=10.0):
+    """The SASL mechanisms a broker's listener advertises, read off the
+    wire: a SASL handshake (version 1) naming none it takes, whose answer
+    lists the ones it does. [] where the listener takes no SASL (it
+    answers with the illegal-state error), None where nothing answered."""
+    import socket
+    import ssl
+    import struct
+    client, mech = b"migkit", b"-"
+    body = (struct.pack(">hhih", SASL_HANDSHAKE, 1, 1, len(client)) + client
+            + struct.pack(">h", len(mech)) + mech)
+    try:
+        sock = socket.create_connection((host, int(port)), timeout=timeout)
+    except OSError:
+        return None
+    try:
+        if tls:
+            ctx = ssl.create_default_context(cafile=cafile)
+            sock = ctx.wrap_socket(sock, server_hostname=host)
+        sock.sendall(struct.pack(">i", len(body)) + body)
+
+        def read(n):
+            got = b""
+            while len(got) < n:
+                part = sock.recv(n - len(got))
+                if not part:
+                    raise OSError("closed")
+                got += part
+            return got
+        size = struct.unpack(">i", read(4))[0]
+        data = read(size)
+    except (OSError, struct.error):
+        return None
+    finally:
+        sock.close()
+    try:
+        _cid, err, count = struct.unpack(">ihi", data[:10])
+        out, at = [], 10
+        for _ in range(max(count, 0)):
+            n = struct.unpack(">h", data[at:at + 2])[0]
+            out.append(data[at + 2:at + 2 + n].decode())
+            at += 2 + n
+    except (struct.error, UnicodeDecodeError):
+        return None
+    return [] if err == ILLEGAL_SASL_STATE and not out else out
+
+
+def msk_presign(region, access_key, secret_key, session_token=None,
+                now=None, lifetime=MSK_TOKEN_LIFETIME):
+    """(token, expires at, epoch seconds) of Amazon MSK's IAM sign-in: a
+    request to `kafka-cluster:Connect` presigned with the provider's
+    signature version 4 for the service `kafka-cluster`, base64url without
+    padding, as the provider's token signer for this sign-in builds it."""
+    import base64
+    import datetime
+    import hmac
+    from urllib.parse import quote
+    at = datetime.datetime.fromtimestamp(
+        time.time() if now is None else now, datetime.timezone.utc)
+    stamp, day = at.strftime("%Y%m%dT%H%M%SZ"), at.strftime("%Y%m%d")
+    host = f"kafka.{region}.amazonaws.com"
+    scope = f"{day}/{region}/kafka-cluster/aws4_request"
+    query = {"Action": "kafka-cluster:Connect",
+             "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+             "X-Amz-Credential": f"{access_key}/{scope}",
+             "X-Amz-Date": stamp, "X-Amz-Expires": str(int(lifetime)),
+             "X-Amz-SignedHeaders": "host"}
+    if session_token:
+        query["X-Amz-Security-Token"] = session_token
+    canon_q = "&".join(f"{quote(k, safe='-_.~')}={quote(v, safe='-_.~')}"
+                       for k, v in sorted(query.items()))
+    canon = f"GET\n/\n{canon_q}\nhost:{host}\n\nhost\nUNSIGNED-PAYLOAD"
+    to_sign = ("AWS4-HMAC-SHA256\n" + stamp + "\n" + scope + "\n"
+               + hashlib.sha256(canon.encode()).hexdigest())
+
+    def mac(key, msg):
+        return hmac.new(key, msg.encode(), hashlib.sha256).digest()
+    key = mac(mac(mac(mac(("AWS4" + secret_key).encode(), day), region),
+                  "kafka-cluster"), "aws4_request")
+    sig = hmac.new(key, to_sign.encode(), hashlib.sha256).hexdigest()
+    url = (f"https://{host}/?{canon_q}&X-Amz-Signature={sig}"
+           f"&User-Agent=migkit")
+    token = base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
+    return token, at.timestamp() + int(lifetime)
+
+
+class MskToken:
+    """Amazon MSK's IAM sign-in token for one side, minted through the
+    egress gate (the `provider` kind: the provider's credentials are
+    asked for), kept while it holds and minted again before it lapses
+    (`decide.token_renew`). It is the pure client's token provider
+    (`token()`) and the compiled client's token callback (called with the
+    client's settings); its value is never in its repr or a log line."""
+
+    def __init__(self, hop, region, credentials=None, clock=None, log=None):
+        self.hop, self.region, self.log = hop, region, log
+        self._credentials = credentials
+        self._clock = clock or time.time
+        self._value, self.expires, self.minted = None, 0.0, []
+
+    def __repr__(self):
+        return f"MskToken({self.region}, expires {int(self.expires)})"
+
+    def _creds(self):
+        if self._credentials is not None:
+            return self._credentials()
+        import botocore.session
+        got = botocore.session.Session().get_credentials()
+        if got is None:
+            raise SystemExit("Amazon MSK's IAM sign-in has no provider"
+                             " credentials on this machine. Next: give the"
+                             " machine an identity, or sign in with SCRAM")
+        f = got.get_frozen_credentials()
+        return f.access_key, f.secret_key, f.token
+
+    def token(self):
+        from .. import decide, egress
+        now = self._clock()
+        if self._value is not None:
+            margin, _ = decide.token_renew(MSK_TOKEN_LIFETIME, self.minted)
+            if self.expires - now > margin:
+                return self._value
+        ok, why = egress.decide(self.hop, "provider",
+                                host=f"kafka.{self.region}.amazonaws.com")
+        if not ok:
+            egress._refused(self.hop, "provider", why, self.log)
+            raise SystemExit(
+                f"Amazon MSK's IAM sign-in is not minted: {why}. Next: let"
+                " calls to the cloud provider's own API out (MIGKIT_EGRESS="
+                "provider, or `provider` in the hop's egress allow), or sign"
+                " in with SCRAM")
+        began = self._clock()
+        access, secret, session = self._creds()
+        self._value, self.expires = msk_presign(
+            self.region, access, secret, session, now=began)
+        self.minted.append(self._clock() - began)
+        return self._value
+
+    def __call__(self, _config=None):
+        value = self.token()
+        return value, self.expires
+
 
 class KafkaEngine(Engine):
     checks = ("schema", "counts", "data")
@@ -51,17 +201,57 @@ class KafkaEngine(Engine):
             if mech not in self.MECHANISMS:
                 raise SystemExit(f"sasl_mechanism: {mech} is not one of"
                                  f" {', '.join(self.MECHANISMS)}")
+            if not ep.options.get("sasl_mechanism"):
+                mech = self._sign_in_way(side, ep, hosts, protocol)
             if mech == "AWS_MSK_IAM":
                 if protocol != "SASL_SSL":
                     raise SystemExit("sasl_mechanism: AWS_MSK_IAM signs in"
                                      " over SASL_SSL only")
-                out.update(sasl_mechanism=mech)
+                # the token the broker checks, minted and renewed here
+                # (`MskToken`) and carried as a bearer token
+                from .. import clouds
+                region = (ep.options.get("aws_region")
+                          or clouds.from_host(ep.host).region)
+                out.update(sasl_mechanism="OAUTHBEARER",
+                           sasl_oauth_token_provider=MskToken(
+                               self.hop, region))
             else:
                 out.update(sasl_mechanism=mech, sasl_plain_username=ep.user,
                            sasl_plain_password=ep.password)
         if ep.options.get("ssl_cafile"):
             out["ssl_cafile"] = ep.options["ssl_cafile"]
         return out
+
+    def _sign_in_way(self, side, ep, hosts, protocol):
+        """The SASL mechanism a side whose options name none signs in by:
+        `decide.kafka_sign_in` on what its broker advertises
+        (`sasl_mechanisms`), the provider's credentials and the side's
+        account; recorded with the run's decisions. PLAIN where nothing
+        was read and nothing holds - the client's own default before."""
+        from .. import decide
+        held = self.__dict__.setdefault("_sign_in", {})
+        if side not in held:
+            host, _, port = str(hosts[0]).rpartition(":")
+            got = sasl_mechanisms(host or ep.host, port or ep.port,
+                                  tls=protocol == "SASL_SSL",
+                                  cafile=ep.options.get("ssl_cafile"))
+            choice = decide.kafka_sign_in({
+                "advertised": got, "asked": "",
+                "credentials": self._provider_credentials(),
+                "account": bool(ep.user)})
+            decide.record(self.hop, choice)
+            held[side] = choice.rung.name if choice.rung else "PLAIN"
+        return held[side]
+
+    @staticmethod
+    def _provider_credentials():
+        """Whether this machine has the provider's credentials to sign
+        Amazon MSK's IAM token with (the provider's library finds them)."""
+        try:
+            import botocore.session
+            return botocore.session.Session().get_credentials() is not None
+        except Exception:  # noqa: BLE001 - not there is the answer
+            return False
 
     def _signed_in(self, side, make):
         """`make()`, with a refused sign-in said as one. The client retries
@@ -1476,11 +1666,26 @@ class KafkaEngine(Engine):
         papered over.
         """
         def one(side):
+            from .. import variants
+            ep = self.hop.source if side == "src" else self.hop.target
+            hosts = ep.options.get("hosts") or [f"{ep.host}:{ep.port}"]
+            host, _, port = str(hosts[0]).rpartition(":")
+            proto = str(ep.options.get("security_protocol") or "").upper()
+            # the listener's mechanisms: Amazon MSK's IAM one is its sign
+            got = sasl_mechanisms(host or ep.host, port or ep.port,
+                                  tls=proto.endswith("SSL"),
+                                  cafile=ep.options.get("ssl_cafile"))
+            out = {**variants.context(ep),
+                   "_asked": str(got is not None)}
+            if got:
+                out["sasl_mechanisms"] = ",".join(got)
             try:
                 cid = self._cluster_id(side)
-                return {"cluster_id": cid} if cid else {}
+                if cid:
+                    out["cluster_id"] = cid
             except Exception:
-                return {}
+                out["_asked"] = "False"
+            return out
         return (one("src"), one("dst"))
 
     def _cluster_id(self, side):

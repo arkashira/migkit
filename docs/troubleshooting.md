@@ -975,6 +975,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 ## Kafka
 
+* Amazon MSK's IAM sign-in has no provider credentials on this machine. Next: give the machine an identity, or sign in with SCRAM
+
+* Amazon MSK's IAM sign-in is not minted: <...>. Next: let calls to the cloud provider's own API out (MIGKIT_EGRESS=provider, or `provider` in the hop's egress allow), or sign in with SCRAM
+
 * security_protocol: <...> is not one of <...>
 
 * sasl_mechanism: <...> is not one of <...>

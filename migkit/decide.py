@@ -4625,3 +4625,130 @@ def ase_delta_way(facts):
                  " (the replication agent runs, and its log is the"
                  " replication server's)" if f.get("agent") else "")
              + ": the full check compares every row")), f)
+
+# --- which brand answers, how sure, and what it decides (W17G) -------------
+
+#: the confidence each rung of `brand_confidence` gives the brand
+BRAND_CONFIDENCE = {"api": "sure", "named": "sure", "agreed": "sure",
+                    "server": "likely", "address": "likely"}
+
+
+def brand_confidence(facts):
+    """`Choice` of how sure migkit is of the brand behind a side, from what
+    `variants.identify` read: `server` (the brand a documented sign of the
+    server names, or ""), `managed` (whether that brand is a managed
+    service), `endpoint` (the brand the address catalogue names) and
+    `address` (the service it names, of any family), `named` (the hop's
+    `managed.service`), `api` (the brand the provider's own API confirmed)
+    and `asked` (every question telling the family's brands apart was
+    answered). An absence is never a sign: where no rung holds, the brand
+    is not told apart and nothing brand-dependent acts on it."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+
+    def agrees(x, key):
+        told = [x.get(k) for k in ("api", "named", "server", "endpoint")
+                if x.get(k)]
+        return bool(x.get(key)) and all(t == x.get(key) for t in told)
+    said = (f"the server says {f.get('server') or 'nothing distinctive'},"
+            f" the address {f.get('address') or 'names no service'}")
+    return climb("how sure the brand answering is", (
+        Rung("api", "confirmed by the provider's own API",
+             needs=(Need("the provider's API answered for the side",
+                         lambda x: agrees(x, "api"),
+                         "the provider's API was not reached or does not"
+                         " agree"),), because=said),
+        Rung("named", "the service the hop names, which nothing read"
+             " contradicts",
+             needs=(Need("the hop names the service",
+                         lambda x: agrees(x, "named"),
+                         "the hop names no service, or a read fact"
+                         " contradicts it"),), because=said),
+        Rung("agreed", "a documented sign of the server, which its address"
+             " and every other question asked agree with",
+             needs=(Need("a sign of the server", lambda x: agrees(x, "server"),
+                         "the server gave no sign of its own"),
+                    Need("its address agrees",
+                         lambda x: (x.get("endpoint") == x.get("server")
+                                    if x.get("managed")
+                                    else not x.get("address")),
+                         "its address does not say the same"),
+                    Need("every telling question answered",
+                         lambda x: x.get("managed") or x.get("asked"),
+                         "a question that tells its brands apart went"
+                         " unanswered")), because=said),
+        Rung("server", "a documented sign of the server alone",
+             needs=(Need("a sign of the server", lambda x: agrees(x, "server"),
+                         "the server gave no sign of its own"),),
+             because=said),
+        Rung("address", "the address alone, a fact of the endpoint and not"
+             " of the server",
+             needs=(Need("the address names the brand",
+                         lambda x: not x.get("server")
+                         and agrees(x, "endpoint"),
+                         "the address names no brand of this family"),),
+             because=said)), f)
+
+
+def kafka_sign_in(facts):
+    """`Choice` of how a Kafka side signs in, from the mechanisms its
+    broker advertised in the SASL handshake (`advertised`, a list, or None
+    where it was not read), the one the side's options ask (`asked`), and
+    what this machine has: the provider's credentials (`credentials`) and
+    the side's user and password (`account`). Amazon MSK's IAM token goes
+    first where the broker advertises it; a side whose options name a
+    mechanism takes only that one."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+
+    def offered(mech):
+        def holds(x):
+            got = x.get("advertised")
+            asked = str(x.get("asked") or "").upper()
+            if asked and asked != mech:
+                return False
+            return mech in [str(m).upper() for m in got] if got is not None \
+                else asked == mech
+        return Need(f"the broker advertises {mech}", holds,
+                    f"the broker does not advertise {mech}, or the side asks"
+                    " another")
+    account = Need("a user and password", lambda x: x.get("account"),
+                   "the side has no user and password")
+    said = (f"advertised {', '.join(f.get('advertised') or ()) or 'unread'};"
+            f" asked {f.get('asked') or 'none'}")
+    return climb("how a Kafka side signs in", (
+        Rung("AWS_MSK_IAM", "a token signed for the cluster from the"
+             " provider's credentials (presigned connect, over TLS)",
+             needs=(offered("AWS_MSK_IAM"),
+                    Need("the provider's credentials",
+                         lambda x: x.get("credentials"),
+                         "this machine has no provider credentials")),
+             because=said),
+        Rung("SCRAM-SHA-512", "a salted challenge on the side's account,"
+             " SHA-512", needs=(offered("SCRAM-SHA-512"), account),
+             because=said),
+        Rung("SCRAM-SHA-256", "a salted challenge on the side's account,"
+             " SHA-256", needs=(offered("SCRAM-SHA-256"), account),
+             because=said, footprint=1),
+        Rung("PLAIN", "the side's account sent as it is, inside TLS",
+             needs=(offered("PLAIN"), account), because=said,
+             footprint=2)), f)
+
+
+def ddl_follow(facts):
+    """`Choice` of how a document store's schema changes are seen while
+    its changes are followed: the change stream's own DDL events where the
+    server emits them (`expanded_events`), else the catalogue (its
+    collections, options and indexes) read again at every batch and held
+    to the last read - the way that works on every brand, and the one a
+    brand not told apart (`told` False) is given."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    return climb("how a schema change is seen while following", (
+        Rung("events", "the change stream's own schema-change events",
+             needs=(Need("a brand told apart", lambda x: x.get("told"),
+                         "the brand is not told apart"),
+                    Need("the server emits them",
+                         lambda x: x.get("expanded_events"),
+                         "the server emits no schema-change events")),
+             because=f"brand {f.get('brand') or 'unknown'}"),
+        Rung("snapshots", "the catalogue read again at every batch and held"
+             " to the last read", footprint=1,
+             because="every brand answers its catalogue")), f)

@@ -144,10 +144,16 @@ class RedisEngine(Engine):
         further down in the same reply.
         """
         def info(side):
+            from .. import variants
+            ep = self.hop.source if side == "src" else self.hop.target
             try:
-                return self._client(side).info()
+                got = dict(self._client(side).info())
             except Exception:
                 return {}
+            # what beside the server tells a managed brand from Redis
+            got.update(variants.context(ep),
+                       _asked=str(bool(got.get("redis_version"))))
+            return got
         return (info("src"), info("dst"))
 
     def _server_versions(self):

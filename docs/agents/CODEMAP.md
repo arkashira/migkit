@@ -230,7 +230,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/engines/generic.py` - (no docstring) Classes: GenericEngine.
 - `migkit/engines/hetero.py` - (no docstring) Classes: HeteroEngine.
 - `migkit/engines/hooks.py` - What an engine asks of the workflow above it, by name. Classes: HookNotFilled.
-- `migkit/engines/kafka.py` - (no docstring) Classes: KafkaEngine.
+- `migkit/engines/kafka.py` - (no docstring) Classes: MskToken, KafkaEngine.
 - `migkit/engines/keyspaces.py` - Amazon Keyspaces as a side of a pair (backlog P0-CLOUDS): the Cassandra engine (`cassandra`), with what Keyspaces does differently. Classes: KeyspacesEngine, KeyspacesLanes.
 - `migkit/engines/kinesis.py` - Amazon Kinesis Data Streams as the destination of a change stream (backlog 33). Classes: KinesisEngine.
 - `migkit/engines/lake.py` - Iceberg and Delta tables as one side of a pair (backlog 33; Leapfrog: engine reach, item 1). Classes: IcebergEngine, DeltaEngine.
