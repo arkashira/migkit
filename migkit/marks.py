@@ -135,8 +135,9 @@ measured, not assumed. On PostgreSQL 14 (`bench/marks_probe_pg.py`, one
 connection kept) the three cost alike: table 1157, origin 1083, message
 1069 against none's 900 and 856.
 """
-import dataclasses
 import json
+
+from . import decide
 
 APART, EXACT = "apart", "exact"
 
@@ -216,17 +217,19 @@ def prices(rungs, facts, side="dst"):
     return out
 
 
-@dataclasses.dataclass(frozen=True)
-class Rung:
-    name: str
-    family: str
-    gives: frozenset
-    #: what it is, in migkit's words
-    words: str
-    #: what it leaves on the side, or "" where nothing stays
-    footprint: str
-    #: facts -> None where the side allows it, else why not
-    needs: object
+#: one way of marking migkit's own writes on one family of servers: a
+#: `decide.ServerRung` - its name, what it is in migkit's words (`said`),
+#: what it gives, the one need that the side allows it (`allowed`), the
+#: family (`engine`), and what it leaves on the side (`leaves`, its
+#: `footprint` 1 where something stays)
+Rung = decide.ServerRung
+
+
+def allowed(why_not):
+    """The need that the side allows a mark: `why_not(facts)` is None
+    where it does, else why not."""
+    return decide.Need("the side to allow it",
+                       lambda f: why_not(f) is None, why_not)
 
 
 def _pg_origin(f):
@@ -295,30 +298,32 @@ def _skip_flag(f):
 
 
 RUNGS = (
-    Rung("origin", "postgres", frozenset({APART, EXACT}),
-         "a replication origin of migkit's own",
-         "a replication origin per applying connection"
-         " (migkit_twoway_<hop>), each an entry of max_replication_slots",
-         _pg_origin),
-    Rung("message", "postgres", frozenset({APART}),
-         "a logical message first in each transaction", "", _pg_message),
-    Rung("table", "postgres", frozenset({APART, EXACT}),
-         "a row of the table migkit_origin first in each transaction",
-         "the table public.migkit_origin", _table),
-    Rung("gtid_tag", "mysql", frozenset({APART, EXACT}),
-         "a GTID of migkit's own, tagged migkit", "", _gtid_tag),
-    Rung("comment", "mysql", frozenset({APART}),
-         "a comment on every statement applied",
-         "the table migkit_origin, for its proof", _comment),
-    Rung("gtid_domain", "mysql", frozenset({APART, EXACT}),
-         "a GTID domain of migkit's own (gtid_domain_id)", "",
-         _gtid_domain),
-    Rung("skip_flag", "mysql", frozenset({APART}),
-         "the transaction marked for skip (skip_replication)",
-         "the table migkit_origin, for its proof", _skip_flag),
-    Rung("table", "mysql", frozenset({APART, EXACT}),
-         "a row of the table migkit_origin first in each transaction",
-         "the table migkit_origin", _table),
+    Rung("origin", "a replication origin of migkit's own",
+         frozenset({APART, EXACT}), (allowed(_pg_origin),), engine="postgres",
+         footprint=1, leaves="a replication origin per applying"
+         " connection (migkit_twoway_<hop>), each an entry of"
+         " max_replication_slots"),
+    Rung("message", "a logical message first in each transaction",
+         frozenset({APART}), (allowed(_pg_message),), engine="postgres",
+         leaves="nothing"),
+    Rung("table", "a row of the table migkit_origin first in each transaction",
+         frozenset({APART, EXACT}), (allowed(_table),), engine="postgres",
+         footprint=1, leaves="the table public.migkit_origin"),
+    Rung("gtid_tag", "a GTID of migkit's own, tagged migkit",
+         frozenset({APART, EXACT}), (allowed(_gtid_tag),), engine="mysql",
+         leaves="nothing"),
+    Rung("comment", "a comment on every statement applied",
+         frozenset({APART}), (allowed(_comment),), engine="mysql",
+         footprint=1, leaves="the table migkit_origin, for its proof"),
+    Rung("gtid_domain", "a GTID domain of migkit's own (gtid_domain_id)",
+         frozenset({APART, EXACT}), (allowed(_gtid_domain),), engine="mysql",
+         leaves="nothing"),
+    Rung("skip_flag", "the transaction marked for skip (skip_replication)",
+         frozenset({APART}), (allowed(_skip_flag),), engine="mysql",
+         footprint=1, leaves="the table migkit_origin, for its proof"),
+    Rung("table", "a row of the table migkit_origin first in each transaction",
+         frozenset({APART, EXACT}), (allowed(_table),), engine="mysql",
+         footprint=1, leaves="the table migkit_origin"),
 )
 
 
@@ -362,29 +367,31 @@ def _kafka_header(f):
 
 
 RUNGS = RUNGS + (
-    Rung("txn_doc", "mongodb", frozenset({APART, EXACT}),
-         "a document of migkit_origin first in the transaction",
-         "the collection migkit_origin", _mongo_txn),
-    Rung("field", "mongodb", frozenset({APART}),
-         "the field _migkit_marker on every document written", "",
-         _mongo_field),
-    Rung("batch", "cassandra", frozenset({APART, EXACT}),
-         "a logged batch whose first statement writes migkit_origin",
-         "the table migkit_origin", _batch),
-    Rung("multi", "redis", frozenset({APART, EXACT}),
-         "MULTI / EXEC with the marker key migkit:origin first",
-         "the hash migkit:origin", _redis_multi),
-    Rung("item", "dynamodb", frozenset({APART, EXACT}),
+    Rung("txn_doc", "a document of migkit_origin first in the transaction",
+         frozenset({APART, EXACT}), (allowed(_mongo_txn),), engine="mongodb",
+         footprint=1, leaves="the collection migkit_origin"),
+    Rung("field", "the field _migkit_marker on every document written",
+         frozenset({APART}), (allowed(_mongo_field),), engine="mongodb",
+         leaves="nothing"),
+    Rung("batch", "a logged batch whose first statement writes migkit_origin",
+         frozenset({APART, EXACT}), (allowed(_batch),), engine="cassandra",
+         footprint=1, leaves="the table migkit_origin"),
+    Rung("multi", "MULTI / EXEC with the marker key migkit:origin first",
+         frozenset({APART, EXACT}), (allowed(_redis_multi),), engine="redis",
+         footprint=1, leaves="the hash migkit:origin"),
+    Rung("item",
          "a transaction whose first item puts the unit into migkit_origin",
-         "the table migkit_origin", _ddb_item),
-    Rung("header", "kafka", frozenset({APART}),
-         "the header migkit-marker on every record", "", _kafka_header),
+         frozenset({APART, EXACT}), (allowed(_ddb_item),), engine="dynamodb",
+         footprint=1, leaves="the table migkit_origin"),
+    Rung("header", "the header migkit-marker on every record",
+         frozenset({APART}), (allowed(_kafka_header),), engine="kafka",
+         leaves="nothing"),
 )
 
 
 def rung(family, name):
     for r in RUNGS:
-        if r.family == family and r.name == name:
+        if r.engine == family and r.name == name:
             return r
     return None
 
@@ -394,7 +401,7 @@ def _why_not(r, facts):
     if facts.get("exact") and EXACT not in r.gives:
         return ("it tells migkit's writes apart but cannot say which batch"
                 " the side last committed, and this hop counts")
-    return r.needs(facts)
+    return r.refused(facts)
 
 
 def _decided(rungs, side_engine, side, db, facts):
@@ -407,8 +414,7 @@ def _decided(rungs, side_engine, side, db, facts):
     from . import decide
     rungs = sorted(rungs, key=lambda r: cost(r, facts, side))
     return [decide.Rung(
-        r.name, r.words, footprint=1 if r.footprint else 0,
-        leaves=r.footprint or "nothing",
+        r.name, r.said, footprint=r.footprint, leaves=r.leaves,
         needs=(decide.Need(
             "the side to allow it", lambda f, r=r: _why_not(r, f) is None,
             lambda f, r=r: _why_not(r, f)),),
@@ -430,7 +436,7 @@ def choose_rung(side_engine, facts, side="dst"):
     facts = dict(facts, family=family)
     kept, dropped = [], []
     for r in RUNGS:
-        if r.family != family:
+        if r.engine != family:
             continue
         why = _why_not(r, facts)
         if why:
@@ -488,16 +494,16 @@ def settle_engine(dst, db, token_path, exact, log, hop=None):
     name = kept_rung(token_path)
     if name is not None:
         r = rung(getattr(dst, "CANON_ENGINE", ""), name)
-        why = r.needs(dict(dst.mark_facts("dst", db), exact=bool(exact))) \
+        why = r.refused(dict(dst.mark_facts("dst", db), exact=bool(exact))) \
             if r is not None else f"{name} is not a rung migkit knows"
         if why and exact:
             raise SystemExit(
                 f"two_way: this tail numbers its batches on the target by"
-                f" {r.words if r else name}, and the target no longer"
+                f" {r.said if r else name}, and the target no longer"
                 f" allows it: {why}. Which batch it last committed is kept"
                 " there, so put that right and start the tail again")
         if why:
-            log(f"two_way: the target no longer allows {r.words if r else name}"
+            log(f"two_way: the target no longer allows {r.said if r else name}"
                 f" ({why}); choosing again")
             name = None
         elif exact and saved(token_path).get("batch") is None:
@@ -505,7 +511,7 @@ def settle_engine(dst, db, token_path, exact, log, hop=None):
             # which sets back what an earlier run left counted there
             why = dst.mark_prove("dst", db, name)
             if why:
-                log(f"two_way: {r.words} did not prove itself on the target"
+                log(f"two_way: {r.said} did not prove itself on the target"
                     f" ({why}); choosing again")
                 name = None
     if name is None:
@@ -609,7 +615,7 @@ def settle_exact(pair, db, token_path, log):
             f" be read ({type(e).__name__})")
         return None
     r = rung(family, "table")
-    why = r.needs(facts) if r is not None else \
+    why = r.refused(facts) if r is not None else \
         f"{family} keeps no batch of migkit's"
     probe = -1 - secrets.randbits(30)
     if not why:
@@ -649,8 +655,8 @@ def said(side_engine, token_path, db):
         r = rung(family, name)
         if r is None:
             return f"two-way: marks migkit's writes by {name}"
-        out = (f"two-way: migkit's own writes here carry {r.words}"
-               + (f"; it leaves {r.footprint}" if r.footprint else
+        out = (f"two-way: migkit's own writes here carry {r.said}"
+               + (f"; it leaves {r.leaves}" if r.footprint else
                   "; it leaves nothing on the server"))
         if r.name == "skip_flag":
             out += (". [yellow]This server's own replicas that filter"
@@ -669,7 +675,7 @@ def said(side_engine, token_path, db):
         return ("two-way: [red]no way of marking migkit's own writes is"
                 " allowed here[/red]")
     return ("two-way: no tail has chosen how to mark migkit's writes here"
-            " yet; it tries " + ", then ".join(r.words for r in ranked)
+            " yet; it tries " + ", then ".join(r.said for r in ranked)
             + " - and proves the one it stands on first")
 
 
@@ -743,7 +749,7 @@ def choice(side_engine, side, db, exact=False, log=None, hop=None):
     allowed, _ = choose_rung(side_engine, facts, side)
     if allowed and callable(getattr(side_engine, "mark_timed", None)):
         measure(side_engine, side, db, facts, allowed)
-    family = [r for r in RUNGS if r.family == facts["family"]]
+    family = [r for r in RUNGS if r.engine == facts["family"]]
     got = decide.climb(f"the mark of migkit's writes on {where}",
                        _decided(family, side_engine, side, db, facts),
                        facts,

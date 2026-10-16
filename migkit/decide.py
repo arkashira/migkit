@@ -7297,3 +7297,22 @@ def cursor_rows(size):
     `size` where the read was given one, else the decision's
     (`batch_rows`) - asked once as the cursor opens."""
     return batch_rows({"kind": CURSOR, "page": size})[0]
+
+# --- a rung kept in a module's own ladder for one kind of server
+# (AUD-Z.rungs-outside) ------------------------------------------------------
+
+@dataclass(frozen=True)
+class ServerRung(Rung):
+    """A `Rung` a module keeps in a ladder of its own for one kind of
+    server - a way of seeding the target (`physical`), a mark telling
+    migkit's own writes apart on one side (`marks`) - with the engine (and
+    the cloud) it is for. Built here, so the guard that every rung is
+    reached on its branches (`test_every_decide_rung_is_reached`) reads it
+    as the engine's own and no module keeps a rung class of its own."""
+    engine: str = ""
+    cloud: str = ""
+
+    def refused(self, facts):
+        """The first need that does not hold, in words, or None."""
+        _, out = prune([self], facts)
+        return out[0][1] if out else None

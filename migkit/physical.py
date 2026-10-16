@@ -122,7 +122,6 @@ import os
 import shlex
 import subprocess
 import time
-from dataclasses import dataclass
 
 from . import decide, sourcechange
 
@@ -215,20 +214,12 @@ def Need(what, reads, holds, why=None, when=None):
     return decide.Need(what, ok, said)
 
 
-@dataclass(frozen=True)
-class Rung(decide.Rung):
-    """One way of seeding the target: a `decide.Rung` - what it gives, what
-    it needs (cheapest first), the probe that proves it before it is
-    trusted, what it leaves behind - and the engine and the cloud it is
-    for. What it cost is the hop's own number for it
-    (`decide.HopCosts`), kept by `planner.record_rate` under its name."""
-    engine: str = ""
-    cloud: str = ""
-
-    def refused(self, facts):
-        """The first need that does not hold, in words, or None."""
-        _, out = decide.prune([self], facts)
-        return out[0][1] if out else None
+#: one way of seeding the target: a `decide.Rung` - what it gives, what
+#: it needs (cheapest first), the probe that proves it before it is
+#: trusted, what it leaves behind - and the engine and the cloud it is
+#: for (`decide.ServerRung`). What it cost is the hop's own number for it
+#: (`decide.HopCosts`), kept by `planner.record_rate` under its name.
+Rung = decide.ServerRung
 
 
 class Facts(dict):

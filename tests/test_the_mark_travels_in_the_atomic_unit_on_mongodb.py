@@ -115,7 +115,7 @@ def test_field_rung_marks_inserts_and_deletes_when_pre_images_are_on(space):
     c.create_collection("docs",
                         changeStreamPreAndPostImages={"enabled": True})
     facts = eng.mark_facts("dst", db)
-    assert facts["pre_images"] and not marks.rung("mongodb", "field").needs(
+    assert facts["pre_images"] and not marks.rung("mongodb", "field").refused(
         facts)
     assert eng.mark_prove("dst", db, "field") is None
 

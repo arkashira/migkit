@@ -117,7 +117,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/logddl.py` - A DDL statement as a change log carries it, read for the tables it touches and what it does to each (`canon.ddl`).
 - `migkit/machine.py` - The machine to run on, and the class the target needs (backlog R22, item 6). Classes: Machine, Stages, Advice, Spent.
 - `migkit/managed.py` - Every managed database service in one catalogue, read one way for any pair (the owner, 2026-10-01: "any <-> any from the start"). Classes: Service, Side, Plan.
-- `migkit/marks.py` - How a two-way tail tells its own writes apart on a side: the rungs (backlog R3, decided 2026-09-27). Classes: Rung.
+- `migkit/marks.py` - How a two-way tail tells its own writes apart on a side: the rungs (backlog R3, decided 2026-09-27).
 - `migkit/masking.py` - Values from the rows, masked where the hop asks, wherever a person or a report sees them (G2).
 - `migkit/mirror.py` - A Kafka cluster copied through the cluster mirror Kafka ships (backlog F7.mm2).
 - `migkit/model.py` - Every resource a move uses, in one model: which one binds, how many at once carry it, what it takes of this machine's memory, and why (backl Classes: Stage, Model.
@@ -126,7 +126,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/notify.py` - Telling the team, wherever it is, what a migration is doing (backlog 32, R23.10).
 - `migkit/ownership.py` - Who an object belongs to, and whose privileges it runs with.
 - `migkit/pgslot.py` - Reading what a PostgreSQL logical slot says, when it says it in text. Classes: Stream.
-- `migkit/physical.py` - Physical where the source allows it, logical everywhere else (backlog R19 lever 1): the target seeded from a copy of the source's pages, the Classes: Unread, Rung, Facts, PgFacts, MyFacts.
+- `migkit/physical.py` - Physical where the source allows it, logical everywhere else (backlog R19 lever 1): the target seeded from a copy of the source's pages, the Classes: Unread, Facts, PgFacts, MyFacts.
 - `migkit/pieces.py` - Large values: one way for every engine to size, read, write and hash them (backlog P0-PARITY; R10 and R22 did it for PostgreSQL, MySQL and O Classes: Limit, Sizing, Hashed, hashing, Way, Sql.
 - `migkit/planner.py` - Which way each table goes, decided from facts about it, and why. Classes: Decision, Phase, Ewma, CatchUp, Overlap, TopologyRun.
 - `migkit/ranges.py` - A large table copied as ranges of its key, side by side. Classes: ReadPool, Slots, WorkerGone, Pending, Keyless, Stats.

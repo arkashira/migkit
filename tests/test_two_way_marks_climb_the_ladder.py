@@ -220,7 +220,7 @@ def test_counters_add_on_both_sides_each_on_its_highest_rung(sides, tmp_path):
                    for m in (said1 if name == "m2p" else said2))
         # doctor names it and what it leaves
         line = marks.said(dst, tmp_path / name / "tail-token.json", "app")
-        assert top.words in line, line
+        assert top.said in line, line
     # neither of the exact rungs above the table leaves a table
     if _rung(tmp_path, "m2p") == "origin":
         assert _pg_tables(pg_port) == "0"
