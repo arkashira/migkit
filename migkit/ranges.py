@@ -411,15 +411,84 @@ def _child():
 active = Slots(1)
 
 
-def plan(st, lo, hi, edges_fn, save, table=None):
+def ident(v):
+    """How a range's start is named in a checkpoint entry: the number as
+    its digits, any other key (text, a composite's tuple, None for the open
+    first end) as JSON, so a key read back from the file names the range it
+    named when written."""
+    import json
+    return json.dumps(v, separators=(",", ":"), default=str)
+
+
+def _h(v):
+    """A key as a hashable: the list a composite key came back from JSON
+    as, as the tuple it was."""
+    return tuple(_h(x) for x in v) if isinstance(v, (list, tuple)) else v
+
+
+def _plain(v):
+    """A key as the checkpoint keeps it: what JSON holds as it is, anything
+    else (a date, a decimal, a uuid) as the text the server wrote it in."""
+    if isinstance(v, (list, tuple)):
+        return [_plain(x) for x in v]
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return v
+    if isinstance(v, (bytes, bytearray, memoryview)):
+        raise ValueError("a binary key is not written into a statement here")
+    return str(v)
+
+
+def plan(st, lo, hi, edges_fn, save, table=None, lit=None):
     """The ranges of a table, planned once and kept in its checkpoint
     entry `st` so a run started again copies the same ranges: [(after,
     upto)] still to copy. Rows the source gained past either end since the
     plan was made get a range of their own; a checkpoint written before
     ranges (`last`, one range at a time) counts what it had done.
 
+    A key that is not a whole number passes `lo` and `hi` as None: its
+    ranges are cut at the edges alone, the first open below and the last
+    open above (`plan_keyed`), and read with `pred`.
+
     `table` is the table as the source's change log names it, kept with
     the process copying it, for the tail (`already_read`)."""
+    if lo is None and hi is None:
+        return plan_keyed(st, edges_fn, save, table, lit or _lit)
+    return _plan_whole(st, lo, hi, edges_fn, save, table)
+
+
+def plan_keyed(st, edges_fn, save, table=None, lit=None):
+    """`plan` for a key of any type - text, dates, uuids, a composite's
+    tuples - in the order the server gave its edges. The ranges are the
+    edges' (after, upto] with the first open below and the last open
+    above, so the rows the source gains past either end belong to a range
+    already and no minimum or maximum is read. Refused when an edge cannot
+    be written into a statement (`lit`), before a single range is begun."""
+    import os
+    import socket
+    lit = lit or _lit
+    if table is not None:
+        st["table"] = table
+    st["copying"] = {"host": socket.gethostname(), "pid": os.getpid()}
+    _DONE.pop(id(st), None)
+    if "ranges" not in st:
+        edges = []
+        for e in edges_fn():
+            e = _plain(e)
+            if not edges or edges[-1] != e:
+                edges.append(e)
+        for e in edges:
+            for v in (e if isinstance(e, list) else (e,)):
+                lit(v)
+        st["ranges"] = [list(r) for r in split_keyed(edges)]
+        st["ranges_done"] = []
+        st["keyed"] = True
+        save()
+    done = {_h(x) for x in st["ranges_done"]}
+    return [(_h(r[0]), _h(r[1])) for r in st["ranges"]
+            if _h(r[0]) not in done]
+
+
+def _plan_whole(st, lo, hi, edges_fn, save, table=None):
     import os
     import socket
     if table is not None:
@@ -438,8 +507,8 @@ def plan(st, lo, hi, edges_fn, save, table=None):
         rs.append([rs[-1][1], hi])
     if rs and lo - 1 < rs[0][0]:
         rs.insert(0, [lo - 1, rs[0][0]])
-    done = set(st["ranges_done"])
-    return [tuple(r) for r in rs if r[0] not in done]
+    done = {_h(x) for x in st["ranges_done"]}
+    return [tuple(r) for r in rs if _h(r[0]) not in done]
 
 
 #: {id(entry): (entry, its done ranges' starts, how many ranges from the
@@ -484,11 +553,11 @@ def _reach(st, after):
             or len(got[1]) + 1 != len(st["ranges_done"]):
         # the plan grown at an end, or ranges marked elsewhere: from the
         # start again
-        done, i = set(st["ranges_done"]), 0
+        done, i = {_h(x) for x in st["ranges_done"]}, 0
     else:
         done, i = got[1], got[2]
-        done.add(after)
-    while i < len(rs) and rs[i][0] in done:
+        done.add(_h(after))
+    while i < len(rs) and _h(rs[i][0]) in done:
         i += 1
     if len(_DONE) > 10000:
         _DONE.clear()
@@ -531,7 +600,7 @@ def started(st, after, mark, save):
     lease.check_held()
     owner = _owner(save)
     with owner._lock if owner is not None else _NOLOCK:
-        st.setdefault("ranges_seen", {})[str(after)] = mark
+        st.setdefault("ranges_seen", {})[ident(after)] = mark
         gen = owner.changed() if owner is not None else None
         journaled = _journaled(owner, st, {"seen": [after, mark]})
     if not journaled:
@@ -598,8 +667,14 @@ def placer(st):
     if not rs:
         return lambda values: []
     seen = st.get("ranges_seen") or {}
-    done = set(st.get("ranges_done") or ())
-    starts = [r[0] for r in rs]
+    done = {_h(x) for x in st.get("ranges_done") or ()}
+    if not all(isinstance(x, int) and not isinstance(x, bool)
+               for r in rs for x in r if x is not None):
+        # a change's key is placed among the plan's by the number it is;
+        # text and composite keys sort by the server's collation, which
+        # this side cannot repeat, so each is applied
+        return lambda values: [("outside", None) for _ in values or ()]
+    starts = [float("-inf") if r[0] is None else r[0] for r in rs]
     finished = bool(st.get("done"))
     return lambda values: _placed(rs, starts, seen, done, finished,
                                   values, bisect)
@@ -616,14 +691,14 @@ def _placed(rs, starts, seen, done, finished, values, bisect):
         # asked for every change the tail reads: found by halves, the
         # plan kept in key order
         i = bisect.bisect_left(starts, v) - 1
-        if i < 0 or v > rs[i][1]:
+        if i < 0 or (rs[i][1] is not None and v > rs[i][1]):
             out.append(("outside", None))
             continue
-        at = str(rs[i][0])
+        at = ident(rs[i][0])
         if at in seen:
-            out.append(("read" if rs[i][0] in done else "reading",
+            out.append(("read" if _h(rs[i][0]) in done else "reading",
                         seen[at]))
-        elif finished or rs[i][0] in done:
+        elif finished or _h(rs[i][0]) in done:
             out.append(("outside", None))
         else:
             out.append(("todo", None))
@@ -999,7 +1074,8 @@ def kind_of(engine):
     derives from; None where migkit has no statement for its statistics."""
     for cls in type(engine).__mro__:
         name = cls.__name__.lower()
-        for word, kind in (("postgres", "postgresql"), ("mysql", "mysql"),
+        for word, kind in (("cockroach", "cockroachdb"),
+                           ("postgres", "postgresql"), ("mysql", "mysql"),
                            ("mssql", "mssql"), ("sqlserver", "mssql"),
                            ("oracle", "oracle")):
             if word in name:
@@ -1059,10 +1135,17 @@ class Stats:
     """What a table's statistics say of a key: `points` [(key, share of
     rows at or below)], `modified` the rows written since they were taken
     (None where the engine does not say), `touched` whether the table was
-    written since at all (None where not known)."""
+    written since at all (None where not known), `analyzed_ago` the seconds
+    since the statistics were taken on the server's clock and `rows` the
+    rows the statistics counted and `floor` the rows known to have moved
+    though the engine does not count them since the statistics (each None
+    where the engine does not say)."""
     points: list
     modified: int = None
     touched: bool = None
+    analyzed_ago: float = None
+    rows: int = None
+    floor: int = None
 
 
 def _lit(value):
@@ -1085,7 +1168,10 @@ def statistics_sql(kind, table, key, names=None):
     if kind == "postgresql":
         return ("select u.v, u.ord, (select n_mod_since_analyze from"
                 " pg_stat_all_tables where relid = c.oid),"
-                " format_type(a.atttypid, a.atttypmod) from pg_stats s"
+                " format_type(a.atttypid, a.atttypmod), (select extract("
+                "epoch from now() - greatest(last_analyze,"
+                " last_autoanalyze)) from pg_stat_all_tables where relid ="
+                " c.oid) from pg_stats s"
                 " join pg_class c on c.relname = s.tablename join"
                 " pg_namespace n on n.oid = c.relnamespace and n.nspname ="
                 " s.schemaname join pg_attribute a on a.attrelid = c.oid and"
@@ -1105,6 +1191,13 @@ def statistics_sql(kind, table, key, names=None):
                 f" t.TABLE_NAME where t.TABLE_SCHEMA = {_lit(schema)} and"
                 f" t.TABLE_NAME = {_lit(name)} and c.COLUMN_NAME ="
                 f" {_lit(col)}")
+    if kind == "cockroachdb":
+        return ("select histogram_id, row_count, extract(epoch from now() -"
+                " created) from [show statistics for table "
+                f"{table}] where {_lit(col)} = any(column_names) and"
+                " array_length(column_names, 1) = 1 and histogram_id is not"
+                " null order by created desc limit 1",
+                None)
     if kind == "mssql":
         obj = str(table).replace("'", "''")
         return ("select s.stats_id, h.range_high_key, h.range_rows +"
@@ -1130,6 +1223,17 @@ def statistics_sql(kind, table, key, names=None):
     return None
 
 
+def _text(value):
+    """A histogram bound as the key it is: the engine writes a text bound
+    as `base64:type<N>:<data>`, which is decoded; refused (the statistics
+    not used) where it is not text."""
+    import base64
+    if isinstance(value, str) and value.startswith("base64:type"):
+        return base64.b64decode(value.split(":", 2)[2],
+                                validate=True).decode("utf-8")
+    return value
+
+
 def read_statistics(kind, ask, table, key, names=None):
     """The `Stats` of a table's key as its engine holds them, or None where
     there are none or the engine gives no way to read them. Reading them
@@ -1149,19 +1253,41 @@ def read_statistics(kind, ask, table, key, names=None):
             points = [(int(r[0]) if whole else r[0],
                        (int(r[1]) - 1) / last if last else 1.0)
                       for r in rows]
+            ago = rows[0][4] if len(rows[0]) > 4 else None
             return Stats(points, modified=None if rows[0][2] is None
-                         else int(rows[0][2]))
+                         else int(rows[0][2]),
+                         analyzed_ago=None if ago in (None, "")
+                         else float(ago))
+        if kind == "cockroachdb":
+            hid, counted, ago = rows[0][:3]
+            hist = ask(f"select upper_bound, range_rows + equal_rows from"
+                       f" [show histogram {int(hid)}] order by upper_bound")
+            running, points = 0, []
+            for bound, n in hist or ():
+                running += int(n)
+                points.append((_plain(bound), running))
+            return Stats(points, analyzed_ago=None if ago is None
+                         else float(ago), rows=None if counted is None
+                         else int(counted))
         if kind == "mysql":
             hist = json.loads(rows[0][0])
             points = []
             for b in hist.get("buckets") or ():
-                points.append((b[1], b[2]) if len(b) > 2 else (b[0], b[1]))
+                points.append((_text(b[1]), b[2]) if len(b) > 2
+                              else (_text(b[0]), b[1]))
             touched = None
             if sqls[1]:
                 got = ask(sqls[1])
                 if got and got[0][0] is not None:
                     touched = bool(int(got[0][0]))
-            return Stats(points, touched=touched)
+            floor = None
+            if names and names[0]:
+                from . import unchanged
+                got = ask(unchanged.COUNTERS["mysql"].modified_sql(
+                    names[0], names[1]))
+                if got and got[0][0] is not None:
+                    floor = int(got[0][0])
+            return Stats(points, touched=touched, floor=floor)
         if kind == "mssql":
             first = rows[0][0]
             rows = [r for r in rows if r[0] == first]
@@ -1190,6 +1316,9 @@ def sample_sql(kind, quote, table, key, rows, want, where=None):
     if kind == "postgresql":
         return (f"select {k} from {table} tablesample bernoulli"
                 f" ({share * 100:.8f}){cond} order by {k}")
+    if kind == "cockroachdb":
+        return (f"select {k} from {table} where random() < {share:.10f}"
+                f"{more} order by {k}")
     if kind == "mysql":
         return (f"select {k} from {table} where rand() < {share:.10f}"
                 f"{more} order by {k}")
@@ -1203,56 +1332,105 @@ def sample_sql(kind, quote, table, key, rows, want, where=None):
 
 
 def cut(ask, kind, quote, table, key, rows, every, where=None, names=None,
-        stats=None, into=None, log=None, label=None):
+        stats=None, into=None, log=None, label=None, wait=None):
     """The range edges of a table - keys in key order - cut the way
-    `decide.CHUNK_EDGES` picks on what is known of it: the engine's
-    statistics (`stats` an engine's own reader returning a `Stats`, else
-    `read_statistics`) while the table has moved less than half a range
-    since they were taken and no row filter narrows the rows; else a
-    sample of the live key; else the key read in order. A way that cannot
-    run hands on to the next. The edges are never the key's minimum and
-    maximum divided. `into` is the table's checkpoint entry, which keeps
+    `decide.CHUNK_EDGES` picks on what is known of it (`cut_with`), the
+    three ways read through SQL: the engine's statistics (`stats` an
+    engine's own reader returning a `Stats`, else `read_statistics`), a
+    sample of the live key, the key in order. The keys may be of any type;
+    the edges come back in the order the server gave them, which is the
+    key's collation. `into` is the table's checkpoint entry, which keeps
     the rows a range holds and the way the edges came from for `refine`."""
+    every = max(int(every), 1)
+    need = -(-int(rows) // every)
+    read = None if where else (stats or (
+        lambda: read_statistics(kind, ask, table, key, names)))
+    sql = sample_sql(kind, quote, table, key, int(rows),
+                     need * SAMPLE_PER_RANGE, where)
+    return cut_with(
+        rows, every, lambda: [_pick(r, key) for r in ask(bounds_sql(
+            quote, table, key, every, where))],
+        read=read, sample=(lambda: [_pick(r, key) for r in ask(sql)])
+        if sql else None, into=into, log=log, label=label or str(table),
+        wait=wait)
+
+
+#: seconds after an analyze in which a table's modification counter can
+#: still hold writes made before it: the counter is flushed by the
+#: sessions that wrote, once a second at most, and measured trailing an
+#: analyze by about a second (backlog W12J)
+COUNTER_LAG = 2.0
+
+
+def cut_with(rows, every, order, read=None, sample=None, into=None,
+             log=None, label="the table", wait=None):
+    """The one place a table's range edges are chosen, for any source: the
+    statistics `read()` returns (a `Stats`; None where there are none or a
+    row filter narrows the rows) while the table moved less than half a
+    range since, else the keys `sample()` returns in key order (None where
+    the source cannot sample), else the edges `order()` reads off the key
+    in order. A way that cannot run hands on to the next
+    (`decide.CHUNK_EDGES`); the edges are never the key's minimum and
+    maximum divided.
+
+    A counter that trails an analyze (`COUNTER_LAG`) is read again once the
+    lag has passed when it says more than half a range moved, so a table
+    analyzed a moment ago is not called stale on writes the analyze already
+    counted; a counter still high then is believed."""
     from . import decide
     every = max(int(every), 1)
     need = -(-int(rows) // every)
     say = log or (lambda m: None)
-    label = label or str(table)
-    got = None if where else (stats() if stats else
-                              read_statistics(kind, ask, table, key, names))
+    half = every // 2
+    got = read() if read else None
     facts = {}
+    if (got is not None and got.modified is not None and got.modified > half
+            and got.analyzed_ago is not None
+            and got.analyzed_ago < COUNTER_LAG):
+        pause = COUNTER_LAG - got.analyzed_ago
+        say(f"{label}: its statistics were taken {got.analyzed_ago:.1f}s"
+            f" ago and the counter of rows moved since may still hold"
+            f" writes made before; read again in {pause:.1f}s")
+        if wait is None:
+            import time
+            wait = time.sleep
+        wait(pause)
+        facts["statistics settled"] = True
+        got = read() or got
     cand = None
     if got is not None and got.points:
         cand = cumulative_edges(got.points, need)
     if cand:
         facts["statistics"] = True
-        half = every // 2
-        if got.touched is False or (got.modified is not None
-                                    and got.modified <= half):
+        moved = got.modified
+        if moved is None and got.rows is not None:
+            moved = abs(int(rows) - got.rows)
+        if got.touched is False or (moved is not None and moved <= half):
             facts["statistics fresh"] = True
-        elif got.modified is not None:
+        elif moved is not None:
             facts["statistics stale"] = (
-                f"the table moved {got.modified:,} rows since its"
+                f"the table moved {moved:,} rows since its"
+                f" statistics, more than half a range ({half:,})")
+        elif got.floor is not None and got.floor > half:
+            facts["statistics stale"] = (
+                f"the table moved at least {got.floor:,} rows since its"
                 f" statistics, more than half a range ({half:,})")
         elif got.touched:
             facts["statistics stale"] = ("the table was written since its"
                                          " statistics were taken")
-    sample = sample_sql(kind, quote, table, key, int(rows),
-                        need * SAMPLE_PER_RANGE, where)
-    facts["sample"] = bool(sample)
+    facts["sample"] = sample is not None
 
     def run(choice):
         if choice.path == "statistics":
             return cand
         if choice.path == "sample":
-            keys = [_pick(r, key) for r in ask(sample)]
+            keys = sample()
             edges = quantile_edges(keys, need)
             if edges is None:
                 raise decide.Blocked(f"the sample held {len(keys):,} keys,"
                                      f" fewer than the {need:,} ranges")
             return edges
-        return [_pick(r, key) for r in ask(bounds_sql(
-            quote, table, key, every, where))]
+        return order()
     choice, edges = decide.attempt(
         f"the range edges of {label}", decide.CHUNK_EDGES, run, facts,
         need=("edges",), log=say, record=False)
@@ -1309,6 +1487,53 @@ def split_keyed(edges):
     return out
 
 
+def pred(quote, key, rng, where=None, lit=None):
+    """The condition for one range `(after, upto]` of `plan` or
+    `plan_keyed`, for any key: plain comparisons on a whole-number key, the
+    lexicographic expansion (`range_where`) on text, dates, uuids and a
+    composite; an open end is no bound. `where` is the table's row filter,
+    kept beside it."""
+    after, upto = rng
+    cols = _keys(key)
+    whole = all(v is None or (isinstance(v, int) and not isinstance(v, bool))
+                for v in (after, upto))
+    if len(cols) == 1 and whole:
+        c = quote(cols[0])
+        bounds = ([f"{c} > {after}"] if after is not None else []) \
+            + ([f"{c} <= {upto}"] if upto is not None else [])
+        out = " and ".join(bounds) or "1 = 1"
+    else:
+        out = range_where(quote, key, after, upto, lit or _lit)
+    return f"({out}) and ({where})" if where else out
+
+
+def describe(key, rng):
+    """A range in words for a line of the log, whatever its key."""
+    after, upto = rng
+    name = ", ".join(_keys(key))
+    if isinstance(after, int) and isinstance(upto, int):
+        return f"{name} {after + 1:,} to {upto:,}"
+    if after is None and upto is None:
+        return f"{name}, every key"
+    if after is None:
+        return f"{name} up to {upto}"
+    if upto is None:
+        return f"{name} after {after}"
+    return f"{name} after {after} up to {upto}"
+
+
+def layout(lo, hi, edges):
+    """[[after, upto]] for a table's checkpoint entry from edges of any key
+    type - what a copier that keeps its own plan (`claims.copy`, the
+    mongodb engine) writes in place of `split`/`split_keyed` by hand:
+    whole-number keys between `lo` and `hi`, any other key from the edges
+    alone with its ends open."""
+    if lo is None and hi is None:
+        return [list(r) for r in split_keyed(
+            [_plain(e) for e in edges])]
+    return [list(r) for r in split(lo, hi, edges)]
+
+
 def measured(st, after, rows):
     """The rows a range held, kept beside the plan for `refine`; nothing
     kept where the copier did not count them."""
@@ -1316,7 +1541,7 @@ def measured(st, after, rows):
         n = int(rows)
     except (TypeError, ValueError):
         return
-    st.setdefault("ranges_rows", {})[str(after)] = n
+    st.setdefault("ranges_rows", {})[ident(after)] = n
 
 
 def refine(st):

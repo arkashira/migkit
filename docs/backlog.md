@@ -5024,6 +5024,26 @@ modification counter lags a second after ANALYZE, so
 `test_range_edges_come_from_the_tables_statistics` (another ticket's file)
 may now see a sample where it expects statistics; R20.11's MySQL and
 CockroachDB counters (unchanged.py) are not touched here.
+W13I note, 2026-10-16: `ranges.plan(st, None, None, edges, save)` (`plan_keyed`)
+plans a key of any type from its edges alone, ends open, and `ranges.pred`
+/ `describe` read a range of it; checkpoints name a range by `ranges.ident`
+so text and composite keys survive the file. `ranges.cut_with` is the one
+choice of edges for a source that speaks no SQL (`ranges.layout` writes the
+plan a copier keeps itself). MySQL text histogram bounds are decoded;
+CockroachDB statistics are read (`show histogram`) and judged by the rows
+they counted against the rows now. PostgreSQL's counter is read again once
+after `COUNTER_LAG` when it is high within that time of an analyze. MySQL
+counters (`unchanged.MySqlCounters`: per-table row counters, InnoDB table
+id, creation time, columns, server start) are live; the statements are not
+run on a server. Not done: no engine copier calls `plan(None, None)` /
+`pred` yet (postgres.py W13A, mysql.py mssql.py hetero.py W13E);
+`claims.copy` (claims.py:412, `ranges.split`) should call `ranges.layout`
+(W13E) and mongodb.py (~2342, `plan_from_boundaries`) `ranges.cut_with` with
+its `$sample` and `$bucketAuto` readers (W13K); `ship.py:911` also cuts by
+hand (W13L); the MySQL engine does not build `MySqlCounters` markers yet
+(W13E); CockroachDB exposes no write counter, so it stays refused;
+`tests/test_a_table_is_skipped_only_on_counters_that_hold.py:252` still
+expects `mysql` in `unchanged.UNPROVED` (W13P).
 **Built 2026-09-30, the tail's (tests written, the full run to come):**
 a batch ends at the last source commit it holds where a read can stop
 inside a transaction (MySQL, MongoDB): the commit's position saved

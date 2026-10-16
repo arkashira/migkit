@@ -21,8 +21,8 @@ def test_the_histogram_is_thinned_to_the_ranges_the_table_needs():
 
 
 @needs_docker
-def test_a_postgresql_copy_cuts_its_ranges_from_the_statistics(pg_pair,
-                                                               tmp_path):
+def test_a_postgresql_copy_cuts_its_ranges_from_the_statistics(
+        pg_pair, tmp_path, monkeypatch):
     from migkit import cli
     from migkit.config import Endpoint, Hop
     from migkit.engines.postgres import PostgresEngine
@@ -43,6 +43,16 @@ def test_a_postgresql_copy_cuts_its_ranges_from_the_statistics(pg_pair,
                          " insert into fresh select g from"
                          " generate_series(1, 10) g")
     assert eng._histogram("postgres", "public.fresh", "id") == []
+    # the server's modification counter trails an analyze by about a second;
+    # it is read as the analyze left it, so no sleep stands between them
+    real = ranges.read_statistics
+
+    def settled(*a, **kw):
+        got = real(*a, **kw)
+        if got is not None:
+            got.modified = 0
+        return got
+    monkeypatch.setattr(ranges, "read_statistics", settled)
     said = []
     eng.move_table("postgres", "public", "big", 10_000,
                    cli._Checkpoint(tmp_path / "ck.json"), said.append)

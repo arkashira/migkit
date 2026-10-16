@@ -192,6 +192,94 @@ class SqlServerCounters(Counters):
                 f" counted, the last {p['last_write']}, {p['rows']} rows")
 
 
+class MySqlCounters(Counters):
+    """What `performance_schema.table_io_waits_summary_by_table` counts per
+    table - rows inserted, updated, deleted since the server started - with
+    the table's creation time and InnoDB table id, both new when a table is
+    emptied or rebuilt (a TRUNCATE moves no row counter the marker could
+    see), and its columns. The server's start (the Unix second it began,
+    from its own uptime) is in it, so counters that began again after a
+    restart are told from counters that did not move. A table with no
+    counter row, a server whose instrument is off, or a source held
+    read-only has no marker.
+
+    Not measured on a server: the statements are written from the
+    server's documentation (stub tests only)."""
+    kind = family = "mysql"
+    pieces = ("started", "inserts", "updates", "deletes", "created",
+              "table_id", "columns")
+    counted = ("inserts", "updates", "deletes")
+    meaning = {
+        "started": "the server restarted, so its counters began again",
+        "inserts": {"up": "rows were inserted",
+                    "down": "the counters were cleared"},
+        "updates": {"up": "rows were updated",
+                    "down": "the counters were cleared"},
+        "deletes": {"up": "rows were deleted",
+                    "down": "the counters were cleared"},
+        "created": "the table was emptied, rebuilt or created again",
+        "table_id": "the table was emptied or rebuilt",
+        "columns": "a column was added, dropped or changed"}
+    #: the server's start as the Unix second, and whether the table
+    #: instrument is on (read before any marker)
+    FACTS_SQL = (
+        "select unix_timestamp(now()) - cast(g.VARIABLE_VALUE as signed),"
+        " (select count(*) from performance_schema.setup_instruments where"
+        " NAME = 'wait/io/table/sql/handler' and ENABLED = 'YES'),"
+        " @@global.read_only from performance_schema.global_status g where"
+        " g.VARIABLE_NAME = 'Uptime'")
+    #: one row a table: schema, table, the pieces after `started`
+    ROWS_SQL = (
+        "select t.TABLE_SCHEMA, t.TABLE_NAME, i.COUNT_INSERT, i.COUNT_UPDATE,"
+        " i.COUNT_DELETE, t.CREATE_TIME, n.TABLE_ID, (select"
+        " concat(count(*), ':', md5(group_concat(c.ORDINAL_POSITION, ':',"
+        " c.COLUMN_NAME, ':', c.COLUMN_TYPE, ':', c.IS_NULLABLE, ':',"
+        " coalesce(c.COLLATION_NAME, '') order by c.ORDINAL_POSITION)))"
+        " from information_schema.COLUMNS c where c.TABLE_SCHEMA ="
+        " t.TABLE_SCHEMA and c.TABLE_NAME = t.TABLE_NAME) from"
+        " information_schema.TABLES t left join"
+        " performance_schema.table_io_waits_summary_by_table i on"
+        " i.OBJECT_TYPE = 'TABLE' and i.OBJECT_SCHEMA = t.TABLE_SCHEMA and"
+        " i.OBJECT_NAME = t.TABLE_NAME left join"
+        " information_schema.INNODB_TABLES n on n.NAME = concat("
+        "t.TABLE_SCHEMA, '/', t.TABLE_NAME) where t.TABLE_TYPE ="
+        " 'BASE TABLE' and t.TABLE_SCHEMA not in ('mysql', 'sys',"
+        " 'information_schema', 'performance_schema')")
+
+    def refusal(self, facts, role="src"):
+        if facts.get("started") in (None, "", "NULL"):
+            return "the server does not say when it started"
+        if str(facts.get("instrument")) in ("0", "None", ""):
+            return ("the server does not count rows per table"
+                    " (performance_schema's table instrument is off)")
+        if role == "src" and str(facts.get("read_only")) not in ("0", "OFF"):
+            return ("the source is held read-only: the proof that goes into"
+                    " a cutover reads every table")
+        return ""
+
+    def dead(self, marker):
+        p = self.parts(marker)
+        if p.get("inserts") in ("", "NULL", "None"):
+            return "the table has no row counter, and no counter is not zero"
+        if p.get("table_id") in ("", "NULL", "None"):
+            return ("the table keeps no identity, so an emptied table would"
+                    " look the same")
+        return ""
+
+    def evidence(self, marker):
+        p = self.parts(marker)
+        return (f"server up since {p['started']}, {p['inserts']} inserts,"
+                f" {p['updates']} updates, {p['deletes']} deletes counted")
+
+    def modified_sql(self, schema, table):
+        """The rows InnoDB counted modified since it last recalculated the
+        table's statistics: a floor under what moved since the histogram,
+        not a count of it, as a recalculation clears it."""
+        name = f"{schema}/{table}".replace("\\", "\\\\").replace("'", "''")
+        return ("select MODIFIED_COUNTER from"
+                f" information_schema.INNODB_TABLESTATS where NAME = '{name}'")
+
+
 class Unread(Counters):
     """A kind whose counters are not read yet: every table is read."""
 
@@ -210,13 +298,17 @@ COUNTERS = {c.kind: c for c in (
     # forever and every table would skip its scan on every run
     Unread("cockroachdb", "postgres",
            "pg_stat_all_tables is empty and relfilenode is 0 on every"
-           " table; its own counters are not read yet"),
+           " table, and its own views count reads (index usage) and row"
+           " estimates, not writes: no counter of rows modified is exposed"
+           " to build a marker on, so a table's statistics are judged by"
+           " the rows they counted against the rows now"
+           " (`ranges.cut_with`)"),
     # a coordinator's statistics describe shell tables whose rows live on
     # the workers
     Unread("citus", "postgres",
            "the coordinator's statistics describe shell tables, not the"
            " rows on the workers"),
-    Unread("mysql", "mysql", "its per-table counters are not read yet"),
+    MySqlCounters(),
 )}
 
 #: the kinds whose counters are declared and neither read nor proved
