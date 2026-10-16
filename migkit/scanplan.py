@@ -532,10 +532,27 @@ class RowText:
     """What `row_text` read: the rows of each side, each range's digest a
     side, and the first row the two sides hold apart - (the range it is
     in, its key, what each side holds of it) - or None where every row is
-    alike."""
+    alike. `earlier` is how many of its ranges stand on a check stopped
+    before this one (`RangeTexts`), read at `earlier_at` (wall time) - the
+    guarantee such a range gives is that read's, not this one's."""
     rows: dict = field(default_factory=dict)
     digests: list = field(default_factory=list)
     first: tuple = None
+    earlier: int = 0
+    earlier_at: float = None
+
+    def earlier_said(self):
+        """"N of M ranges from the check stopped at <time>", or "" where
+        every range was read by this check."""
+        if not self.earlier:
+            return ""
+        import datetime
+        when = (datetime.datetime.fromtimestamp(
+            self.earlier_at, datetime.timezone.utc).strftime(
+                "%Y-%m-%d %H:%M:%S UTC") if self.earlier_at else
+            "an earlier time")
+        return (f"{self.earlier} of {len(self.digests)} ranges from the"
+                f" check stopped at {when}")
 
     @property
     def alike(self):
@@ -584,8 +601,15 @@ class RangeTexts:
             got["ranges"][pred] = {
                 "rows": count, "digest": digest,
                 "first": [list(first[0]), first[1]] if first else None}
+            got["at"] = time.time()
             self.kept[table] = got
             self._save()
+
+    def proved_at(self, table, scope=""):
+        """The wall time the check stopped earlier last proved a range of
+        `table` under `scope`, or None."""
+        got = self.kept.get(table) or {}
+        return got.get("at") if got.get("scope") == (scope or "") else None
 
     def finished(self, table):
         """Every range of `table` proved: nothing of it is kept for the
@@ -661,7 +685,9 @@ def row_text(rows, preds=("",), key_width=1, most=1, sides=("src", "dst"),
                                for s, t in zip(sides, texts)})
         return count, {s: d.hexdigest() for s, d in digest.items()}, first
 
-    got = RowText(rows=dict.fromkeys(sides, 0))
+    got = RowText(rows=dict.fromkeys(sides, 0),
+                  earlier=sum(1 for p in preds if p in done),
+                  earlier_at=kept.proved_at(table, scope) if done else None)
     for i, (count, digest, first) in enumerate(together(preds, one, most)):
         for s in sides:
             got.rows[s] += count[s]
@@ -692,12 +718,15 @@ def row_text_line(table, got):
         for d in got.digests:
             whole.update(next(iter(d.values())).encode())
         n = next(iter(got.rows.values()), 0)
-        return f"{table}: OK rows={n} checksum={whole.hexdigest()}"
+        line = f"{table}: OK rows={n} checksum={whole.hexdigest()}"
+        return line + (f" ({got.earlier_said()})" if got.earlier else "")
     if got.first is None:
         rows = " ".join(f"{s}={n}" for s, n in got.rows.items())
-        return f"{table}: DIFF {rows}"
+        return f"{table}: DIFF {rows}" + (
+            f" ({got.earlier_said()})" if got.earlier else "")
     where, key, held = got.first
     said = ", ".join(f"{s} {h}" for s, h in held.items())
     rows = " ".join(f"{s}={n}" for s, n in got.rows.items())
     return (f"{table}: DIFF {rows} first key={'|'.join(key)} ({said})"
-            f" where {where}")
+            f" where {where}"
+            + (f" ({got.earlier_said()})" if got.earlier else ""))

@@ -373,11 +373,41 @@ def test_the_tries_a_unit_may_make_are_what_its_forecast_pays_for():
     assert unmeasured == inspect.signature(
         faults.retried).parameters["tries"].default
     r.succeeded("a", 100, 100 * 50, 0.5)
-    assert r.tries_paid("u", 100, 1000, width=50) == 11
+    # 1,000 rows left is worth 11 tries, but no recovery was measured: the
+    # catalogue's default bounds them, never the work remaining
+    assert r.tries_paid("u", 100, 1000, width=50) == unmeasured
     assert r.tries_paid("u", 100, 50, width=50) == 2   # one try + one more
     eta, took = r.bounds[1]["eta"], r.bounds[1]["took"]
-    assert r.bounds[1]["tries"] == 1 + round(eta / took) and r.bounds[1][
-        "rate"] == r.rate
+    assert 1 + round(eta / took) == 11 and r.bounds[1]["rate"] == r.rate
+    assert r.tries_paid("u", 100, 10 ** 6, width=50) == unmeasured
+
+
+def test_more_tries_are_paid_only_by_a_measured_recovery_and_bounds_trim():
+    import inspect
+    default = inspect.signature(faults.retried).parameters["tries"].default
+    r = tuning.Retune("t", rows=100, nbytes=10 ** 6)
+    r.succeeded("a", 100, 100 * 50, 0.5)
+    # a failure met and retuned, then the unit ended well: one recovery
+    # measured of one failure met - the default may double, no further
+    r.failed("b", RuntimeError("Got a packet bigger than"
+                               " 'max_allowed_packet' bytes"),
+             sent=10 ** 6, rows=100)
+    assert r.open
+    r.succeeded("b", 100, 100 * 50, 0.5)
+    assert r.recoveries and r.recoveries[0]["unit"] == "b"
+    got = r.tries_paid("u", 100, 10 ** 6, width=50)
+    assert default < got <= 2 * default
+    assert r.bounds[-1]["recovered"] == 1.0
+    # a second failure that never recovered halves the share paid for
+    r.failed("c", RuntimeError("Got a packet bigger than"
+                               " 'max_allowed_packet' bytes"),
+             sent=r.size["bytes"], rows=100)
+    assert len(r.history) == 2 and len(r.recoveries) == 1
+    assert r.tries_paid("u", 100, 10 ** 6, width=50) <= got
+    for i in range(3 * r.BOUNDS_KEPT):
+        r.tries_paid(f"u{i}", 100, 1000, width=50)
+    assert len(r.bounds) == r.BOUNDS_KEPT
+    assert r.bounds[-1]["unit"] == f"u{3 * r.BOUNDS_KEPT - 1}"
 
 
 def test_a_write_that_left_nothing_after_a_refused_size_is_retuned(
@@ -429,3 +459,59 @@ def test_the_tails_read_is_an_owned_operation_read_again_where_lost_says(
     rec = ledger.owned(faults.Owned("src", "tail read", "db", "0").key)
     assert rec["state"] == "done" and rec["tries"] == 2
     assert rec["decided"][0]["path"] == "retry"
+
+
+def test_a_reconciled_failure_keeps_one_decision_with_what_followed(
+        tmp_path):
+    ledger = attempts.Ledger(str(tmp_path / "attempts.json"))
+    target, writes = [], []
+
+    def write():
+        writes.append(1)
+        if len(writes) == 1:
+            raise Lost()
+        target.extend(range(5))
+        return "written"
+    owned = faults.Owned("dst", "copy batch", "t", "0")
+    got = faults.retried(write, writes=True, side="dst", owned=owned,
+                         ledger=ledger, wait=lambda s: None,
+                         check=faults.landed(lambda: 5, lambda: len(target),
+                                             before=0))
+    assert got == "written" and len(writes) == 2
+    kept = ledger.owned(owned.key)["decided"]
+    # one failure, one decision: the reconcile's answer and the choice it
+    # led to are on it, not a second entry with the same tries left
+    assert len(kept) == 1, kept
+    assert kept[0]["path"] == "reconcile"
+    assert kept[0]["reconciled"] == faults.NOTHING and kept[0]["then"]
+
+
+def test_an_open_breaker_that_stops_names_it_on_the_raised_error(
+        tmp_path, monkeypatch):
+    ledger = attempts.Ledger(str(tmp_path / "attempts.json"))
+    breaker = faults.Breaker()
+    breaker.failed("src", 0)
+    real = decide.recovery
+
+    def recovery(facts):
+        got = real(facts)
+        if facts["breaker"] == "open":
+            # the side keeps failing and no wait answers it: what the
+            # caller is handed must name the path taken
+            return decide.climb("recovery", (decide.Rung(
+                "isolate", "isolate the side", because="it keeps failing"),),
+                facts)
+        return got
+    monkeypatch.setattr(decide, "recovery", recovery)
+
+    def read():
+        raise faults.Injected("connectivity")
+    owned = faults.Owned("src", "read range", "t", "0..10@None")
+    with pytest.raises(faults.Injected) as e:
+        faults.retried(read, tries=3, side="src", ledger=ledger,
+                       owned=owned, breaker=breaker, wait=lambda s: None,
+                       backoff=lambda i: 5.0)
+    assert e.value.recovery == "isolate"
+    assert e.value.fault == "connectivity"
+    paths = [d["path"] for d in ledger.owned(owned.key)["decided"]]
+    assert paths == ["retry", "isolate"]

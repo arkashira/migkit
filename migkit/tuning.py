@@ -718,6 +718,9 @@ class Retune:
         self.calm, self.steady = 0, self.STEADY
         self.history, self.open, self.verified = [], {}, []
         self.bounds = []
+        #: recoveries measured: a unit whose failure was met here and that
+        #: then ended well, with the seconds its good try took
+        self.recoveries = []
         self.rate = None
         self.units = {}
 
@@ -900,6 +903,8 @@ class Retune:
         out = None
         adj = self.open.pop(unit, None)
         if adj is not None:
+            self.recoveries.append({"unit": unit, "cause": adj.cause.kind,
+                                    "seconds": float(seconds or 0.0)})
             why = ("the fault is gone and the unit holds every row" if whole
                    else "it ended well, but its rows were not counted whole"
                    " on the target" if counted is not None else
@@ -969,26 +974,44 @@ class Retune:
         from .util import forecast
         return forecast(list(self.units.values()) + list(pending), **kw)
 
+    #: the bounds kept as evidence: the latest, one per batch's ask
+    BOUNDS_KEPT = 64
+
     def tries_paid(self, unit, rows, left, width=1):
-        """The tries one unit of `rows` may make, every recovery counted,
-        as the forecast pays for: the `left` rows of its work (`width`
-        bytes a row) at the bytes a second the copy measured, over what
-        one try of the unit takes at that rate - recovery never spends more time than the work it saves is
-        worth; the try and one recovery always fit. Unmeasured, the
-        catalogue's own default (`faults.retried`). Each bound is kept in
-        `bounds` with the forecast it came from."""
+        """The tries one unit of `rows` may make, every recovery counted.
+        What the work left is worth: the `left` rows (`width` bytes a row)
+        at the bytes a second measured, over what one try takes at that
+        rate - a measured recovery's good try costed at rate x its time
+        where it took longer - so recovery never spends more time than the
+        work it saves; the try and one recovery always fit. Bounded by the
+        catalogue's own default (`faults.retried`): a failure retried more
+        often on identical work is not recovered by repeating it. More are
+        paid only where recoveries were measured here - failures met that
+        then ended well (`recoveries`): their share of the failures met
+        raises the default by at most itself again. Unmeasured, the
+        default.
+        Each bound is kept in `bounds` (the latest `BOUNDS_KEPT`) with the
+        forecast and the recoveries it came from."""
         import inspect
         import math
         from . import faults
-        if not self.rate or not rows:
-            got, eta, took = inspect.signature(faults.retried).parameters[
-                "tries"].default, None, None
-        else:
+        default = inspect.signature(faults.retried).parameters[
+            "tries"].default
+        eta = took = None
+        got, share = default, 0.0
+        if self.rate and rows:
             eta = float(left) * width / self.rate
             took = float(rows) * width / self.rate
-            got = max(2, 1 + math.ceil(eta / max(took, 1e-9)))
+            met = len(self.history)
+            share = min(1.0, len(self.recoveries) / met) if met else 0.0
+            spent = max([took] + [r["seconds"] for r in
+                                  self.recoveries[-self.BOUNDS_KEPT:]])
+            worth = max(2, 1 + math.ceil(eta / max(spent, 1e-9)))
+            got = min(worth, math.ceil(default * (1 + share)))
         self.bounds.append({"unit": unit, "tries": got, "eta": eta,
-                            "took": took, "rate": self.rate})
+                            "took": took, "rate": self.rate,
+                            "recovered": share})
+        del self.bounds[:-self.BOUNDS_KEPT]
         return got
 
 

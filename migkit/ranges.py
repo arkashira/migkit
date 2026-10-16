@@ -680,8 +680,11 @@ def _reach(st, after):
     return rs[i - 1][1] if i else None
 
 
-#: (id of a table's checkpoint, a range's start) -> what closes the range's
-#: unit once the checkpoint holds the range done (`each_owned`, `finished`)
+#: (id of a table's checkpoint, a range's start) -> (that checkpoint, what
+#: closes the range's unit once it holds the range done) (`each_owned`,
+#: `finished`). The checkpoint is kept with it, so an id reused by a later
+#: checkpoint never reaches an earlier table's closure, and `each_owned`
+#: pops every entry of its table as it ends, the ranges that raised too.
 _LANDING = {}
 
 
@@ -717,6 +720,7 @@ def each_owned(slots, eng, table, st, todo, one, log=None):
     led = mon.ledger
     parts = len(st.get("ranges") or ()) or None
     left = {}
+    mine = set()
     gate = threading.Lock()
 
     def landed(name):
@@ -732,15 +736,17 @@ def each_owned(slots, eng, table, st, todo, one, log=None):
         after = rng[0]
         name = unit_of(table, after)
         led.unit_opened(name, "move", "range", table, parts, at=mon.wall())
+        key = (id(st), ident(after))
         with gate:
             left[name] = after
-        _LANDING[(id(st), ident(after))] = landed(name)
+            mine.add(key)
+        _LANDING[key] = (st, landed(name))
         try:
             with eng.attempt_unit(TASK_KINDS.get("move", "move"), name,
                                   after):
                 got = one(rng)
         except BaseException as e:
-            _LANDING.pop((id(st), ident(after)), None)
+            _LANDING.pop(key, None)
             with gate:
                 left.pop(name, None)
             try:
@@ -759,6 +765,10 @@ def each_owned(slots, eng, table, st, todo, one, log=None):
         with gate:
             cut = list(left)
             left.clear()
+            gone, _ = list(mine), mine.clear()
+        for key in gone:
+            # nothing of this table's is left to close a later one's unit
+            _LANDING.pop(key, None)
         for name in cut:
             # `one` returned and the checkpoint never held the range: owed
             led.unit_closed(name, False, "not proved", at=mon.wall())
@@ -827,9 +837,9 @@ def finished(st, after, save, rows=None):
     if not journaled:
         _saved(save, owner, gen)
     # the range's unit closes once its checkpoint holds it (`each_owned`)
-    landed = _LANDING.pop((id(st), ident(after)), None)
-    if landed is not None:
-        landed()
+    landing = _LANDING.pop((id(st), ident(after)), None)
+    if landing is not None and landing[0] is st:
+        landing[1]()
     failpoint.hit("range.saved")
 
 

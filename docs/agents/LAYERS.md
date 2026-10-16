@@ -818,8 +818,8 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### an executor asks the decision engine (`decide`) how many or how fast; the call becomes a fact handed down
 
-- `migkit/attempts.py:712` execution -> decision (`decide`)
-- `migkit/ranges.py:1073` execution -> decision (`decide`)
+- `migkit/attempts.py:745` execution -> decision (`decide`)
+- `migkit/ranges.py:1083` execution -> decision (`decide`)
 - `migkit/runner.py:55` execution -> decision (`decide`)
 - `migkit/util.py:664` execution -> decision (`decide`)
 
@@ -834,21 +834,21 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### an executor asks the decision engine (`tuning`) how many or how fast; the call becomes a fact handed down
 
-- `migkit/ranges.py:1060` execution -> decision (`tuning`)
+- `migkit/ranges.py:1070` execution -> decision (`tuning`)
 - `migkit/throttle.py:53` execution -> decision (`tuning`)
 
 ### an executor calls `fleet` for a workflow step; the step is passed in as a hook
 
 - `migkit/attempts.py:316` execution -> workflows (`fleet`)
-- `migkit/ranges.py:693` execution -> workflows (`fleet`)
+- `migkit/ranges.py:696` execution -> workflows (`fleet`)
 
 ### an executor calls `leaves` for a workflow step; the step is passed in as a hook
 
-- `migkit/ranges.py:1154` execution -> workflows (`leaves`)
+- `migkit/ranges.py:1164` execution -> workflows (`leaves`)
 
 ### an executor calls `unchanged` for a workflow step; the step is passed in as a hook
 
-- `migkit/ranges.py:1557` execution -> workflows (`unchanged`)
+- `migkit/ranges.py:1567` execution -> workflows (`unchanged`)
 
 ### an executor says its progress through `notify`; the notice goes through an event below execution
 

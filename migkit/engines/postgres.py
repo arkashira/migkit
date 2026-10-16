@@ -12825,11 +12825,17 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                 f' from {_ident(sch)}.{_ident(tbl)} t'
                 + (f" where {where}" if where else ""))
 
-    def _load_session(self, unit, statement, tag, proc):
+    def _load_session(self, unit, statement, tag, proc, db):
         """Bind the range's `unit` to its load (`Ledger.unit_statement`)
         and the target session the server lists under `tag`, read while
         `proc` runs - until it ends or its connection's own time to connect
-        is past; a session never seen is not guessed at."""
+        is past; a session never seen is not guessed at. Read through the
+        connection this thread keeps to the load's own database `db` (the
+        server lists every database's sessions to it): a target need not
+        have a database named `postgres`, and a second connection per
+        range is not opened to ask. A look that fails is no failure of the
+        load: its session is then not known, said as such by the unit's
+        record having none."""
         from ..attempts import monitor_of
         mon = monitor_of(self)
         if mon is None:
@@ -12837,10 +12843,13 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         mon.ledger.unit_statement(unit, statement)
         deadline = time.monotonic() + CONNECT_SECONDS
         while proc.poll() is None and time.monotonic() < deadline:
-            pid = self._psql("dst", "postgres",
-                             "select pid from pg_stat_activity where"
-                             f" application_name = {_literal(tag)}"
-                             " limit 1").strip()
+            try:
+                pid = self._psql("dst", db,
+                                 "select pid from pg_stat_activity where"
+                                 f" application_name = {_literal(tag)}"
+                                 " limit 1").strip()
+            except Exception:  # noqa: BLE001 - the load's own end decides
+                return
             if pid:
                 mon.ledger.unit_statement(unit, statement, "dst", int(pid))
                 return
@@ -12899,7 +12908,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
             # the ledger keeps no statement's text
             self._load_session(unit, "load " + hashlib.blake2b(
                 f"{qt}|{select_sql}".encode(), digest_size=6).hexdigest(),
-                tag, inp)
+                tag, inp, db)
         # passed on through here, and tallied on the way: what the target
         # is read back against once it has committed (`_copy_checked`)
         from ..stall import Guard

@@ -591,7 +591,7 @@ def retried(fn, tries=4, side="", operation="", writes=False, atomic=False,
             # replan, isolate, probe or stop: not tried again on a side
             # whose breaker is open - the caller takes the path named
             try:
-                last.recovery = got.path
+                last.fault, last.recovery = told.fault.name, got.path
             except (AttributeError, TypeError):
                 pass
             _say(log, f"{name}: {side} keeps failing; {got.path}")
@@ -636,11 +636,13 @@ def retried(fn, tries=4, side="", operation="", writes=False, atomic=False,
                 if state == NOTHING and i < tries - 1:
                     # nothing of it landed: asked again, now that the
                     # effect is known - a size the server refused goes to
-                    # the caller's retune, never again as it was
+                    # the caller's retune, never again as it was. One
+                    # decision per failure: what the reconcile found is
+                    # folded into the one kept for it, not kept again
                     facts = _facts(told, check, renew, NOTHING,
                                    tries - i - 1, "closed")
                     again = decide.recovery(facts)
-                    _decided(ledger, owned, again, facts)
+                    _decided(ledger, owned, again, facts, then=True)
                     if again.path != "replan":
                         wait(backoff(i) * (2 if again.path == "throttle"
                                            else 1))
@@ -689,14 +691,22 @@ def _facts(told, check, renew, reconciled, left, breaker):
             "tries_left": left, "breaker": breaker, "phase": told.phase}
 
 
-def _decided(ledger, owned, got, facts):
+def _decided(ledger, owned, got, facts, then=False):
     """The recovery chosen after a failure kept in the operation's record
     with the facts it was chosen on, so the run's evidence names the path
-    and why - every one, in order."""
+    and why - every one, in order, one per failure. `then`: the choice
+    made once the failure's reconcile answered - kept on that failure's
+    own decision as what followed it (`then`, `reconciled`), never as a
+    second failure with the same tries left."""
     if ledger is None or owned is None:
         return
     rec = ledger.owned(owned.key) or {}
     kept = list(rec.get("decided") or ())
+    if then and kept:
+        kept[-1] = dict(kept[-1], then=got.path,
+                        reconciled=facts["reconciled"])
+        ledger.own(owned.key, decided=kept)
+        return
     kept.append({"path": got.path, "class": facts["class"],
                  "breaker": facts["breaker"],
                  "tries_left": facts["tries_left"],

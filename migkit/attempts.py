@@ -575,6 +575,39 @@ class Ledger:
                     ss.append([side, str(session)])
         self.flush()
 
+    def side_keepalive(self, side):
+        """(seconds, where) of the keepalive last read off a socket of
+        `side` in this run - the transport its latest statement's attempt
+        was begun with (`Engine.transport_of` its kept connection,
+        `keepalive_seconds`) - or (None, why none was): a side's
+        connections are opened with one set of keepalives, so the kept
+        connection's socket says what a load's session holds too."""
+        with self._lock:
+            rs = [r for r in self.attempts.values()
+                  if r.get("side") == side and r.get("transport")
+                  and r.get("run", self.run) == self.run]
+        rs.sort(key=lambda r: float(r.get("epoch") or 0) + float(
+            r.get("started") or 0.0))
+        for r in reversed(rs):
+            got = keepalive_seconds(r["transport"])
+            if got is not None:
+                return got, "read off the side's kept connection's socket"
+        if rs:
+            return None, ("not observed: the side's connections read"
+                          " keepalives off or unreadable")
+        return None, ("not observed: no connection of the side's had its"
+                      " socket read in this run")
+
+    def unit_keepalive(self, name, seconds, where):
+        """The keepalive unit `name`'s move health was decided against,
+        and where it came from - "not observed" kept as it is."""
+        with self._lock:
+            r = self.records.get(name)
+            if r is None:
+                return
+            r["keepalive"] = {"seconds": seconds, "from": where}
+        self.flush()
+
     def unit_stalled(self, name, why):
         """Unit `name` told as stalled (`Monitor.unit_health`): counted on
         its record with the decision's reason, so its estimate and its
@@ -752,7 +785,7 @@ class Monitor:
         finally:
             self.ledger.unit_closed(name, ok, why, at=self.wall())
 
-    def unit_health(self, name, keepalive=None):
+    def unit_health(self, name, keepalive=None, observed=""):
         """Move health of unit `name`, read from the server: the last
         session recorded for it (`Ledger.unit_statement`) as its server
         lists it (`Engine.session_view`), and what is done decided by
@@ -764,7 +797,10 @@ class Monitor:
         session (`Engine.close_session`), never another - and replayed.
         Else it is waited on. A stall is said and kept on the unit's
         record; the `Choice` is returned, None where no session was
-        recorded for the unit."""
+        recorded for the unit. `keepalive` not given is the one read off
+        the side's kept connection (`Ledger.side_keepalive`); where none
+        was, "not observed" is a fact of the decision and of the unit's
+        record, and the close rung is not reached."""
         from .decide import range_stall
         rec = self.ledger.unit_record(name)
         if not rec.get("sessions"):
@@ -776,10 +812,15 @@ class Monitor:
             view = View(session, error=str(e).splitlines()[0][:120]
                         if str(e) else type(e).__name__)
         listed = None if view.error else bool(view.present)
+        if keepalive is None:
+            keepalive, observed = self.ledger.side_keepalive(side)
+        observed = observed or "given by the caller"
+        self.ledger.unit_keepalive(name, keepalive, observed)
         got = range_stall({
             "listed": listed, "state": view.state,
             "idle_seconds": float(view.seconds or 0.0),
-            "keepalive": keepalive, "open": rec.get("state") == "open",
+            "keepalive": keepalive, "keepalive from": observed,
+            "open": rec.get("state") == "open",
             "owned": bool(listed and self.engine.owns_session(side, view))})
         if got.path == "close" and not self.engine.close_session(
                 side, session, view):

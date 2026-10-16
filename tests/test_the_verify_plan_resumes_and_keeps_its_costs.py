@@ -102,6 +102,11 @@ def test_a_stopped_row_text_check_replays_only_the_ranges_it_owes(tmp_path):
     assert got.first[0] == preds[3] and got.first[1] == ("1777",)
     line = scanplan.row_text_line("app.t", got)
     assert "DIFF" in line and "first key=1777" in line
+    # the two ranges proved before the stop stand on that earlier read,
+    # and the result says so, with when it was
+    assert got.earlier == 2 and got.earlier_at
+    assert "(2 of 4 ranges from the check stopped at " in line
+    assert line.rstrip().endswith("UTC)")
     # every range proved: the next check reads the whole table again
     assert scanplan.RangeTexts(kept_at).of("app.t", "s") == {}
 
@@ -183,3 +188,14 @@ def test_the_next_table_of_a_shape_starts_from_the_measured_cost(
     est = dict(second.costs).get("row text")
     assert est is not None and getattr(est, "n", 0) >= 1
     assert costs.fit("row text").n == 2
+
+
+def test_a_check_read_whole_says_no_range_from_an_earlier_one(tmp_path):
+    preds = _preds()
+    data = {"src": _side(), "dst": _side()}
+    got = scanplan.row_text(_reader(data, preds, []), preds,
+                            eng=_Eng(tmp_path / "attempts.json"),
+                            table="app.t", scope="s",
+                            kept=scanplan.RangeTexts(tmp_path / "rt.json"))
+    assert got.earlier == 0 and got.earlier_said() == ""
+    assert "earlier" not in scanplan.row_text_line("app.t", got)

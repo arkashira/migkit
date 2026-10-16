@@ -493,3 +493,111 @@ def test_a_range_idle_within_the_keepalive_or_unobserved_waits():
     assert decide.range_stall({"listed": True, "state": "idle",
                                "idle_seconds": 500.0, "keepalive": 60.0,
                                "owned": True, "open": False}).path == "wait"
+
+
+def _kept_socket(idle, interval, count):
+    """A socket whose keepalives are set as a side's kept connection's
+    are, read back as `attempts.transport` reads one."""
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    for names, v in ((("TCP_KEEPIDLE", "TCP_KEEPALIVE"), idle),
+                     (("TCP_KEEPINTVL",), interval), (("TCP_KEEPCNT",), count)):
+        opt = next((getattr(socket, n) for n in names
+                    if hasattr(socket, n)), None)
+        if opt is not None:
+            s.setsockopt(socket.IPPROTO_TCP, opt, v)
+    try:
+        return attempts.transport(s)
+    finally:
+        s.close()
+
+
+def test_the_close_rung_is_reached_by_the_keepalive_read_off_the_side():
+    """No keepalive given, as both product callers give none: the one read
+    off the target's kept connection - the transport its latest statement
+    was begun with - is what the idle session is held against, and the
+    close path is taken on it."""
+    t = _kept_socket(30, 10, 3)
+    keep = attempts.keepalive_seconds(t)
+    assert keep is not None and keep >= 30
+    eng = FakeEngine({"101": View("101", "miguser", "idle", keep + 15.0),
+                      "202": View("202", "miguser", "idle", keep + 15.0)})
+    mon, _, said = _monitor(eng)
+    # a statement on the source's connection says nothing of the target's
+    mon.done(mon.begin("src", "a query",
+                       transport=_kept_socket(500, 50, 9)), True)
+    mon.done(mon.begin("dst", "a query", session=7, transport=t), True)
+    a = _range_unit(mon.ledger)
+    mon.ledger.unit_statement(a, "load a1", "dst", 101)
+    got = mon.unit_health(a)
+    assert got.path == "close", got.reason
+    assert f"{keep:.1f}s keepalive observed" in got.reason
+    assert eng.closed == [("dst", "101")] and "202" in eng.views
+    rec = mon.ledger.unit_record(a)
+    assert rec["keepalive"] == {
+        "seconds": keep, "from": "read off the side's kept connection's"
+                                 " socket"}
+    assert rec["stalls"] == 1 and any("closed that session" in s
+                                      for s in said)
+
+
+def test_a_keepalive_not_observed_is_a_fact_of_the_decision_and_kept():
+    eng = FakeEngine({"101": View("101", "miguser", "idle", 5000.0)})
+    mon, _, _ = _monitor(eng)
+    name = _range_unit(mon.ledger)
+    mon.ledger.unit_statement(name, "load a1", "dst", 101)
+    got = mon.unit_health(name)
+    assert got.path == "wait" and "no keepalive observed" in got.reason
+    rec = mon.ledger.unit_record(name)
+    assert rec["keepalive"]["seconds"] is None
+    assert rec["keepalive"]["from"].startswith("not observed: no connection")
+    # keepalives off on the side's socket: still not observed, said why
+    mon.done(mon.begin("dst", "a query", transport={"keepalive": False}),
+             True)
+    assert mon.unit_health(name).path == "wait"
+    assert "keepalives off" in mon.ledger.unit_record(name)["keepalive"][
+        "from"] and eng.closed == []
+
+
+class _Slots:
+    workers = 1
+
+    def each(self, todo, fn):
+        return [fn(r) for r in todo]
+
+
+class _RangeEngine:
+    def __init__(self):
+        self.mon = Monitor(FakeEngine({}), Ledger(), thread=False,
+                           say=lambda line: None)
+
+    def attempts(self):
+        return self.mon
+
+    def attempt_unit(self, *a, **k):
+        import contextlib
+        return contextlib.nullcontext()
+
+
+def test_a_table_whose_range_raised_leaves_no_closure_behind():
+    from migkit import ranges
+    eng, st = _RangeEngine(), {"ranges": [[0, 10], [10, 20], [20, 30]],
+                               "ranges_done": []}
+
+    def one(rng):
+        if rng[0] == 20:
+            raise RuntimeError("the load failed")
+        return rng
+    with pytest.raises(RuntimeError):
+        ranges.each_owned(_Slots(), eng, "public.t", st,
+                          [tuple(r) for r in st["ranges"]], one)
+    assert not [k for k in ranges._LANDING if k[0] == id(st)]
+    recs = eng.mon.ledger.records
+    assert {r["state"] for r in recs.values()} == {"failed"}
+    # an entry left under a reused id never closes another checkpoint's
+    other = {"ranges": [[0, 10]], "ranges_done": []}
+    called = []
+    ranges._LANDING[(id(other), ranges.ident(0))] = (
+        {"stale": True}, lambda: called.append(1))
+    ranges.finished(other, 0, lambda: None)
+    assert called == [] and other["ranges_done"] == [0]
