@@ -47,10 +47,20 @@ def test_the_line_says_whose_it_is_and_what_is_left_out():
     assert said[0] == ("__dst__tencentdb__sync_6fve1pd0: the provider's"
                        " sync-back table (Tencent DTS), not your data: left"
                        " out of scope, counts and the check")
+    # a provider whose tables are not known by name narrows nothing: its
+    # line is a note beside the listing, not a table left out
+    assert not any("not told apart" in line for line in said)
     for p in leftovers.PROVIDERS_UNVERIFIED:
-        assert f"a sync-back or control table of {p}: not checked for {p}" \
-            in said
+        assert any(line.startswith(f"a sync-back or control table of {p} is"
+                                   " not told apart")
+                   for line in leftovers.providers_untold())
     assert not any(line.startswith("orders") for line in said)
+    # a target with none of a provider's tables leaves nothing out, so the
+    # check it runs is whole (the verdict reads no narrowing from it)
+    class Clean:
+        def neutral_tables(self, side, db):
+            return ["orders", "log"]
+    assert cli._not_your_data(Clean(), ["shop"]) == []
 
     class Refusing:
         def neutral_tables(self, side, db):

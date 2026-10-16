@@ -526,6 +526,15 @@ def _not_your_data(eng, dbs):
     return leftovers.not_your_data(names) + out if names or out else []
 
 
+def _providers_untold(say):
+    """The providers whose tables the listing cannot tell apart
+    (`leftovers.providers_untold`), said once beside it: a note, not a
+    narrowing of the run."""
+    from . import leftovers
+    for line in leftovers.providers_untold():
+        say(line)
+
+
 def _keep_out(hop, eng, d, tables, go, whole=False):
     """The interlock's word on a copy of `d` (`interlock.before_copy`):
     the tables whose rows the hop keeps as they are are left out of it.
@@ -2631,6 +2640,7 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
         coverage["not your data"] = theirs
         for line in theirs:
             console.print(f"  {_esc(line)}")
+        _providers_untold(lambda m: console.print(f"  {_esc(m)}"))
     # a check under a scope narrower than the one the move took is not a
     # whole check of what was moved (`_narrower_than_moved`)
     narrower = _narrower_than_moved(hop, dbs)

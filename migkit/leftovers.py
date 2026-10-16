@@ -265,13 +265,24 @@ def provider_tables(names):
 
 
 def not_your_data(names):
-    """What the scope listing, the check and the report say of a target
-    holding `names`: the provider's tables among them (`provider_tables`),
-    then each provider whose tables are not known here
-    (`PROVIDERS_UNVERIFIED`) as not checked."""
-    return provider_tables(names) + [
-        f"a sync-back or control table of {p}: not checked for {p}"
-        for p in PROVIDERS_UNVERIFIED]
+    """What the scope listing, the check and the report say a target
+    holding `names` leaves out as a provider's own: the provider's tables
+    among them (`provider_tables`). Only a table told apart is left out;
+    a provider whose tables are not known here is said by
+    `providers_untold`, not here, because its tables are not left out."""
+    return provider_tables(names)
+
+
+def providers_untold():
+    """One line per provider whose sync-back and control tables are not
+    known here by name (`PROVIDERS_UNVERIFIED`): a table of theirs on the
+    target is not told apart from the user's own, so it is counted and
+    checked as the user's data, not left out. Said beside the listing, and
+    not a narrowing of the check: nothing the run set out to compare was
+    skipped on their account."""
+    return [f"a sync-back or control table of {p} is not told apart from"
+            " your own here: one there is counted and checked as yours"
+            for p in PROVIDERS_UNVERIFIED]
 
 
 def is_replication_artifact(name, schema=None):

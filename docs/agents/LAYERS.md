@@ -557,7 +557,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a safety module asks the decision engine (`decide.lift_hold`) whether a hold a run left may be lifted; the holds and their ages are to be handed up as facts by the command
 
-- `migkit/leftovers.py:366` safety -> decision (`decide`)
+- `migkit/leftovers.py:377` safety -> decision (`decide`)
 
 ### a safety refusal is said by reporting's `export`; the wording moves below safety
 
