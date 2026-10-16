@@ -59,13 +59,23 @@ OWED_OUTSIDE = {
     # the rung can never be refused; held in
     # tests/test_the_move_way_rungs_hold_and_refuse.py
     ('cli', '_bulk_or_copier', '<v>'):
+        'defect: migkit/cli.py _bulk_or_copier (AUD-Z.rung-defects)',
+    # defect (W21B): `native_bulk` hands `decide.Facts(unfit=unfit)` -
+    # the value where a reader is taken - so asking the restore's need
+    # raises TypeError before either way is pruned
     ('engines.spanner', 'SpannerEngine', 'restore'):
-        'new: tests/test_engines_spanner_rungs.py',
+        'defect: migkit/engines/spanner.py native_bulk (AUD-Z.rung-defects)',
     ('engines.spanner', 'SpannerEngine', 'tables'):
-        'new: tests/test_engines_spanner_rungs.py',
+        'defect: migkit/engines/spanner.py native_bulk (AUD-Z.rung-defects)',
+    # defect (W21C): its only need is `lambda f: False`, a blocker built
+    # as a rung that can never hold; refused in
+    # tests/test_the_scenario_rungs_hold_and_refuse.py
     ('scenarios', 'topology_case', 'topology-unknown'):
+        'defect: migkit/scenarios.py topology_case (AUD-Z.rung-defects)',
+    # defect (W21D): `_Loader.relink` builds it only to label a
+    # `carriers.Carrier` and never hands it to `decide.prune`
     ('ship', '_Loader', 'spool'):
-        'new: tests/test_ship_rungs.py',
+        'defect: migkit/ship.py _Loader.relink (AUD-Z.rung-defects)',
 }
 
 
