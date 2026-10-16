@@ -3566,6 +3566,8 @@ def _merge_declared():
         for engine in served:
             UNPROVED_WHY[engine] = " ".join(reason.split())
             _proved(engine, " ".join(UNPROVED))
+        if not isinstance(items, str):
+            items = " ".join(items)
         for token in items.split():
             who, _, item = token.rpartition(":")
             if who and who not in served:

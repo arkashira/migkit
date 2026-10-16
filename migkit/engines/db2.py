@@ -20,9 +20,21 @@ from .sqlcatalog import CatalogChecks
 #: accounts, statistics, the rollback point, fence, confirm and delta
 #: (R13-DB2), proved on fakes only
 UNPROVED_ON = "built; not run on a real Db2 LUW server"
-UNPROVED_ITEMS = ("verify.delta", "verify.fence", "verify.confirm",
-                  "verify.users", "move.bulk", "cutover.rollback",
-                  "cutover.drain")
+#: the ways built here and run against no server: the whole list, the
+#: matrix reads it from this source (`capabilities`)
+UNPROVED_ITEMS = (
+    "assess.preflight cutover.counters cutover.drain cutover.freeze "
+    "cutover.rollback move.bulk move.partitioned scope.copy "
+    "scope.counters scope.listings scope.names scope.objects "
+    "scope.repair scope.row-filter verify.access.object-ownership verify.confirm "
+    "verify.delta verify.fence verify.identity.sequence-collision verify.identity.sequence-parity "
+    "verify.movement.target-ahead verify.repair verify.repair-undo verify.structure.collection-options "
+    "verify.structure.columns verify.structure.foreign-keys verify.structure.indexes verify.structure.keys "
+    "verify.structure.materialized-views verify.structure.objects verify.structure.partitions verify.structure.row-security "
+    "verify.structure.schema-diff verify.structure.sharding verify.structure.triggers verify.structure.unvalidated-constraints "
+    "verify.table verify.users verify.value.charset verify.value.collation "
+    "verify.value.generated verify.value.narrowing verify.value.null-empty verify.value.precision "
+    "verify.value.rendering verify.value.timezone")
 
 #: a column's type: its own, or for a distinct type the built-in type it
 #: is made from (`syscat.datatypes`), whose values it holds - a distinct

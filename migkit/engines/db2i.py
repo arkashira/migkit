@@ -57,7 +57,22 @@ from .dbapi import MARK
 #: why the ways below are owed a run: settings, the system's own copy
 #: and the rollback point (R13-DB2), proved on fakes only
 UNPROVED_ON = "built; not run on a real IBM i"
-UNPROVED_ITEMS = ("move.bulk", "cutover.rollback")
+#: the ways built here and run against no server: the whole list, the
+#: matrix reads it from this source (`capabilities`)
+UNPROVED_ITEMS = (
+    "assess.engine-checks assess.preflight cutover.counters cutover.drain "
+    "cutover.read-only-target cutover.rollback move.bulk move.large-values "
+    "move.partitioned move.sized move.table-copy schema.create "
+    "scope.counters scope.deep scope.names scope.objects "
+    "scope.ops scope.repair scope.row-filter tail.follows "
+    "tail.table-states verify.access.object-ownership verify.confirm verify.delta "
+    "verify.fence verify.identity.sequence-collision verify.identity.sequence-parity verify.movement.target-ahead "
+    "verify.repair verify.repair-undo verify.structure.collection-options verify.structure.columns "
+    "verify.structure.foreign-keys verify.structure.indexes verify.structure.keys verify.structure.materialized-views "
+    "verify.structure.objects verify.structure.partitions verify.structure.row-security verify.structure.schema-diff "
+    "verify.structure.sharding verify.structure.triggers verify.structure.unvalidated-constraints verify.table "
+    "verify.value.charset verify.value.collation verify.value.generated verify.value.narrowing "
+    "verify.value.null-empty verify.value.precision verify.value.rendering verify.value.timezone")
 
 #: the name IBM's ODBC driver for IBM i registers itself by
 ODBC_DRIVER = "IBM i Access ODBC Driver"

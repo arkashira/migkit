@@ -29,7 +29,21 @@ from .dbapi import MARK
 #: accounts, statistics and the rollback point (R13-DB2), proved on
 #: fakes only
 UNPROVED_ON = "built; not run on a real Db2 for z/OS subsystem"
-UNPROVED_ITEMS = ("verify.users", "move.bulk", "cutover.rollback")
+#: the ways built here and run against no server: the whole list, the
+#: matrix reads it from this source (`capabilities`)
+UNPROVED_ITEMS = (
+    "assess.preflight cutover.counters cutover.read-only-target cutover.rollback "
+    "move.bulk move.large-values move.partitioned move.sized "
+    "move.table-copy schema.create scope.counters scope.deep "
+    "scope.names scope.objects scope.repair scope.row-filter "
+    "verify.access.object-ownership verify.identity.sequence-collision verify.identity.sequence-parity verify.movement.target-ahead "
+    "verify.repair verify.repair-undo verify.structure.collection-options verify.structure.columns "
+    "verify.structure.foreign-keys verify.structure.indexes verify.structure.keys verify.structure.materialized-views "
+    "verify.structure.objects verify.structure.partitions verify.structure.row-security verify.structure.schema-diff "
+    "verify.structure.sharding verify.structure.triggers verify.structure.unvalidated-constraints verify.table "
+    "verify.users verify.value.charset verify.value.collation verify.value.generated "
+    "verify.value.narrowing verify.value.null-empty verify.value.precision verify.value.rendering "
+    "verify.value.timezone")
 
 #: the declared type from `SYSIBM.SYSCOLUMNS`, with the numbers a
 #: counterpart needs; a character column `FOR BIT DATA` (FOREIGNKEY 'B')
