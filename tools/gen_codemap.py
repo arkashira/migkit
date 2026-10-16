@@ -1312,6 +1312,17 @@ KNOWN_UPWARD = {
      "which way in to take; the choice is handed in as a fact"): (
         "migkit/tunnel.py migkit.decide",
     ),
+    ("every provider call waits on the egress gate (`cloudapi.gate`, "
+     "`egress.decide`) before its client is made; the gate moves to a "
+     "contract below persistence"): (
+        "migkit/anchor.py migkit.cloudapi",
+        "migkit/dba.py migkit.cloudapi",
+        "migkit/freeze.py migkit.cloudapi",
+        "migkit/machine.py migkit.cloudapi",
+        "migkit/state.py migkit.cloudapi",
+        "migkit/variants.py migkit.cloudapi",
+        "migkit/variants.py migkit.egress",
+    ),
     ("a brand's confidence is a rung (`decide.brand_confidence`) the "
      "configuration reads once the server's signs are in; the rung moves "
      "below configuration"): (

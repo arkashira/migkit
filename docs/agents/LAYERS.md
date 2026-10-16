@@ -28,16 +28,6 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ## Upward imports still listed: 377
 
-### (not listed)
-
-- `migkit/anchor.py:130` persistence -> integrations (`cloudapi`)
-- `migkit/dba.py:1141` decision -> integrations (`cloudapi`)
-- `migkit/freeze.py:6390` safety -> integrations (`cloudapi`)
-- `migkit/machine.py:600` decision -> integrations (`cloudapi`)
-- `migkit/state.py:332` persistence -> integrations (`cloudapi`)
-- `migkit/variants.py:503` configuration -> integrations (`cloudapi`)
-- `migkit/variants.py:503` configuration -> safety (`egress`)
-
 ### a brand's confidence is a rung (`decide.brand_confidence`) the configuration reads once the server's signs are in; the rung moves below configuration
 
 - `migkit/variants.py:397` configuration -> decision (`decide`)
@@ -894,6 +884,16 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 - `migkit/engines/base.py:7795` engines -> cli (`cli`)
 - `migkit/engines/oracle_pump.py:227` engines -> cli (`cli`)
+
+### every provider call waits on the egress gate (`cloudapi.gate`, `egress.decide`) before its client is made; the gate moves to a contract below persistence
+
+- `migkit/anchor.py:130` persistence -> integrations (`cloudapi`)
+- `migkit/dba.py:1141` decision -> integrations (`cloudapi`)
+- `migkit/freeze.py:6390` safety -> integrations (`cloudapi`)
+- `migkit/machine.py:600` decision -> integrations (`cloudapi`)
+- `migkit/state.py:332` persistence -> integrations (`cloudapi`)
+- `migkit/variants.py:503` configuration -> integrations (`cloudapi`)
+- `migkit/variants.py:503` configuration -> safety (`egress`)
 
 ### execution reaches `engines` (engines); the shared piece moves below both, or the call is inverted
 
