@@ -179,7 +179,9 @@ def test_the_tails_round_is_one_transaction_with_the_origin_document_first(
     evs = [{"operationType": "insert", "ns": {"coll": "w16f"},
             "documentKey": {"_id": i}, "fullDocument": d}
            for i, d in enumerate(docs)]
-    with dst["w16f"].watch([], **eng._expanded_events()) as stream:
+    # the database is watched, as the tail reads it: the origin document
+    # lives in its own collection
+    with dst.watch([], **eng._expanded_events()) as stream:
         with eng._tail_unit(dst) as unit:
             for ev in evs:
                 assert eng._tail_event(DB, dst, ev, True, unit) == 1

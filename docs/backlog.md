@@ -264,6 +264,18 @@ until it is measured against the tool that leads that axis:
   "which batch did you last commit" and no batch lands twice - which is
   what counters, keyless rows and append-only targets need. A rung
   without it is never given such work.
+  *BAR-1 status (W16F2, 2026-10-16): PARTLY. MongoDB, Redis, Kafka,
+  Cassandra and DynamoDB tails write their changes marked in the engine's
+  atomic unit and leave out what the way back wrote, each proved on a
+  server in its own mark test; cosmosdb, couchbase, keyspaces and spanner
+  are unproved. Four limits stay: Redis MULTI/EXEC has no rollback, so a
+  command that fails at run time inside EXEC leaves the others applied
+  with the mark; Cassandra attributes by write time (no tombstone
+  carries a tag), so a cell the application writes at exactly a listed
+  microsecond is taken as migkit's; DynamoDB attributes a delete by the
+  list of origin keys migkit wrote; Kafka's produce is not transactional,
+  so a round that fails between two messages leaves the earlier ones
+  marked and sent.*
 * **Verified as it lands, to the row, on both sides of any pair.**
   Veridata and DVT verify after; DMS validates by partitions of rows
   with a lag re-check; pgcopydb compares after. migkit verifies each
