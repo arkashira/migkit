@@ -105,7 +105,8 @@ NO_RETURN = ("tail_off", "thaw", "back_off", "left", "origin")
 
 DEFAULTS = {"budget": 30, "start_below": 1, "freeze": "auto",
             "keys": "exact", "jobs": "move", "flip": "", "flip_undo": "",
-            "pooler": None, "no_return": "later", "restore_points": []}
+            "pooler": None, "no_return": "later", "restore_points": [],
+            "reverse_failback": None}
 #: the sides a restore point is taken of before the clock
 RESTORE_SIDES = ("source", "target")
 
@@ -1634,6 +1635,11 @@ def _phased(hop, eng, dbs, leg, conf, say, approvers, drain=None,
         rec["state"] = "flipped"
         _save(hop, rec)
         _sheet_ended(hop, dbs, "flip", rec["phases"]["flip"])
+        try:
+            from . import reverse
+            reverse.pre_warm_reverse_loop(hop, cutover_time=rec["phases"]["flip"]["ended"])
+        except Exception:
+            pass
     except _Undo as e:
         return _undone(hop, eng, rec, leg, conf, say, e.why)
     except KeyboardInterrupt:

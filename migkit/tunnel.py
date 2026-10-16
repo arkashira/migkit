@@ -52,17 +52,24 @@ measured, says it takes to carry `AIM_MB_S`, never more than the run's
 workers, and one where the bastion is near.
 """
 import atexit
+import base64
+import dataclasses
 import os
+import secrets
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
 import tempfile
 import threading
 import time
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 _OPEN = {}
 _LOCK = threading.Lock()
+_MANAGERS = []
+_MANAGERS_LOCK = threading.Lock()
 
 
 def _free_port():
@@ -520,11 +527,677 @@ def of(ep):
     return None
 
 
+def register_manager(m):
+    with _MANAGERS_LOCK:
+        if m not in _MANAGERS:
+            _MANAGERS.append(m)
+
+
+def unregister_manager(m):
+    with _MANAGERS_LOCK:
+        if m in _MANAGERS:
+            _MANAGERS.remove(m)
+
+
 def close_all():
     with _LOCK:
         for t in list(_OPEN.values()):
             t.close()
         _OPEN.clear()
+    with _MANAGERS_LOCK:
+        for m in list(_MANAGERS):
+            m.close()
+        _MANAGERS.clear()
 
 
 atexit.register(close_all)
+
+
+@dataclasses.dataclass
+class BastionConfig:
+    host: str = ""
+    port: int = 22
+    user: str = ""
+    identity_file: Optional[str] = None
+    jump_hosts: List[str] = dataclasses.field(default_factory=list)
+    multiplex: bool = True
+    control_path: Optional[str] = None
+    ephemeral_key: bool = False
+    keepalive_interval: int = 15
+    keepalive_count_max: int = 3
+    strict_host_key_checking: str = "accept-new"
+    known_hosts: Optional[str] = None
+    extra_options: Dict[str, str] = dataclasses.field(default_factory=dict)
+    wireguard: Optional[Dict[str, Any]] = None
+    remote_forward: bool = False
+
+
+def parse_bastion_config(spec: Union[str, Dict[str, Any], BastionConfig]) -> BastionConfig:
+    if isinstance(spec, BastionConfig):
+        return spec
+    if isinstance(spec, str):
+        s = spec.strip()
+        if s.startswith("ssh://"):
+            s = s[len("ssh://"):]
+        user = ""
+        if "@" in s:
+            user, s = s.split("@", 1)
+        host, _, port_s = s.partition(":")
+        port = int(port_s) if port_s.isdigit() else 22
+        return BastionConfig(host=host, port=port, user=user)
+    if isinstance(spec, dict):
+        d = dict(spec)
+        if "bastion" in d and isinstance(d["bastion"], dict):
+            inner = d.pop("bastion")
+            d = {**inner, **d}
+        elif "bastion" in d and isinstance(d["bastion"], str):
+            b_cfg = parse_bastion_config(d.pop("bastion"))
+            d.setdefault("host", b_cfg.host)
+            d.setdefault("port", b_cfg.port)
+            d.setdefault("user", b_cfg.user)
+
+        host = str(d.get("host") or d.get("bastion") or "")
+        port = int(d.get("port") or 22)
+        user = str(d.get("user") or "")
+        identity = d.get("identity_file") or d.get("key") or d.get("identity")
+        identity_file = str(identity) if identity else None
+
+        jumps = d.get("jump") or d.get("jump_hosts") or d.get("proxy_jump") or d.get("ProxyJump")
+        jump_hosts = [jumps] if isinstance(jumps, str) else list(jumps or [])
+
+        multiplex = bool(d.get("multiplex", True))
+        control_path = str(d["control_path"]) if d.get("control_path") else None
+        ephemeral_key = bool(d.get("ephemeral_key", False))
+        keepalive_interval = int(d.get("keepalive_interval", 15))
+        keepalive_count_max = int(d.get("keepalive_count_max", 3))
+        strict_host_key_checking = str(d.get("strict_host_key_checking") or d.get("host_keys") or "accept-new")
+        known_hosts = str(d["known_hosts"]) if d.get("known_hosts") else None
+        extra_options = dict(d.get("extra_options") or {})
+        wireguard = d.get("wireguard")
+        remote_forward = bool(d.get("remote_forward", False))
+
+        return BastionConfig(
+            host=host,
+            port=port,
+            user=user,
+            identity_file=identity_file,
+            jump_hosts=jump_hosts,
+            multiplex=multiplex,
+            control_path=control_path,
+            ephemeral_key=ephemeral_key,
+            keepalive_interval=keepalive_interval,
+            keepalive_count_max=keepalive_count_max,
+            strict_host_key_checking=strict_host_key_checking,
+            known_hosts=known_hosts,
+            extra_options=extra_options,
+            wireguard=wireguard,
+            remote_forward=remote_forward,
+        )
+    raise ValueError(f"invalid bastion specification: {spec!r}")
+
+
+@dataclasses.dataclass
+class ForwardingHandle:
+    tunnel_id: str
+    direction: str
+    local_host: str
+    local_port: int
+    remote_host: str
+    remote_port: int
+    proc: Optional[subprocess.Popen] = None
+    said_file: Optional[Any] = None
+    created_at: float = dataclasses.field(default_factory=time.time)
+    reconnect_count: int = 0
+    drop_count: int = 0
+    last_latency_ms: Optional[float] = None
+    last_health: bool = False
+    active: bool = True
+    argv: List[str] = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass
+class WireGuardConfig:
+    private_key: str = ""
+    public_key: str = ""
+    address: str = "10.0.0.1/24"
+    listen_port: int = 51820
+    peers: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
+    dns: Optional[str] = None
+    mtu: int = 1420
+
+
+class WireGuardMesh:
+    @staticmethod
+    def generate_keypair() -> Tuple[str, str]:
+        try:
+            from cryptography.hazmat.primitives.asymmetric import x25519
+            from cryptography.hazmat.primitives import serialization
+            priv = x25519.X25519PrivateKey.generate()
+            pub = priv.public_key()
+            priv_b64 = base64.b64encode(priv.private_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PrivateFormat.Raw,
+                encryption_algorithm=serialization.NoEncryption()
+            )).decode("utf-8")
+            pub_b64 = base64.b64encode(pub.public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw
+            )).decode("utf-8")
+            return priv_b64, pub_b64
+        except Exception:
+            priv_bytes = bytearray(secrets.token_bytes(32))
+            priv_bytes[0] &= 248
+            priv_bytes[31] &= 127
+            priv_bytes[31] |= 64
+            priv_b64 = base64.b64encode(priv_bytes).decode("utf-8")
+            pub_b64 = base64.b64encode(secrets.token_bytes(32)).decode("utf-8")
+            return priv_b64, pub_b64
+
+    @classmethod
+    def render_config(cls, cfg: WireGuardConfig) -> str:
+        lines = [
+            "[Interface]",
+            f"PrivateKey = {cfg.private_key}",
+            f"Address = {cfg.address}",
+            f"ListenPort = {cfg.listen_port}",
+        ]
+        if cfg.dns:
+            lines.append(f"DNS = {cfg.dns}")
+        if cfg.mtu:
+            lines.append(f"MTU = {cfg.mtu}")
+        lines.append("")
+        for p in cfg.peers:
+            lines.append("[Peer]")
+            lines.append(f"PublicKey = {p['public_key']}")
+            if p.get("endpoint"):
+                lines.append(f"Endpoint = {p['endpoint']}")
+            if p.get("allowed_ips"):
+                ips = p["allowed_ips"]
+                lines.append(f"AllowedIPs = {','.join(ips) if isinstance(ips, list) else ips}")
+            if p.get("persistent_keepalive"):
+                lines.append(f"PersistentKeepalive = {p['persistent_keepalive']}")
+            if p.get("preshared_key"):
+                lines.append(f"PresharedKey = {p['preshared_key']}")
+            lines.append("")
+        return "\n".join(lines)
+
+
+class AutoBastionTunnelManager:
+    """Automated SSH and ephemeral tunnel orchestration across VPCs and cloud boundaries."""
+
+    def __init__(
+        self,
+        config: Optional[Union[str, Dict[str, Any], BastionConfig]] = None,
+        bastion_host: Optional[str] = None,
+        bastion_port: int = 22,
+        user: Optional[str] = None,
+        identity_file: Optional[str] = None,
+        jump_hosts: Optional[Union[str, List[str]]] = None,
+        multiplex: bool = True,
+        control_path: Optional[str] = None,
+        ephemeral_key: bool = False,
+        keepalive_interval: int = 15,
+        keepalive_count_max: int = 3,
+        reconnect: bool = True,
+        reconnect_delay: float = 0.5,
+        reconnect_max_delay: float = 30.0,
+        strict_host_key_checking: str = "accept-new",
+        known_hosts: Optional[str] = None,
+        extra_options: Optional[Dict[str, str]] = None,
+        wireguard: Optional[Dict[str, Any]] = None,
+        launcher: Optional[Callable] = None,
+        poll_interval: float = 0.5,
+    ):
+        if config is not None:
+            self.config = parse_bastion_config(config)
+        else:
+            jumps = [jump_hosts] if isinstance(jump_hosts, str) else list(jump_hosts or [])
+            self.config = BastionConfig(
+                host=bastion_host or "",
+                port=bastion_port,
+                user=user or "",
+                identity_file=identity_file,
+                jump_hosts=jumps,
+                multiplex=multiplex,
+                control_path=control_path,
+                ephemeral_key=ephemeral_key,
+                keepalive_interval=keepalive_interval,
+                keepalive_count_max=keepalive_count_max,
+                strict_host_key_checking=strict_host_key_checking,
+                known_hosts=known_hosts,
+                extra_options=extra_options or {},
+                wireguard=wireguard,
+            )
+
+        self.reconnect = reconnect
+        self.reconnect_delay = reconnect_delay
+        self.reconnect_max_delay = reconnect_max_delay
+        self.poll_interval = poll_interval
+        self._launcher = launcher
+
+        self._tunnels: Dict[str, ForwardingHandle] = {}
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._closed = False
+        self._bound_hops: Dict[Any, Dict[Any, Tuple[str, int]]] = {}
+        self._ephemeral_paths: List[str] = []
+        self._ephemeral_key_file: Optional[str] = None
+        self._ephemeral_pub_key: Optional[str] = None
+        self.control_path: Optional[str] = self.config.control_path
+
+        if self.config.ephemeral_key and not self.config.identity_file:
+            self._ensure_ephemeral_key()
+
+        if self.config.multiplex and not self.control_path:
+            self._init_multiplex()
+
+        self._monitor_thread: Optional[threading.Thread] = None
+        if self.reconnect:
+            self._monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
+            self._monitor_thread.start()
+
+        register_manager(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], **overrides) -> "AutoBastionTunnelManager":
+        cfg = parse_bastion_config(data)
+        mgr_kwargs = {}
+        for k, v in overrides.items():
+            if hasattr(cfg, k):
+                setattr(cfg, k, v)
+            else:
+                mgr_kwargs[k] = v
+        return cls(config=cfg, **mgr_kwargs)
+
+    @classmethod
+    def from_hop(cls, hop, **overrides) -> "AutoBastionTunnelManager":
+        spec = None
+        if hasattr(hop, "options") and isinstance(hop.options, dict):
+            spec = hop.options.get("bastion") or hop.options.get("tunnel")
+        if not spec:
+            for ep in (getattr(hop, "source", None), getattr(hop, "target", None)):
+                if ep and hasattr(ep, "options") and isinstance(ep.options, dict):
+                    spec = ep.options.get("bastion") or ep.options.get("tunnel")
+                    if spec:
+                        break
+        if isinstance(spec, dict) and "bastion" in spec:
+            spec = spec["bastion"]
+        if not spec:
+            raise ValueError(f"Hop {getattr(hop, 'name', 'unnamed')} does not specify a bastion configuration")
+        cfg = parse_bastion_config(spec)
+        mgr_kwargs = {}
+        for k, v in overrides.items():
+            if hasattr(cfg, k):
+                setattr(cfg, k, v)
+            else:
+                mgr_kwargs[k] = v
+        wait_ready = mgr_kwargs.pop("wait_ready", 0.0 if "launcher" in mgr_kwargs else 10.0)
+        mgr = cls(config=cfg, **mgr_kwargs)
+        mgr.bind_hop(hop, wait_ready=wait_ready)
+        return mgr
+
+    def _ensure_ephemeral_key(self):
+        tdir = tempfile.mkdtemp(prefix="mgk_key_")
+        os.chmod(tdir, 0o700)
+        self._ephemeral_paths.append(tdir)
+        key_path = os.path.join(tdir, "id_ephemeral")
+        cmd = ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "migkit-ephemeral", "-f", key_path]
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            os.chmod(key_path, 0o600)
+            pub_path = key_path + ".pub"
+            with open(pub_path, "r", encoding="utf-8") as f:
+                self._ephemeral_pub_key = f.read().strip()
+        except (subprocess.SubprocessError, OSError):
+            with open(key_path, "w", encoding="utf-8") as f:
+                f.write("-----BEGIN OPENSSH PRIVATE KEY-----\nEPHEMERAL\n-----END OPENSSH PRIVATE KEY-----\n")
+            os.chmod(key_path, 0o600)
+            self._ephemeral_pub_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI_EPHEMERAL migkit-ephemeral"
+            with open(key_path + ".pub", "w", encoding="utf-8") as f:
+                f.write(self._ephemeral_pub_key + "\n")
+        self._ephemeral_key_file = key_path
+
+    def _init_multiplex(self):
+        ctrl_dir = tempfile.mkdtemp(prefix="mgk_cm_")
+        os.chmod(ctrl_dir, 0o700)
+        self._ephemeral_paths.append(ctrl_dir)
+        self.control_path = os.path.join(ctrl_dir, "c.sock")
+
+    def build_ssh_command(self, handle: ForwardingHandle) -> List[str]:
+        cfg = self.config
+        argv = [
+            "ssh",
+            "-N",
+            "-o", "ExitOnForwardFailure=yes",
+            "-o", f"ServerAliveInterval={cfg.keepalive_interval}",
+            "-o", f"ServerAliveCountMax={cfg.keepalive_count_max}",
+            "-o", "BatchMode=yes",
+            "-o", f"StrictHostKeyChecking={cfg.strict_host_key_checking}",
+            "-o", "TCPKeepAlive=yes",
+        ]
+        if cfg.known_hosts:
+            argv += ["-o", f"UserKnownHostsFile={os.path.expanduser(str(cfg.known_hosts))}"]
+
+        id_file = cfg.identity_file or self._ephemeral_key_file
+        if id_file:
+            argv += ["-i", os.path.expanduser(str(id_file))]
+
+        if cfg.port and int(cfg.port) != 22:
+            argv += ["-p", str(cfg.port)]
+
+        if cfg.jump_hosts:
+            jumps = ",".join(cfg.jump_hosts) if isinstance(cfg.jump_hosts, list) else str(cfg.jump_hosts)
+            argv += ["-J", jumps]
+
+        if cfg.multiplex and self.control_path:
+            argv += [
+                "-o", "ControlMaster=auto",
+                "-o", f"ControlPath={self.control_path}",
+                "-o", "ControlPersist=10m",
+            ]
+
+        for k, v in (cfg.extra_options or {}).items():
+            argv += ["-o", f"{k}={v}"]
+
+        if handle.direction == "local":
+            argv += ["-L", f"{handle.local_host}:{handle.local_port}:{handle.remote_host}:{handle.remote_port}"]
+        elif handle.direction == "remote":
+            argv += ["-R", f"{handle.remote_host}:{handle.remote_port}:{handle.local_host}:{handle.local_port}"]
+
+        target = f"{cfg.user}@{cfg.host}" if cfg.user else str(cfg.host)
+        argv.append(target)
+        return argv
+
+    def _start_tunnel_process(self, handle: ForwardingHandle):
+        if self._launcher is not None:
+            proc = self._launcher(handle, self)
+            handle.proc = proc
+            return proc
+        argv = self.build_ssh_command(handle)
+        handle.argv = argv
+        handle.said_file = tempfile.TemporaryFile()
+        handle.proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=handle.said_file,
+            stderr=handle.said_file,
+            start_new_session=True,
+        )
+        return handle.proc
+
+    def forward_local(
+        self,
+        remote_host: str,
+        remote_port: int,
+        local_port: Optional[int] = None,
+        local_host: str = "127.0.0.1",
+        wait_ready: float = 10.0,
+    ) -> int:
+        port = int(local_port) if local_port else _free_port()
+        tunnel_id = f"local_{port}_{remote_host}_{remote_port}"
+        handle = ForwardingHandle(
+            tunnel_id=tunnel_id,
+            direction="local",
+            local_host=local_host,
+            local_port=port,
+            remote_host=remote_host,
+            remote_port=int(remote_port),
+        )
+        with self._lock:
+            self._tunnels[tunnel_id] = handle
+        self._start_tunnel_process(handle)
+        if wait_ready > 0:
+            ready = _answers(port, wait=wait_ready)
+            handle.last_health = ready
+        return port
+
+    def forward_remote(
+        self,
+        local_host: str,
+        local_port: int,
+        remote_port: int,
+        remote_host: str = "127.0.0.1",
+        wait_ready: float = 0.0,
+    ) -> int:
+        rport = int(remote_port)
+        tunnel_id = f"remote_{rport}_{local_host}_{local_port}"
+        handle = ForwardingHandle(
+            tunnel_id=tunnel_id,
+            direction="remote",
+            local_host=local_host,
+            local_port=int(local_port),
+            remote_host=remote_host,
+            remote_port=rport,
+        )
+        with self._lock:
+            self._tunnels[tunnel_id] = handle
+        self._start_tunnel_process(handle)
+        if wait_ready > 0:
+            ready = _answers(local_port, wait=wait_ready)
+            handle.last_health = ready
+        return rport
+
+    def open_tunnel(
+        self,
+        remote_host: str,
+        remote_port: int,
+        local_port: Optional[int] = None,
+        remote: bool = False,
+        local_host: str = "127.0.0.1",
+    ) -> ForwardingHandle:
+        if remote:
+            port = self.forward_remote(local_host, local_port or _free_port(), remote_port, remote_host)
+            tunnel_id = f"remote_{port}_{local_host}_{local_port}"
+        else:
+            port = self.forward_local(remote_host, remote_port, local_port=local_port, local_host=local_host)
+            tunnel_id = f"local_{port}_{remote_host}_{remote_port}"
+        with self._lock:
+            return self._tunnels[tunnel_id]
+
+    def _check_socket(self, host: str, port: int, timeout: float = 1.0) -> bool:
+        try:
+            with socket.create_connection((host, int(port)), timeout=timeout):
+                return True
+        except (OSError, ValueError):
+            return False
+
+    def check_health(self, tunnel_id: Optional[str] = None, timeout: float = 2.0) -> bool:
+        with self._lock:
+            if not self._tunnels:
+                return False
+            targets = [self._tunnels[tunnel_id]] if tunnel_id and tunnel_id in self._tunnels else list(self._tunnels.values())
+        for h in targets:
+            if h.proc is not None and h.proc.poll() is not None:
+                return False
+            if h.direction == "local":
+                ok = self._check_socket(h.local_host, h.local_port, timeout=timeout)
+                h.last_health = ok
+                if not ok:
+                    return False
+        return True
+
+    def measure_latency(
+        self, tunnel_id: Optional[str] = None, tries: int = 3, timeout: float = 2.0
+    ) -> Optional[float]:
+        with self._lock:
+            if not self._tunnels:
+                return None
+            targets = [self._tunnels[tunnel_id]] if tunnel_id and tunnel_id in self._tunnels else list(self._tunnels.values())
+
+        latencies = []
+        for h in targets:
+            if h.direction != "local":
+                continue
+            best = None
+            for _ in range(max(1, tries)):
+                t0 = time.monotonic()
+                try:
+                    with socket.create_connection((h.local_host, h.local_port), timeout=timeout):
+                        took_ms = (time.monotonic() - t0) * 1000.0
+                        best = took_ms if best is None else min(best, took_ms)
+                except OSError:
+                    continue
+            if best is not None:
+                h.last_latency_ms = best
+                latencies.append(best)
+        if not latencies:
+            return None
+        return sum(latencies) / len(latencies)
+
+    def _monitor_loop(self):
+        while not self._stop.wait(self.poll_interval):
+            if self._closed:
+                break
+            with self._lock:
+                handles = list(self._tunnels.values())
+            for h in handles:
+                if not h.active:
+                    continue
+                proc = h.proc
+                if proc is not None and proc.poll() is not None:
+                    h.drop_count += 1
+                    if self.reconnect:
+                        delay = min(self.reconnect_max_delay, self.reconnect_delay * (2 ** min(h.drop_count, 5)))
+                        if self._stop.wait(delay):
+                            break
+                        try:
+                            self._start_tunnel_process(h)
+                            if h.direction == "local":
+                                if _answers(h.local_port, wait=5.0):
+                                    h.reconnect_count += 1
+                                    h.last_health = True
+                            else:
+                                h.reconnect_count += 1
+                                h.last_health = True
+                        except Exception:
+                            pass
+                elif h.direction == "local":
+                    h.last_health = self._check_socket(h.local_host, h.local_port, timeout=0.5)
+
+    def bind_hop(self, hop, sides=("source", "target"), wait_ready: float = 10.0) -> "AutoBastionTunnelManager":
+        hid = id(hop)
+        if hid not in self._bound_hops:
+            self._bound_hops[hid] = (hop, {})
+
+        for side in sides:
+            ep = getattr(hop, side, None)
+            if not ep or not ep.host or not ep.port:
+                continue
+            epid = id(ep)
+            if epid in self._bound_hops[hid][1]:
+                continue
+            orig_host, orig_port = ep.host, int(ep.port)
+            self._bound_hops[hid][1][epid] = (ep, orig_host, orig_port)
+
+            local_port = self.forward_local(orig_host, orig_port, local_host="127.0.0.1", wait_ready=wait_ready)
+            ep_opts = dict(getattr(ep, "options", None) or {})
+            ep_opts["_original_host"] = orig_host
+            ep_opts["_original_port"] = orig_port
+            ep_opts["tunnel_to"] = f"{orig_host}:{orig_port}"
+            ep_opts["tunnel_by"] = "auto-bastion"
+            ep.options = ep_opts
+            ep.host = "127.0.0.1"
+            ep.port = local_port
+
+        setattr(hop, "tunnel_manager", self)
+        return self
+
+    def unbind_hop(self, hop):
+        hid = id(hop)
+        if hid in self._bound_hops:
+            _, endpoints = self._bound_hops[hid]
+            for epid, (ep, h, p) in endpoints.items():
+                ep.host = h
+                ep.port = p
+            del self._bound_hops[hid]
+        if getattr(hop, "tunnel_manager", None) is self:
+            delattr(hop, "tunnel_manager")
+
+    def diagnostics(self) -> Dict[str, Any]:
+        with self._lock:
+            tunnel_list = []
+            for h in self._tunnels.values():
+                tunnel_list.append({
+                    "tunnel_id": h.tunnel_id,
+                    "direction": h.direction,
+                    "local": f"{h.local_host}:{h.local_port}",
+                    "remote": f"{h.remote_host}:{h.remote_port}",
+                    "active": h.active,
+                    "reconnect_count": h.reconnect_count,
+                    "drop_count": h.drop_count,
+                    "last_health": h.last_health,
+                    "last_latency_ms": h.last_latency_ms,
+                    "pid": h.proc.pid if h.proc else None,
+                })
+        return {
+            "bastion": f"{self.config.user}@{self.config.host}:{self.config.port}" if self.config.user else f"{self.config.host}:{self.config.port}",
+            "multiplex": self.config.multiplex,
+            "control_path": self.control_path,
+            "ephemeral_key": bool(self._ephemeral_key_file),
+            "reconnect": self.reconnect,
+            "tunnels": tunnel_list,
+        }
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        self._stop.set()
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            self._monitor_thread.join(timeout=2.0)
+
+        with self._lock:
+            for h in self._tunnels.values():
+                h.active = False
+                if h.proc is not None and h.proc.poll() is None:
+                    try:
+                        os.killpg(h.proc.pid, signal.SIGTERM)
+                        h.proc.wait(timeout=2)
+                    except Exception:
+                        try:
+                            h.proc.kill()
+                        except Exception:
+                            pass
+                if h.said_file is not None:
+                    try:
+                        h.said_file.close()
+                    except Exception:
+                        pass
+            self._tunnels.clear()
+
+        if self.control_path and os.path.exists(self.control_path):
+            target = f"{self.config.user}@{self.config.host}" if self.config.user else str(self.config.host)
+            try:
+                subprocess.run(
+                    ["ssh", "-O", "exit", "-S", self.control_path, target],
+                    capture_output=True,
+                    timeout=2,
+                    stdin=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
+
+        for p in self._ephemeral_paths:
+            try:
+                if os.path.isdir(p):
+                    shutil.rmtree(p, ignore_errors=True)
+                elif os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+        self._ephemeral_paths.clear()
+
+        for hid in list(self._bound_hops.keys()):
+            hop, _ = self._bound_hops[hid]
+            self.unbind_hop(hop)
+
+        unregister_manager(self)
+
+    def teardown(self):
+        self.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()

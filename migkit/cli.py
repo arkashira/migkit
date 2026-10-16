@@ -7220,6 +7220,20 @@ def _dbs_with_history(hop):
 
 @main.command()
 @click.argument("hop_name")
+@click.option("--force", is_flag=True, help="Force failback even if past 48h retention window")
+@click.option("--timeout", default=30.0, type=float, help="Failback timeout in seconds")
+def failback(hop_name, force, timeout):
+    """Execute zero-loss reverse failback to source within 48h post-cutover."""
+    from . import reverse
+    hop = get_hop(hop_name)
+    res = reverse.ReverseFailbackController.trigger_failback(hop, timeout=timeout, force=force)
+    if not res.ok:
+        raise click.ClickException(f"failback failed: {res.error}")
+    click.echo(f"failback completed in {res.duration_seconds:.2f}s (zero data loss verified: {res.zero_data_loss_verified})")
+
+
+@main.command()
+@click.argument("hop_name")
 @click.option("--db", required=True)
 @click.option("--state", "state_ts", default="",
               help="state timestamp or tag, default latest")

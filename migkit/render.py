@@ -29,6 +29,7 @@ _DATETIME, _DATE, _TIME = datetime.datetime, datetime.date, datetime.time
 def renderer(cls):
     """f(value) giving what `canon.render_value(cls, value)` gives."""
     from . import canon
+    cls = canon.NEUTRAL_TO_CANON.get(cls, cls)
     slow = canon.render_value
 
     if cls == "integer":
@@ -78,6 +79,7 @@ def digest_renderer(cls):
     server hashed where it lies (`pieces.Hashed`) as what it wrote."""
     from . import canon
     from .pieces import Hashed
+    cls = canon.NEUTRAL_TO_CANON.get(cls, cls)
     one = renderer(cls)
     if cls == "bytes":
         def wide(v):

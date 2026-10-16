@@ -477,3 +477,7 @@ class MarkLadder:
     def doctor_said(side_engine, token_path, db):
         from . import marks
         return marks.said(side_engine, token_path, db)
+
+
+from .dag_scheduler import BarrierFence, BarrierType, TransactionDAGScheduler
+

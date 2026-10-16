@@ -1391,6 +1391,12 @@ def compression(hop, version, rtt=None, chosen=None):
         return got.rung, (got.reason + "; " + chosen.line()
                           if got.rung is ways[0] else got.reason)
     if rtt is None:
+        mgr = getattr(hop, "tunnel_manager", None)
+        if mgr and hasattr(mgr, "measure_latency"):
+            measured = mgr.measure_latency()
+            if measured is not None:
+                rtt = measured / 1000.0
+    if rtt is None:
         from .tunnel import _round_trip
         rtt = _round_trip(hop.source.host, hop.source.port)
     ways = (PLAIN, ZSTD) if rtt is not None and rtt < NEAR else (ZSTD, PLAIN)

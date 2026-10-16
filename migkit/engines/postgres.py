@@ -13380,7 +13380,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         return proc, zstandard.ZstdDecompressor().stream_reader(
             proc.stdout, read_across_frames=True)
 
-    def _copy_in_spans(self, db, key, qt, cols, rf, st, ck, log):
+    def _copy_in_spans(self, db, key, qt, cols, rf, st, ck, log, chunk=None):
         """A table with no integer key copied in parts it can go on from
         (`ranges.keyless`): by where its rows are stored (`position_spans`)
         or by buckets of its rows' hash, a part a transaction, each
@@ -13397,7 +13397,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         way = ranges.keyless(
             key, st, self, self, db, key, key, sc, dc,
             int(self._rows_of("src", db, key) or 0),
-            lambda: self.position_spans("src", db, key, ranges.LEAST),
+            lambda: self.position_spans("src", db, key, chunk or ranges.LEAST),
             self.digest_salt(), decide.HopCosts(self.hop, "keyless/"))
         if way.restart:
             self._psql("dst", db, f"delete from {qt} where {rf}" if rf
@@ -14543,7 +14543,8 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         if not pk:
             if self._copy_keyed(job):
                 return True
-            if self._copy_in_spans(db, key, qt, cols, rf, st, ck, log):
+            if self._copy_in_spans(db, key, qt, cols, rf, st, ck, log,
+                                   chunk=chunk):
                 return True
             log(f"{key}: no single int pk, single-shot copy")
             ways = self._copy_ways(db, key, qt, cols, log)

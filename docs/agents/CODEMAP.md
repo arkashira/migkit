@@ -22,7 +22,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - [`docs/agents/INVENTORY.md`](INVENTORY.md) - every file of `migkit/` and `tools/`: its responsibility package, owner domain, size, importers, the packages it reaches, the programs it wraps and the tests that reach it
 - [`docs/agents/LAYERS.md`](LAYERS.md) - the layering rule (a package imports its own rank and below) and every upward import still listed, with its reason
 
-## `migkit/` (182 modules)
+## `migkit/` (188 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/addresses.py` - A hop from two addresses (backlog R21).
@@ -66,9 +66,11 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/costmodel.py` - What a way costs, as a function of the work, with how sure that is (backlog P0-SMART, items 1, 2, 6 and learning across hops). Classes: Estimate, Fit, Knowledge, CostModel.
 - `migkit/crossmove.py` - Cross-engine table copies where rows never pass through Python (backlog R20.13 and R20.14), as ways of the table copier chosen per table. Classes: TableWay.
 - `migkit/cutover.py` - The cutover as one timed path that undoes itself. Classes: Leg.
+- `migkit/dag_scheduler.py` - Dynamic Transaction DAG Scheduler with Barrier Splitting (Item 566, SUPER.dag-barrier). Classes: BarrierType, BarrierFence, CDCMutation, Transaction, ReplayStats, TableDependencyGraph.
 - `migkit/dba.py` - What the DBA must do before migkit can, written for them (backlog R21). Classes: Need.
 - `migkit/ddbexport.py` - A DynamoDB table copied through the service's own export to S3, and its import from S3 (backlog F7.ddbexp), beside migkit's own parallel sca
 - `migkit/ddl.py` - Statements migkit generates that should not simply be applied.
+- `migkit/ddl_shield.py` - (no docstring) Classes: DDLShieldError, DDLTranslationError, DDLBarrierError, ShadowTableInfo, ActionInfo, DDLEvent.
 - `migkit/decide.py` - One way of deciding for every choice migkit makes (backlog P0, decided 2026-09-27). Classes: Facts, Need, Rung, Choice, Costs, HopCosts.
 - `migkit/described.py` - What a table migkit made on a store that keeps no column types is: its columns' classes and its key, kept beside the store's endpoint on thi
 - `migkit/diagnostics.py` - A bundle to report a problem with, holding nothing to hand over. Classes: Reading, ProbeAccumulator.
@@ -120,6 +122,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/managed.py` - Every managed database service in one catalogue, read one way for any pair (the owner, 2026-10-01: "any <-> any from the start"). Classes: Service, Side, Plan.
 - `migkit/marks.py` - How a two-way tail tells its own writes apart on a side: the rungs (backlog R3, decided 2026-09-27).
 - `migkit/masking.py` - Values from the rows, masked where the hop asks, wherever a person or a report sees them (G2).
+- `migkit/merkle.py` - Hierarchical in-database recursive Merkle tree folding (SUPER.merkle-fold). Classes: DiscordantRange, MerkleNode, MerkleTree, MerkleTreeFolder.
 - `migkit/mirror.py` - A Kafka cluster copied through the cluster mirror Kafka ships (backlog F7.mm2).
 - `migkit/model.py` - Every resource a move uses, in one model: which one binds, how many at once carry it, what it takes of this machine's memory, and why (backl Classes: Stage, Model.
 - `migkit/movers.py` - Best-tool movers. Classes: Beside, builds_beside, client_defaults, Ran, Squeeze, Leg.
@@ -131,6 +134,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/pieces.py` - Large values: one way for every engine to size, read, write and hash them (backlog P0-PARITY; R10 and R22 did it for PostgreSQL, MySQL and O Classes: Limit, Sizing, Hashed, hashing, Way, Sql.
 - `migkit/planner.py` - Which way each table goes, decided from facts about it, and why. Classes: Decision, Phase, Ewma, CatchUp, Overlap, TopologyRun.
 - `migkit/proxy.py` - Pooler and proxy coordinators and seamless cutover traffic shifting. Classes: ProxyShiftResult, BaseProxyCoordinator, PgBouncerCoordinator, ProxySQLCoordinator, EnvoyXdsCoordinator.
+- `migkit/query_guard.py` - (no docstring) Classes: QueryPattern, ExecutionPlan, ParityIssue, IndexRecommendation, QueryParityReport, QueryOptimizerParityGuard.
 - `migkit/ranges.py` - A large table copied as ranges of its key, side by side. Classes: ReadPool, Slots, WorkerGone, Pending, Keyless, Stats.
 - `migkit/ready.py` - Right the first time, not a runbook to recover with (backlog R23, 6). Classes: Item.
 - `migkit/redact.py` - One way of hiding secrets in what migkit writes or says (audit 2026-10-01, SEC12). Classes: Redactor.
@@ -144,7 +148,9 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/report.py` - (no docstring)
 - `migkit/reshard.py` - Resharding (backlog W7): rows of N sources placed on M targets by one function - a database split, many merged into one, a new shard key - e Classes: Side, Group, Function, Placed, Unplaced, Planned.
 - `migkit/result_scope.py` - (no docstring) Classes: PracticalProblem, DatabaseSummary, GroupedResultEnvelope.
+- `migkit/reverse.py` - (no docstring) Classes: OriginMarker, CDCEvent, FailbackResult, ReverseFailbackLoop, ReverseFailbackController.
 - `migkit/revert.py` - The way back, handed over at the same moment as the way forward.
+- `migkit/ring_buffer.py` - (no docstring) Classes: ChunkCompressor, RecordBatch, DiskSegment, StoreAndForwardRingBuffer.
 - `migkit/rowfilter.py` - A hop's row filter, read one way and said in every engine's own words (backlog P0-SCOPE.7).
 - `migkit/rowtext.py` - How a row becomes one string before it is hashed.
 - `migkit/rules.py` - Business-rule checks: the operator's own questions, asked of both sides.
@@ -189,7 +195,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/troubleshooting.py` - The troubleshooting guide, read off the code (backlog 42).
 - `migkit/tune.py` - Automated Target Hardware & Parameter Tuning Flip (AUTO.target-tune). Classes: ProfileResult.
 - `migkit/tuning.py` - Numbers set by reasoning, tuned from what runs measure (backlog P0-DEPTH, item 3, built with P0-SMART's knowledge base). Classes: Tunable, Dimension, Setting, Bound, Cause, Adjustment.
-- `migkit/tunnel.py` - A path to a server that cannot be reached directly, opened by migkit. Classes: Tunnel.
+- `migkit/tunnel.py` - A path to a server that cannot be reached directly, opened by migkit. Classes: Tunnel, BastionConfig, ForwardingHandle, WireGuardConfig, WireGuardMesh, AutoBastionTunnelManager.
 - `migkit/twoway.py` - Two ways at once through migkit's own tails (backlog R3, P0-DEPTH 2). Classes: Rule, TableRules, Rules, Settled.
 - `migkit/ui.py` - The dashboard and `/metrics` (`migkit report --serve`). Classes: Collector, Handler.
 - `migkit/unchanged.py` - Proof that a table has not moved since it was last proved equal. Classes: Counters, PostgresCounters, SqlServerCounters, MySqlCounters, Unread, Judgement.
