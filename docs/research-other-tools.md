@@ -112,11 +112,11 @@ What migkit does differently:
 ### Airbyte: CDC
 
 Mechanism:
-* Debezium runs as an embedded library inside Airbyte's source connector,
+* The change-capture library runs embedded inside Airbyte's source connector,
   with no Kafka.
 * Each scheduled sync reads the log from the saved position up to the
   time the sync started, then stops. It is not a continuous stream.
-* The position and Debezium's schema history are saved in Airbyte's own
+* The position and the change library's schema history are saved in Airbyte's own
   state message.
 * The first sync is a SELECT snapshot. Airbyte's docs warn about
   duplicates when the slot is made before the table is loaded.
@@ -221,7 +221,7 @@ version, description, script, type, checksum, status, who, when).
 
 What migkit takes: the history table is the application's own record of
 which schema it stands on, and every migration tool keeps one (Flyway's
-`flyway_schema_history`, Liquibase's `DATABASECHANGELOG`, Alembic's
+`flyway_schema_history`, a Java tool's `DATABASECHANGELOG`, Alembic's
 `alembic_version`, Django's `django_migrations`, Rails' and
 golang-migrate's `schema_migrations`, Entity Framework's
 `__EFMigrationsHistory`, schemachange's). Those rows are moved and proved

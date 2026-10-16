@@ -19,7 +19,7 @@ Ordered by how often practitioners name them, not by how hard they are.
 | Everything attached to the tables | Scope is written as "the tables", then permissions, sequences, triggers, views and downstream jobs surface in cutover week | **Covered in part** — checks for grants, ownership, sequences, constraints, indexes, extensions, triggers, matviews, RLS; `handwork` names what cannot be carried. Not covered: downstream jobs, application-side config |
 | Privileges that do not exist on the target | The source has superuser, the managed target does not; `ALTER ROLE ... SUPERUSER` in a dump fails, `GRANT ALL ON DATABASE` grants less than people think, extensions are refused | **Partly** — grants and ownership are compared and repaired. The *pre-flight* "your target cannot accept this" report does not exist yet |
 | Sequences and identity counters | Logical replication does not carry them; the target's counter sits below the source and the first insert after cutover collides | **Covered** — parity check plus a collision check, and a repair |
-| Stored logic | Procedures, packages and triggers rarely run unmodified on another engine; the port/rewrite/retire decision is per object | **Not covered** — migkit reports their presence, converts nothing |
+| Stored logic | Procedures, packages and triggers rarely run unmodified on another engine; the port/rewrite/retire decision is per object | **Partly** — migkit reports their presence and converts what its converter can (`storedcode/convert.py`); the rest is classed `not converted` |
 | Constraints and indexes around a bulk load | Dropped for speed, then rebuilt wrong or not at all | **Partly** — constraint and index repair exist; migkit does not own the drop/rebuild cycle of somebody else's load |
 | LOBs | The single biggest full-load slowdown; tools truncate silently past a configured maximum | **Not covered** — no LOB strategy, and this is a correctness problem as much as a speed one: a truncated LOB is data loss that a row count will not find |
 | Validation beyond row counts | Counts match while contents differ; the check that certifies equality is the one nobody audits | **Covered, and this is migkit's strongest ground** — injective row encoding, in-server digests, per-row drilldown, repair with undo |
@@ -27,14 +27,14 @@ Ordered by how often practitioners name them, not by how hard they are.
 | Cutover | Not one switch: freeze, delta sync, rollback rehearsal, cache warming, dual writes | **Partly** — delta verify, revert/restore, leftovers. No cutover runbook the tool drives |
 | Resume after a crash | A copy that dies at 80% starts over, or resumes inconsistently | **Partly** — chunked resume exists per engine, on one machine, with a proof file |
 | Scale | Practices that work at 10 GB fail at 1 TB; nobody finds out until the rehearsal | **Measured to 10M rows** — [scale.md](scale.md): flat throughput, constant client memory, and one real bug found by running it |
-| Cloud without tools | No OS access, no `pg_dump` on the box, no ports outbound, no place to put a dump file | **Partly** — everything runs from the operator's machine over normal client connections; no reliance on being on the host |
+| Cloud without tools | No OS access, no dump program on the box, no ports outbound, no place to put a dump file | **Partly** — everything runs from the operator's machine over normal client connections; no reliance on being on the host |
 | Two engines that disagree about a value | Collation, timezone, NULL vs empty, float rendering, charset | **Covered, with the size of the refusal measured** — canonical rendering per engine, and a refusal when a type has no agreed rendering. On a 37-column PostgreSQL table the cross-engine path compares 20 and names the 17 it declines (`enum`, `interval`, `hstore`, `tsvector` among them); the same-engine path hashes the whole row and misses none. Catalogue D15 |
 
 ## 2. How the fast tools get fast
 
 Worth copying, and worth knowing the cost of.
 
-**pgcopydb** exports one snapshot with `pg_export_snapshot()` and has every
+**The native PostgreSQL copier** exports one snapshot with `pg_export_snapshot()` and has every
 worker `SET TRANSACTION SNAPSHOT` to it, so parallel workers see one
 consistent database. It orders tables largest-first across a pool of table
 jobs, splits a table larger than a threshold into non-overlapping `WHERE`
@@ -48,7 +48,7 @@ the end. Its honesty is worth copying too: `--resume` requires
 49), parallel load by partition or by hand-tuned ranges, deferring the
 primary key to after the load, and commit-rate tuning. Its documented
 advice is that `partitions-auto` is often *not* fastest, because skewed
-partitions leave one long-tail subtask - the same lesson as pgcopydb's
+partitions leave one long-tail subtask - the same lesson as the native copier's
 range splitting. LOBs are where it loses: full LOB mode moves them one at a
 time, limited LOB mode pre-allocates and truncates past `LobMaxSize`.
 
@@ -63,7 +63,7 @@ protocol. It is in four things, none of which need a new wire format:
 
 migkit already shells out to the native movers for the pairs that have one.
 The open question is the pairs that do not - cross-engine, and the engines
-with no `pgcopydb` of their own. That is where a migkit-owned mover would
+with no native copier of their own. That is where a migkit-owned mover would
 have to earn its place, and it should be measured against the native tools
 on the same hardware before it is written, not after.
 
@@ -87,9 +87,10 @@ In order. Each item says what has to be measured before it is written.
    and 10M (~173k rows/s), and migkit's own memory did not follow the data
    (30 MB moving, 333 MB verifying, at both sizes). It also found a bug no
    small table could - a chunked table reported the differing chunk's row
-   count as the table's. **Still open:** a LOB column in the bench table, a
-   comparison against pgcopydb on this hardware, and anything above ten
-   million rows (the 20 GiB sandbox disk is the ceiling).
+   count as the table's. The LOB table and the native-copier comparison are
+   measured too. **Still open:** anything above ten million rows (the 20 GiB
+   sandbox disk is the ceiling), and the terabyte run, which needs rented
+   machines.
 2. **Oracle**, then the rest of the DMS list. Measured this tick:
    `gvenzl/oracle-free:slim` has an arm64 build, boots to Oracle 26ai Free,
    and `python-oracledb` 26 connects in thin mode with no Instant Client -
@@ -137,7 +138,7 @@ In order. Each item says what has to be measured before it is written.
    rewrote `2001-01-01` to today's date through a real `migkit move --go`,
    which reported `bulk copy complete`; the loading connection now carries
    `session_replication_role = replica` and the values survive. The
-   `pg_dump` path was already covered by `--disable-triggers`, which is why
+   dump path was already covered by `--disable-triggers`, which is why
    the change is one line. The deep check now also names the enabled
    triggers on tables a load writes, so the operator knows what is being
    quieted on their behalf. The identity half is **done**: a
@@ -200,7 +201,7 @@ In order. Each item says what has to be measured before it is written.
    them apart. The envelope now carries a `coverage` block and reports
    `incomplete` rather than `same` when the run was narrowed, with
    `has_differences` left alone.
-17. **Mapping and transformation, verified rather than declared.** *(core landed: `mapping.tables` / `mapping.where` on the hop, with the same right-anchored naming `exclude` uses, ambiguous renames refused and rules that match nothing reported - `test_mapping_rules.py`. `assess` says what the mapping would do before anything is copied - a collision fails it, a rule matching nothing warns, and a hop without a mapping prints nothing (`test_mapping_preflight.py`). The check reads the same mapping: `match_tables` pairs a renamed table with what it was renamed to, and a rename pointing at a table the target does not have stays missing and says the rename is why (`test_mapping_drives_the_check.py`). The MySQL mover pushes the row filter down: a generated defaults-file gives mydumper one section per table, verified live - 2 of 3 rows dumped where a rule applied, untouched where none did (`test_mapping_reaches_the_mover.py`). Still to wire: pgcopydb `--filters`, `pg_dump -t/-T`, Debezium `table.include.list`.)* DMS and
+17. **Mapping and transformation, verified rather than declared.** *(core landed: `mapping.tables` / `mapping.where` on the hop, with the same right-anchored naming `exclude` uses, ambiguous renames refused and rules that match nothing reported - `test_mapping_rules.py`. `assess` says what the mapping would do before anything is copied - a collision fails it, a rule matching nothing warns, and a hop without a mapping prints nothing (`test_mapping_preflight.py`). The check reads the same mapping: `match_tables` pairs a renamed table with what it was renamed to, and a rename pointing at a table the target does not have stays missing and says the rename is why (`test_mapping_drives_the_check.py`). The MySQL mover pushes the row filter down: a generated defaults-file gives the MySQL dumper one section per table, verified live - 2 of 3 rows dumped where a rule applied, untouched where none did (`test_mapping_reaches_the_mover.py`). Wired since: the copier's table filter, the dump program's `-t`/`-T` and the change stream's `table.include.list` (`movers.py`).)* DMS and
    DTS rename schemas, tables and columns and filter rows during a move,
    and migkit has none of it - only a database-name map (`_d(side, db)`).
    The shallow version is a rename list. **Deeper, and the part DMS cannot
@@ -209,8 +210,8 @@ In order. Each item says what has to be measured before it is written.
    compared against the same filter - DMS's own validation is documented as
    unable to validate a transformed target. Three more things it should do
    that a rule list does not: translate one `mapping:` block into each
-   wrapped tool's own dialect (pgcopydb `--filters`, mydumper `--regex`,
-   `pg_dump -t/-T`, Debezium `table.include.list` + `RegexRouter`) so the
+   wrapped tool's own dialect (the copier's table filter, the MySQL dumper's `--regex`,
+   the dump program's `-t/-T`, the change stream's `table.include.list` and its topic router) so the
    filtering happens at the mover and fewer bytes move; **refuse an
    ambiguous mapping instead of guessing**, the way `hetero.match_tables`
    already refuses two tables with the same unqualified name; and report a
@@ -232,7 +233,7 @@ In order. Each item says what has to be measured before it is written.
    That is the Veridata capability, reached from a better starting point.
 
 19. **Bisection diffing across engines, on a rendering both sides agree
-   on.** `reladiff` is wired for PostgreSQL only. data-diff's bisection is
+   on.** A bisecting reader exists in the code (`leaves.py`). data-diff's bisection is
    the right shape for a table too large to hash whole, and the reason it
    cannot be trusted across engines is that it leans on each server's own
    checksum semantics. **migkit has the missing piece already**: the canon
@@ -243,12 +244,11 @@ In order. Each item says what has to be measured before it is written.
    mid-bisection is put through the same in-flight fence before it is
    called a difference.
 
-20. **PL/SQL conversion with behavioural proof.** Section H says stored
-   logic is reported and never converted. Ora2Pg converts it, and wrapping
-   Ora2Pg is the obvious move. **The deeper half is what nobody ships:** a
+20. **PL/SQL conversion with behavioural proof.** Stored logic is converted where the converter can
+   (`migkit/storedcode/convert.py`); the rest is classed `not converted`. **The deeper half is what nobody ships:** a
    conversion is a guess until the two versions are run against the same
    inputs and their outputs compared - which is the one thing a tool that
-   already owns a verification engine can do. Convert with Ora2Pg, run both
+   already owns a verification engine can do. Convert, run both
    sides, compare with the machinery that already exists, and put what
    could not be converted or could not be proven into `handwork` by name.
 
@@ -261,9 +261,9 @@ In order. Each item says what has to be measured before it is written.
 - [AWS DMS: Setting LOB support](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Tasks.LOBSupport.html)
 - [AWS DMS: table and collection settings, parallel load](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Tasks.CustomizingTasks.TableMapping.SelectionTransformation.Tablesettings.html)
 - [Perform parallel load for partitioned data using AWS DMS](https://aws.amazon.com/blogs/database/perform-parallel-load-for-partitioned-data-into-amazon-s3-using-aws-dms/)
-- [pgcopydb: resuming operations and snapshots](https://pgcopydb.readthedocs.io/en/latest/resume.html)
-- [pgcopydb clone reference](https://pgcopydb.readthedocs.io/en/latest/ref/pgcopydb_clone.html)
-- [pgcopydb concurrency design](https://www.rockdata.net/external/pgcopydb-concurrency/)
+- [native copier: resuming operations and snapshots](https://pgcopydb.readthedocs.io/en/latest/resume.html)
+- [native copier clone reference](https://pgcopydb.readthedocs.io/en/latest/ref/pgcopydb_clone.html)
+- [native copier concurrency design](https://www.rockdata.net/external/pgcopydb-concurrency/)
 - [Understanding the rds_superuser role](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Appendix.PostgreSQL.CommonDBATasks.Roles.rds_superuser.html)
 - [RDS delegated extension support](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/RDS_delegated_ext.html)
 - [Logical replication for Amazon RDS for PostgreSQL](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/PostgreSQL.Concepts.General.FeatureSupport.LogicalReplication.html)

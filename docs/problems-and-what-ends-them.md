@@ -253,10 +253,9 @@ $3,500-$7,000. It surprises people because it is spread across line items
 nobody reads as "database replication", and because dual-running pays both
 providers at once.
 
-**migkit: Not yet.** migkit knows exactly how many bytes each table holds -
+**migkit: Partly.** migkit knows exactly how many bytes each table holds -
 it reports them in `check counts` - so the arithmetic an operator is doing
-on a napkin is arithmetic migkit already has the inputs for. It does not do
-it, and it does not warn that a `move` is about to push a measured number of
+on a napkin is arithmetic migkit already has the inputs for. The `money` limit prices what a move carries at the hop's `transfer_price_per_gb` and keeps the plan within it where a cheaper way exists. It does not warn that a `move` is about to push a measured number of
 gigabytes across a boundary that charges for them.
 
 ---
@@ -359,7 +358,7 @@ columns asks a different question than the index answers.
 
 **MySQL states the gap instead of hunting on a guess.** The two states that
 break a PostgreSQL unique index were both measured absent. The MySQL-shaped
-candidate is `unique_checks = 0`, which mysqldump writes into every dump and
+candidate is `unique_checks = 0`, which the dump program writes into every dump and
 which InnoDB is documented as being allowed to honour by skipping the check:
 tried on 8.4, the duplicate was **still** rejected with error 1062, because
 a small index is cached. Real in the documentation, unreproduced in this
@@ -683,14 +682,14 @@ commit rate. Both document the same trap: automatic partition splitting is
 often *not* fastest, because skewed partitions leave one long-tail subtask.
 
 **migkit: Partly.** migkit calls the native mover for the pairs that have
-one (pgcopydb, mydumper, COPY binary - measured 1.53x for binary format),
+one (the native PostgreSQL copier, the MySQL parallel dumper, binary COPY - measured 1.53x for binary format),
 so it inherits their speed rather than competing with it. Measured end to
 end on this hardware ([scale.md](scale.md)): 10,000,000 rows / 2,777 MB
 moved in 57.9 s and verified in 62.4 s, with migkit's own peak memory at
 30 MB and 333 MB - flat against the 1M run, because the digest is computed
 inside each server.
 
-Since measuring it, the chooser takes pgcopydb from a local binary rather
+Since measuring it, the chooser takes the native PostgreSQL copier from a local binary rather
 than insisting on the container image, which cut the same move from 11.7 s
 to 5.4 s - and every mover's result is now checked by
 `Engine.moved_nothing`, so a tool that exits 0 and leaves the target empty
@@ -771,7 +770,7 @@ beyond what is measured here.
 whole task. Limited LOB mode is fast and **truncates past `LobMaxSize` with
 a warning in a log nobody reads** - data loss a row count will never find.
 `bytea` stops at 1 GB and gets difficult around 500 MB. `pg_largeobject` is
-one table, so `pg_dump`/`pg_restore` are single-threaded for every large
+one table, so the dump and restore programs are single-threaded for every large
 object in the database - one team's 12.5 hour downtime was almost entirely
 this.
 
@@ -815,7 +814,7 @@ to move.
 
 ### C3. It died at 80% and nobody knows what is safe to keep
 
-**What happens.** pgcopydb is honest that `--resume` requires
+**What happens.** The native PostgreSQL copier is honest that `--resume` requires
 `--not-consistent`, because the exported snapshot is gone after a crash.
 Google's DMS splits errors into recoverable and unrecoverable and says the
 unrecoverable ones mean starting the job again from the beginning. Schema
@@ -873,7 +872,7 @@ them. Tests: `test_a_repair_is_recorded_statement_by_statement.py`.
 
 ### C4. The verification kills the source
 
-**What happens.** pt-table-checksum exists because this is real: it sizes
+**What happens.** The MySQL replica checksum tool exists because this is real: it sizes
 chunks dynamically against a target execution time, pauses on replica lag,
 pauses on `--max-load`, and skips chunks an `EXPLAIN` says are too big.
 
@@ -995,9 +994,9 @@ trading one silent corruption for another. A test asserts the trigger is
 still `tgenabled = 'O'` after a move *and* that it still fires, because the
 catalog flag only claims the first.
 
-Measuring the scope kept the change to one line. The `pg_dump`/`pg_restore`
+Measuring the scope kept the change to one line. The dump and restore programs
 path was **already** covered - migkit passes `--disable-triggers` there -
-so only pgcopydb was exposed. Both movers are now pinned by tests, so they
+so only the native copier was exposed. Both movers are now pinned by tests, so they
 cannot drift apart on something this quiet, and the source URI deliberately
 does *not* get the option: the source is only read.
 
@@ -1173,8 +1172,8 @@ Measured, a target holding two rows no source ever had:
     target audit_log before: 2
     $ migkit move pg --go
       # 1 tables the hop excludes are not dumped at all
-      pg_dump ... -T public.audit_log
-      pg_restore ...
+      dump ... -T public.audit_log
+      restore ...
       pgdump reported success and appdb is still empty on the target:
       public.audit_log
     target audit_log after: 0
@@ -1274,7 +1273,7 @@ catalogue cannot be read. `test_the_mysql_bulk_path_runs.py`.
 emptying is the one step that cannot be taken back. If it runs before the
 copy has anything to load, every failure after it - an unreachable source,
 a password that changed, a dump that dies half-way - leaves the target with
-nothing in it. Measured on the pg_dump path, with a source nobody could
+nothing in it. Measured on the dump path, with a source nobody could
 reach:
 
     move failed: ... Is the server running on that host and accepting
@@ -1292,7 +1291,7 @@ on a source whose table list could not be read, went ahead with a note in
 the plan - and since the emptying keeps excluded tables, the unfiltered
 dump would have loaded the source's rows on top of the target's own. Both
 dump paths now stop there with the same refusal, raised from one place.
-And `pg_restore -d` named the source's database while the emptying named
+And the restore's `-d` named the source's database while the emptying named
 the target's, so a hop with a `db_map` emptied one database and loaded
 another.
 
@@ -1698,7 +1697,7 @@ test file. Tests: `test_pg_exotic_keys.py`, `test_keys_with_teeth.py`.
 take a CLOB/BLOB key or a VARCHAR key over 1024, cannot handle NULL in a
 key, stops the entire task after 10,000 failures, cannot validate rows that
 keep changing, skips views, will not span databases, and skips a whole table
-when one column is masked. reladiff samples the values of a key column and
+when one column is masked. The row-diff library samples the values of a key column and
 refuses the table outright if it reads them as free text - measured, one
 row whose key held a tab flipped a `varchar(60)` key from usable to
 `Cannot use a column of type Text() as a key`.
@@ -1744,7 +1743,7 @@ doing the verifying. A hop configured with an application role, which is
 the natural thing to do when nobody wants to hand a migration tool
 superuser, sees only the rows that role is allowed to see. On both sides.
 
-PostgreSQL is careful about this where it can be: `pg_dump` sets
+PostgreSQL is careful about this where it can be: the dump program sets
 `row_security = off` and **errors** rather than dumping a subset, by
 explicit design. The trap is `--enable-row-security`, which someone adds to
 make a failing backup script "work" - after which the dump succeeds and
@@ -1802,11 +1801,11 @@ earned.
 
 ### D9. The view that exists and holds nothing
 
-**What happens.** `pg_dump` does not dump a materialized view's contents.
+**What happens.** The dump program does not dump a materialized view's contents.
 It emits `CREATE MATERIALIZED VIEW ... WITH NO DATA` and a separate
 `REFRESH` in the post-data section - deliberately, to guard against hidden
 dependencies. Anything that drops the refresh leaves the view present and
-empty: operators skip it with `pg_restore -L` because it is slow and mean
+empty: operators skip it with a restore list (`-L`) because it is slow and mean
 to run it later; it times out; or it fails on permissions, which is a real
 enough history that PostgreSQL was changed in 2017 to restore ACLs before
 refreshing matviews rather than after.
@@ -1958,7 +1957,7 @@ table holds an `oid`; the bytes live in `pg_largeobject`, with no
 referential integrity between the two. Copy the table and you have copied
 the integer, not the document.
 
-`pg_dump` makes this easy to trip over: it skips large objects whenever
+The dump program makes this easy to trip over: it skips large objects whenever
 `-s`, `-n` or `-t` is used - a schema-restricted or table-restricted dump
 produces an archive whose oid columns are intact and whose blobs are
 absent. There is a `-b` to put them back and no inverse.
@@ -1973,7 +1972,7 @@ Measured, with a table whose contents are **byte-identical** on both sides:
 does name them, before anything moves:
 
     large objects (a managed service moving table by table leaves them;
-    migkit's own pg_dump path carries them) - 1 in pg_largeobject
+    migkit's own dump path carries them) - 1 in pg_largeobject
 
 That is the right warning in the right place, and it distinguishes the two
 legs rather than blaming the objects.
@@ -2057,7 +2056,7 @@ both directions - measured on PostgreSQL 16, one pair, the same insert load:
 | | |
 |---|---|
 | native subscription | origin **ahead** of the slot by up to 46 KB - the slot is a delayed echo of the apply |
-| `pgcopydb follow` | slot **ahead** of the origin while the target still held 0 rows |
+| the native copier's follow | slot **ahead** of the origin while the target still held 0 rows |
 
 The obvious conclusion - fence on the origin, since it is the one that means
 "applied" - was written, measured and reverted. On an idle healthy pair, five
@@ -2282,7 +2281,7 @@ reports 1 where it reported 0. The MySQL engine reads its sample through a
 driver and never had this - recorded with a test, so a future rewrite to
 shell out cannot reintroduce it quietly.
 
-**And the seeing half.** `--drill` now adds what datacompy cannot work
+**And the seeing half.** `--drill` now adds what the dataframe comparer cannot work
 out - the values escaped, and the reason beside them:
 
       id=1  v
@@ -2566,8 +2565,8 @@ up for as long as it runs, while every change goes missing.
   remembered and proved with events made by hand, not yet against a
   MariaDB server (`test_mariadb_compressed_events_are_read_or_stop_the_tail.py`):
   an event that is not in that layout stops the tail with the reason and
-  its position where it was. The version-2 rows (169-171) are not read and
-  stop it.
+  its position where it was. The version-2 rows (169-171) are read the same way, from
+  `binlog_payload.ROWS_COMPRESSED_V2`.
 * The test also pins the reader's own behaviour: on its own it still
   returns nothing for a compressed transaction, which is why migkit opens
   them itself.
@@ -2811,7 +2810,7 @@ index that exists, and it gets reported as an engine regression.
 statistics for, and warns when a table has been rewritten by more than
 autovacuum's own scale factor since its statistics were taken. `migkit move
 --go` analyzes what it loaded before it hands the target back - the same
-thing pgcopydb does per table, and the thing that matters for a table loaded
+thing the native copier does per table, and the thing that matters for a table loaded
 with `autovacuum_enabled = false`, which autoanalyze will never catch up.
 Test: `test_planner_statistics.py`.
 
@@ -2909,7 +2908,7 @@ denied for table pg_subscription`, so this is a superuser-on-the-target
 exposure, not a public one. It is still a reason to prefer a path that
 runs from the operator's machine when the target belongs to someone else -
 and **that path now exists**: `MIGKIT_CDC=follow` on `move --mode cdc`
-drives `pgcopydb follow` from where migkit runs, connecting out to both
+drives the native copier's follow from where migkit runs, connecting out to both
 sides, so no credential is written to the target and the target never has
 to dial the source. Verified end to end against a pair on two docker
 networks with no route between them - the case a subscription cannot do at
@@ -2965,13 +2964,15 @@ still acts on the real keys
 
 ## H. What migkit does not end, stated plainly
 
-- Stored procedures, packages and triggers are reported, never converted.
+- Stored procedures, packages and triggers are reported; the ones the converter can carry are converted, and the rest are classed `not converted` and named.
 - Application-side anything: connection strings, ORM behaviour, cron jobs.
-- Throughput claims. No benchmark against another tool on the same hardware
-  exists yet, so none is made.
-- Engines outside the current nine, notably Oracle (measured as buildable
-  here), Db2 (no arm64 image, so it would be emulation), S3/Redshift,
-  DynamoDB, OpenSearch, Kinesis, Neptune.
+- Throughput claims beyond the measured ones. The native PostgreSQL copier is
+  compared on the same hardware (scale.md); no comparison against a managed
+  service exists yet, so none is made.
+- Engines whose capabilities are partial. `docs/agents/STATE.md` lists, for
+  each engine, what is not yet there: ase, redshift and snowflake have 6 of 16
+  capabilities each, db2 has 7, neo4j 10, and most engines' move and verify
+  depth is still short of postgres and mysql.
 - A control plane: HA, alerting, and resume across machines.
 
 ## Sources
@@ -2983,10 +2984,10 @@ Practitioner failure modes:
 Validation and sampling:
 [how to validate data after a migration](https://settledata.ai/blog/how-to-validate-data-after-migration),
 [data verification methods and checklist](https://www.bladepipe.com/blog/data_insights/data_verification/),
-[pt-table-checksum documentation](https://docs.percona.com/percona-toolkit/pt-table-checksum.html).
+[replica checksum tool documentation](https://docs.percona.com/percona-toolkit/pt-table-checksum.html).
 Speed:
-[pgcopydb clone](https://pgcopydb.readthedocs.io/en/latest/ref/pgcopydb_clone.html),
-[pgcopydb snapshots and resume](https://pgcopydb.readthedocs.io/en/latest/resume.html),
+[native copier clone](https://pgcopydb.readthedocs.io/en/latest/ref/pgcopydb_clone.html),
+[native copier snapshots and resume](https://pgcopydb.readthedocs.io/en/latest/resume.html),
 [DMS LOB support](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Tasks.LOBSupport.html),
 [DMS parallel load](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Tasks.CustomizingTasks.TableMapping.SelectionTransformation.Tablesettings.html).
 Managed-service limits:
@@ -3020,7 +3021,7 @@ Temporal types and time zones:
 [the DST bug that only breaks twice a year](https://www.codewithkarani.com/blog/postgres-timestamp-vs-timestamptz-dst-bug),
 [Oracle datetime and time zone support](https://docs.oracle.com/en/database/oracle/oracle-database/18/nlspg/datetime-data-types-and-time-zone-support.html),
 [incorrect date value '0000-00-00'](https://tableplus.com/blog/2019/10/incorrect-date-value-0000-00-00-date-datetime.html),
-[pgloader and MySQL default dates](https://github.com/dimitri/pgloader/issues/252),
+[a PostgreSQL loader and MySQL default dates](https://github.com/dimitri/pgloader/issues/252),
 [convert_tz returns null if a named time zone is used](https://bugs.mysql.com/bug.php?id=12445),
 [mysql_tzinfo_to_sql](https://docs.oracle.com/cd/E17952_01/mysql-8.0-en/mysql-tzinfo-to-sql.html),
 [foreign keys and circular dependencies](https://www.cybertec-postgresql.com/en/foreign-keys/),
@@ -3036,20 +3037,20 @@ What the target does to the rows as they land:
 
 The verifier's own blind spots:
 [row security considerations](https://wiki.postgresql.org/wiki/Row_Security_Considerations),
-[pg_dump and row_security](https://www.postgresql.org/docs/current/app-pgdump.html),
+[the dump program and row_security](https://www.postgresql.org/docs/current/app-pgdump.html),
 [partial dumps using RLS, on purpose](https://supabase.com/blog/partial-postgresql-data-dumps-with-rls),
 [insert/dump/restore with generated columns](https://postgrespro.com/list/thread-id/2558357).
 
 Views and column grants:
 [REFRESH MATERIALIZED VIEW](https://www.postgresql.org/docs/current/sql-refreshmaterializedview.html),
-[preventing the refresh during pg_restore](https://www.postgresql.org/message-id/1403794157042-5809367.post@n5.nabble.com),
-[pg_dump emitting REFRESH after ACLs](https://www.postgresql.org/message-id/E1ddNne-0001jw-Vx@gemulon.postgresql.org),
+[preventing the refresh during restore](https://www.postgresql.org/message-id/1403794157042-5809367.post@n5.nabble.com),
+[the dump program emitting REFRESH after ACLs](https://www.postgresql.org/message-id/E1ddNne-0001jw-Vx@gemulon.postgresql.org),
 [column-level security in PostgreSQL](https://www.enterprisedb.com/postgres-tutorials/how-implement-column-and-row-level-security-postgresql),
 [reporting a column-level error when lacking privilege](https://www.postgresql.org/message-id/CAKFQuwaiP%2BkYLCtUh_5Hdd7XKUHHH_Y5JAvb-0x2JQevJevVeA%40mail.gmail.com).
 
 Large objects and live rows:
 [pg_largeobject](https://www.postgresql.org/docs/current/catalog-pg-largeobject.html),
-[excluding large objects from pg_dump](https://postgrespro.com/list/thread-id/1557645),
+[excluding large objects from the dump program](https://postgrespro.com/list/thread-id/1557645),
 [vacuumlo](https://www.postgresql.org/docs/current/vacuumlo.html),
 [the lo module](https://www.postgresql.org/docs/current/lo.html),
 [AWS DMS data validation](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Validating.html).

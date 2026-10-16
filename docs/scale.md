@@ -47,39 +47,38 @@ measure the compressor, not the move) plus a TOAST-able text column -
 
 | 2,093 MB of LOB | wall | CPU on the host | rows |
 |---|---|---|---|
-| `migkit move` (`pg_dump -Fd -j2` \| `pg_restore -j2`) | 93.6 s | **82.9 s user** | 50,000 |
-| `pgcopydb copy table-data --table-jobs 2` | **18.2 s** | 0.35 s user | 50,000 |
+| `migkit move` (dump and restore, 2 jobs) | 93.6 s | **82.9 s user** | 50,000 |
+| native copier, table data, 2 table jobs | **18.2 s** | 0.35 s user | 50,000 |
 
 And on a plain table, 2,000,000 rows / 555 MB:
 
 | 555 MB, no LOB | wall | CPU on the host |
 |---|---|---|
 | `migkit move` (dump/restore) | 11.7 s | 7.6 s user |
-| `pgcopydb copy table-data` | **4.1 s** | 0.15 s user |
+| native copier, table data | **4.1 s** | 0.15 s user |
 
-**pgcopydb is 2.9x faster on the plain table and 5.2x on the LOB table**,
-and the CPU numbers say why: `pg_dump -Fd` compresses by default, so the
+**The native PostgreSQL copier is 2.9x faster on the plain table and 5.2x on the LOB table**,
+and the CPU numbers say why: the dump program's directory format compresses by default, so the
 dump path spends 83 of its 94 seconds gzipping bytes that were random to
-begin with. pgcopydb streams COPY between the two servers and spends
+begin with. The native copier streams COPY between the two servers and spends
 almost no host CPU at all.
 
 LOBs cost about half the throughput per byte even on the fast path: 48 MB/s
 for the plain table against 22 MB/s for the LOB table through dump/restore.
 
-**Why migkit held back.** `movers.pgcopydb_available()` once accepted only
+**Why migkit held back.** The copier's availability check once accepted only
 the version-matched container image rather than a local binary, because
-Homebrew's pgcopydb 0.18 is compiled against PostgreSQL 18 and emits `SET
+The Homebrew build of the native copier, 0.18, is compiled against PostgreSQL 18 and emits `SET
 transaction_timeout = 0`, which PostgreSQL 16 has never heard of. That was
 measured to make a whole-database `clone` move zero rows while reporting
 each rejection separately.
 
 Re-measured here, the rejection is real and the outcome is not: the target's
 log shows `ERROR: unrecognized configuration parameter
-"transaction_timeout"` during the pgcopydb run, and all 50,000 and then
-2,000,000 rows arrived anyway. The difference is the subcommand - `copy
-table-data` survives the failed SET where `clone` does not. That is a
+"transaction_timeout"` during the copier's run, and all 50,000 and then
+2,000,000 rows arrived anyway. The difference is the subcommand - the table-data copy survives the failed SET where the copy-everything mode does not. That is a
 narrower constraint than the availability check used to enforce:
-`pgcopydb_runner` now takes the local binary for `copy table-data`, with
+The copier's runner now takes the local binary for the table-data copy, with
 `Engine.moved_nothing` as the guard that refuses a move which reports
 success and leaves the target empty. That is worth 3-5x.
 
@@ -87,7 +86,7 @@ success and leaves the target empty. That is worth 3-5x.
 
 **Throughput is flat.** 172,000 rows/s at one million, 173,000 rows/s at ten
 million - about 48 MB/s, on two shared cores with the source and target
-competing for them. The move path here is `pg_dump -Fd -j2 | pg_restore -j2`;
+competing for them. The move path here is the dump-and-restore path with two jobs;
 see the note below.
 
 **Memory does not follow the data.** Ten times the rows moved migkit's peak
@@ -98,7 +97,7 @@ schema, not of the table. A verifier that pulled both sides into a middle box
 would have needed gigabytes here.
 
 **Verify costs about 5.8 seconds per million rows**, plus roughly 4 seconds
-of fixed work (schema dump comparison, atlas, liquibase, parameters). Solving
+of fixed work (schema comparison, parameters). Solving
 the two data points: 1M = 9.8 s and 10M = 62.4 s gives 5.84 s per million and
 3.96 s fixed.
 
@@ -192,15 +191,15 @@ confirmed to fail without the fix (it reported 100 for a 400-row table).
 
 ## Notes and open questions
 
-- **The chooser now takes pgcopydb from a local binary, with a guard.**
+- **The chooser now takes the native copier from a local binary, with a guard.**
   Measured end to end afterwards: the same 555 MB / 2,000,000-row move went
   from 11.7 s to **5.4 s** through `migkit move --go`, truncate, analyze and
   guard included. What made that safe rather than hopeful is
   `Engine.moved_nothing`: after any mover reports success, the tables the
   source has rows in must have rows on the target, or the command refuses to
   say it finished. Two things the local binary needed that the container had
-  been hiding: its own `--dir` per run (pgcopydb keeps the exported snapshot
-  under `/tmp/pgcopydb` by default, and the second run died on the first
+  been hiding: its own `--dir` per run (the copier keeps the exported snapshot
+  under a default directory, and the second run died on the first
   one's snapshot), and no `--dir` on `ping`, which answers with its usage
   and reads as a connectivity failure.
 - **LOB numbers are above**, and the shape of the cost is clear: half the
