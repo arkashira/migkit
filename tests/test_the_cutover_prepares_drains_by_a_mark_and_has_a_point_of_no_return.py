@@ -373,6 +373,7 @@ def test_a_point_of_no_return_that_fails_before_any_drop_is_undone(
     hop, eng, leg, log, asked, approve = _after(monkeypatch, tmp_path,
                                                 broken=("app",))
     _flipped(hop)
+    cutover.run(hop, eng, ["app"], False, leg, lambda m: None, approve)
     with pytest.raises(SystemExit, match="point of no return was undone"):
         cutover.run(hop, eng, ["app"], True, leg, lambda m: None, approve)
     # the old source frozen again, the way the cutover had frozen it
@@ -386,6 +387,8 @@ def test_a_drop_that_failed_half_way_goes_on_at_the_next_run(monkeypatch,
     hop, eng, leg, log, asked, approve = _after(
         monkeypatch, tmp_path, dbs=("app", "crm"), broken=("crm",))
     _flipped(hop, ("app", "crm"))
+    cutover.run(hop, eng, ["app", "crm"], False, leg, lambda m: None,
+                approve)
     with pytest.raises(SystemExit, match="goes on from there"):
         cutover.run(hop, eng, ["app", "crm"], True, leg, lambda m: None,
                     approve)

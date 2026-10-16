@@ -688,15 +688,25 @@ def _verify_rows(hop, conf, gate, window):
         witness = None
 
     def measure():
-        got = json.loads(path.read_text())
+        if witness is None:
+            raise ValueError(f"no verify verdict yet for {hop.name}")
+        try:
+            got = json.loads(path.read_text())
+        except OSError:
+            raise ValueError(f"the verdict of {hop.name} could not be"
+                             " read") from None
+        except ValueError:
+            raise ValueError(f"the verdict of {hop.name} is not readable"
+                             " as written") from None
         if not isinstance(got, dict):
-            raise ValueError("it holds no verdict")
+            raise ValueError(f"the verdict of {hop.name} holds no verdict")
         return {"status": got.get("status"), "why": got.get("why") or "",
                 "stale": bool(got.get("stale"))}
     got = taken.read("verify", hop.name, measure, window, witness)
     if got is None:
         return [(gate, "verify verdict: none could be read ("
-                       + (taken.get("verify", hop.name).why or "not run")
+                       + (taken.get("verify", hop.name).why
+                          or f"no verify verdict yet for {hop.name}")
                        + f") - run `migkit check {hop.name}` first")]
     if got["status"] != "same":
         return [(gate, f"verify verdict: {got['status']}"
@@ -1851,7 +1861,8 @@ def no_return(hop, eng, dbs, go, leg, say, approve, rec=None,
         except Exception as e:  # noqa: BLE001 - said, kept
             kept.append(f"{d}: the mark's table - {str(e).strip()[:120]}")
     ended = _follow_left(hop, eng, dbs, kept, s)
-    done("left", kept=kept or None, ended=ended or None)
+    done("left", kept=kept or None,
+         subscriptions_ended=ended or None)
     phase("origin")
     if leg.origin is not None:
         for d in dbs:

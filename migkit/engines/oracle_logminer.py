@@ -688,6 +688,140 @@ def dictionary_scn(eng, side, db, before=None):
     return int(got[0][0]) if got and got[0][0] is not None else None
 
 
+#: the ways the logs a window adds are kept from growing with the time
+#: since the dictionary was written
+KEEP, REBUILD, CARRY = "keep", "rebuild", "carry on"
+#: {(hop, side, db): [(bytes, seconds) one window's logs took to ship and
+#: be mined]}
+_SCANS = {}
+#: {(hop, side, db): the last dictionary decision, as `assess` says it}
+_DICTIONARIES = {}
+
+
+def _can_build(eng, side, db):
+    got = eng._rows(side, db, "select count(*) from all_tab_privs where"
+                              " table_name = 'DBMS_LOGMNR_D' and privilege"
+                              " = 'EXECUTE'")
+    return bool(got and int(got[0][0]))
+
+
+def _dictionary_change():
+    from ..decide import BY_DBA, POSSIBLE, Change, Stand
+    return Change(
+        "dictionary", "a newer dictionary written into its redo",
+        lambda f: Stand(POSSIBLE) if f["can build"] else Stand(
+            BY_DBA, "the account may not run dbms_logmnr_d"),
+        make=("begin dbms_logmnr_d.build(options =>"
+              " dbms_logmnr_d.store_in_redo_logs); end;",
+              "alter system archive log current"),
+        after="at once: it only writes the dictionary into the redo",
+        speeds=False)
+
+
+def dictionary_ways():
+    """The ways the logs a window adds - every one since the dictionary the
+    read stands on - are kept in what the reader holds: keep them while
+    they fit, write a newer dictionary (the read starts on it once it
+    passes it) where the hop allows that change, or carry on over the
+    bound and say it."""
+    from ..decide import Need, Rung
+    return (
+        Rung(KEEP, "the logs since the dictionary kept as they are",
+             needs=(Need("the logs within what the reader holds",
+                         lambda f: f["fits"] or f["pending"],
+                         lambda f: f"the logs a window adds are"
+                         f" {f['size'] / 2 ** 20:.0f} MB, over the"
+                         f" {f['bound'] / 2 ** 20:.0f} MB the reader holds"
+                         f" ({f['limit']})"),),
+             because="the logs fit what the reader holds, or a newer"
+                     " dictionary is already written and the read will"
+                     " pass it",
+             leaves="nothing"),
+        Rung(REBUILD, "a newer dictionary written into the source's redo",
+             needs=(Need("no newer dictionary waiting",
+                         lambda f: not f["pending"],
+                         "a newer dictionary is written already"),),
+             changes=(_dictionary_change(),),
+             because="the read starts on the newer dictionary once it"
+                     " passes it, and the set of logs starts there",
+             leaves="one dictionary in the source's archived redo"),
+        Rung(CARRY, "the logs kept over what the reader holds",
+             because="no newer dictionary is allowed to be written, so the"
+                     " window's lag grows with the logs",
+             leaves="nothing"))
+
+
+def dictionary_bound(eng, side, db, logs):
+    """(bytes, why) the logs of a window may come to before the reader
+    falls behind them: the least of half this machine's free memory and
+    what the reader shipped and mined, a second, over half the source's
+    measured archive switch (the logs are mined again at each window's
+    start, so their mining has to fit well within a switch). (None, why)
+    where neither is measured."""
+    from .. import sizing
+    parts = {}
+    memory = (sizing.host() or {}).get("memory")
+    if memory:
+        parts["half this machine's free memory"] = int(memory) // 2
+    scans = _SCANS.get((id(eng.hop), side, db))
+    switch = switch_seconds(logs)
+    if scans and switch:
+        speed = sum(b for b, _ in scans) / max(sum(t for _, t in scans),
+                                               1e-3)
+        parts["what the reader mines in half an archive switch"] = \
+            int(speed * switch / 2)
+    if not parts:
+        return None, "neither the memory nor the reader's pace is measured"
+    why = min(parts, key=parts.get)
+    return parts[why], why
+
+
+def dictionary_choice(eng, side, db, logs, start):
+    """(Choice, facts): which way keeps the logs of the window that starts
+    at `start` within the reader's bound - decided, not run."""
+    from .. import sourcechange
+    from ..decide import Facts, climb
+    size = sum(int(g.get("bytes") or 0) for g in logs)
+    bound, limit = dictionary_bound(eng, side, db, logs)
+    newest = dictionary_scn(eng, side, db)
+    ways = dictionary_ways()
+    facts = Facts({"size": size, "bound": bound or 0, "limit": limit,
+                   "fits": bound is None or size <= bound,
+                   "pending": newest is not None and newest > int(start)},
+                  **{"can build": lambda: _can_build(eng, side, db)})
+    sourcechange.put_answers(eng.hop, facts, ways)
+    return climb(db, ways, facts, prove=False), facts
+
+
+def build_dictionary(eng, side, db):
+    """Writes a newer dictionary into the source's redo and archives it."""
+    change = _dictionary_change()
+    conn = eng._dedicated(side)
+    try:
+        cur = conn.cursor()
+        for stmt in change.statements({}):
+            cur.execute(stmt)
+    finally:
+        conn.close()
+
+
+def dictionary_way(eng, side, db, logs, start):
+    """The decision of `dictionary_choice`, carried out and kept for
+    `assess`: a newer dictionary written where that is the way. A build that
+    fails is said and the read goes on over the bound - never stopped."""
+    got, facts = dictionary_choice(eng, side, db, logs, start)
+    note = f"{got.rung.said}: {got.reason}"
+    if got.rung.name == REBUILD:
+        try:
+            build_dictionary(eng, side, db)
+        except Exception as e:  # noqa: BLE001 - said, the read goes on
+            note += f" - not built: {str(e).strip().splitlines()[0][:120]}"
+    _DICTIONARIES[(id(eng.hop), side, db)] = {
+        "way": got.rung.name, "note": note, "size": facts["size"],
+        "bound": facts["bound"], "limit": facts["limit"]}
+    return got
+
+
 def archived(eng, side, db, start):
     """The source's archived logs from `start` on, one destination, each
     {thread, seq, first, next, name, bytes, dict, at}, in order - held to
@@ -1044,12 +1178,21 @@ class Miner:
                     " dbms_logmnr_d.store_in_redo_logs); end; - then copy"
                     " the tables again from a point after it")
             self.shipping = archived(self.eng, self.side, self.db, since)
+            dictionary_way(self.eng, self.side, self.db, self.shipping,
+                           start)
             got = reach(self.shipping)
             end = min(end, got if got is not None else start)
             self.samples[-1] = (at, end, low)
             switch = switch_seconds(self.shipping) or 0.0
         began = time.monotonic()
         self._start(start, max(end, start))
+        if self.ship is not None:
+            scans = _SCANS.setdefault((id(self.eng.hop), self.side,
+                                       self.db), [])
+            scans.append((sum(int(g["bytes"] or 0) for g in self.shipping
+                              if int(g["first"]) <= end),
+                          time.monotonic() - began))
+            del scans[:-20]
         # the lag a change of this window had: the switch that archived it,
         # then its ship and the mining, which `_start` does
         lagged(self.eng, self.side, self.db, self.where,
@@ -1406,6 +1549,25 @@ def reader_check(eng, side, db):
     return "pass", words, True
 
 
+def _dictionary_assess(eng, side, db, logs, add):
+    """The logs a window adds since the dictionary, against what the
+    reader holds, and the way chosen to keep them there."""
+    try:
+        start = min(int(g["first"]) for g in logs)
+        got, facts = dictionary_choice(eng, side, db, logs, start)
+    except Exception as e:  # noqa: BLE001 - said, as unknown
+        add("warn", "the dictionary's logs",
+            f"could not be judged: {str(e).splitlines()[0][:90]}")
+        return
+    size = f"{facts['size'] / 2 ** 20:.0f} MB in {len(logs)} logs"
+    bound = (f"{facts['bound'] / 2 ** 20:.0f} MB ({facts['limit']})"
+             if facts["bound"] else f"not bounded ({facts['limit']})")
+    over = bool(facts["bound"]) and facts["size"] > facts["bound"]
+    add("warn" if over and got.rung.name == CARRY else "pass",
+        "the logs since the dictionary",
+        f"{size} against {bound}: {got.rung.said} ({got.reason})")
+
+
 def assess(eng, side, db):
     """What `assess` says about following this source: whether the redo
     can be read back, and whether the reader keeps up with it - the redo
@@ -1446,14 +1608,17 @@ def assess(eng, side, db):
         lags = _LAGS.get((id(eng.hop), side, db), {}).get(got.path)
         detail = f"{got.rung.said}: {got.reason}"
         if got.path == INSTANCE:
-            switch = switch_seconds(archived(
-                eng, side, db, dictionary_scn(eng, side, db) or 0))
+            logs = archived(eng, side, db, dictionary_scn(eng, side, db)
+                            or 0)
+            switch = switch_seconds(logs)
             detail += ("; a change waits for the archive switch, measured"
                        f" every {switch:.0f} s here" if switch is not None
                        else "; the archive switch is not measured yet")
         detail += (f"; a window's lag measured {sum(lags) / len(lags):.1f} s"
                    if lags else "")
         add("pass", "where the redo is mined", detail)
+        if got.path == INSTANCE and logs:
+            _dictionary_assess(eng, side, db, logs, add)
     except SystemExit as e:
         add("fail", "where the redo is mined", str(e))
     level, detail, _ = reader_check(eng, side, db)
