@@ -16,7 +16,7 @@ from migkit.config import Endpoint, Hop
 from tests import servers
 from tests.conftest import needs_docker
 
-# `cutover.two-way` on dynamodb is proved here once the depth probe (capabilities.py) reads `mark_unit` as the way
+PROVES = [("cutover.two-way", ("dynamodb",))]
 
 pytestmark = needs_docker
 
@@ -126,3 +126,49 @@ def test_doctor_names_the_rung_and_teardown_drops_the_origin_table(
     marks.teardown(eng, "dst", DB)
     assert "migkit_origin" not in c.list_tables()["TableNames"]
     assert "_mark_rung" not in eng.__dict__
+
+def test_the_rung_is_taken_once_per_tail_and_again_at_a_boundary(
+        tmp_path, monkeypatch):
+    """No server: the tail takes its rung from the side's facts once
+    (`marks.tail_start`), keeps it while the facts hold, and takes it again
+    through the same probe and decision at a boundary where they changed."""
+    hop = Hop(name="w16f", engine="dynamodb", databases=[DB],
+              source=Endpoint(host="127.0.0.1", port=1),
+              target=Endpoint(host="127.0.0.1", port=1),
+              options={"two_way": True})
+    eng = engines.get_engine(hop)
+    facts = [{"family": "dynamodb", "can_create": True, "transactions": True}]
+    monkeypatch.setattr(eng, "mark_facts", lambda side, db: dict(facts[0]))
+    monkeypatch.setattr(eng, "mark_prove", lambda *a: None)
+    monkeypatch.setattr(eng, "mark_timed",
+                        lambda side, db, rung, rounds: [1e-5] * rounds)
+    said, token = [], tmp_path / "tail.token"
+    first = marks.tail_start(eng, DB, True, token, said.append)
+    assert first == 'item' and eng._mark_rung == first
+    assert any("carry" in m for m in said)
+    said.clear()
+    assert marks.tail_round(eng, DB, token, said.append) == first
+    assert not said                      # the facts held: nothing chosen
+    facts[0] = {"family": "dynamodb", "can_create": True, "transactions": True, "streams": True}
+    again = marks.tail_round(eng, DB, token, said.append)
+    assert any("choosing the mark again" in m for m in said)
+    assert again == 'item' == eng._mark_rung
+    assert marks.kept_rung(token) == again
+    assert marks.tail_start(eng, DB, False, token, said.append) is None
+
+
+def test_the_tails_batch_is_transactions_each_opening_with_the_origin_item(
+        space):
+    c, eng = _table(space), _eng(space)
+    eng._mark_rung = "item"
+    eng._batch_write(c, T, [{"PutRequest": {"Item": {"id": {"S": f"k{i}"}}}}
+                            for i in range(101)])
+    items = c.scan(TableName=T)["Items"]
+    assert len(items) == 101 and all("_migkit_marker" in i for i in items)
+    c.put_item(TableName=T, Item={"id": {"S": "app"}})
+    recs = eng.mark_stream("dst", T)
+    own = [eng.mark_own(T, r) for r in recs
+           if r["dynamodb"]["Keys"]["id"]["S"].startswith("k")]
+    assert len(own) == 101 and all(own)       # 99 + 2: two transactions
+    assert not eng.mark_own(T, [r for r in recs if r["dynamodb"]["Keys"][
+        "id"]["S"] == "app"][0])

@@ -16,7 +16,7 @@ from migkit.config import Endpoint, Hop
 from tests import servers
 from tests.conftest import needs_docker
 
-# `cutover.two-way` on redis is proved here once the depth probe (capabilities.py) reads `mark_unit` as the way
+PROVES = [("cutover.two-way", ("redis",))]
 
 pytestmark = needs_docker
 
@@ -98,3 +98,63 @@ def test_doctor_names_the_rung_and_teardown_removes_the_marker(
     marks.teardown(eng, "dst", DB)
     assert c.exists("migkit:origin") == 0
     assert "_mark_rung" not in eng.__dict__
+
+def test_the_rung_is_taken_once_per_tail_and_again_at_a_boundary(
+        tmp_path, monkeypatch):
+    """No server: the tail takes its rung from the side's facts once
+    (`marks.tail_start`), keeps it while the facts hold, and takes it again
+    through the same probe and decision at a boundary where they changed."""
+    hop = Hop(name="w16f", engine="redis", databases=[DB],
+              source=Endpoint(host="127.0.0.1", port=1),
+              target=Endpoint(host="127.0.0.1", port=1),
+              options={"two_way": True})
+    eng = engines.get_engine(hop)
+    facts = [{"family": "redis", "version": (7, 0), "cluster": False, "can_create": True}]
+    monkeypatch.setattr(eng, "mark_facts", lambda side, db: dict(facts[0]))
+    monkeypatch.setattr(eng, "mark_prove", lambda *a: None)
+    monkeypatch.setattr(eng, "mark_timed",
+                        lambda side, db, rung, rounds: [1e-5] * rounds)
+    said, token = [], tmp_path / "tail.token"
+    first = marks.tail_start(eng, DB, True, token, said.append)
+    assert first == 'multi' and eng._mark_rung == first
+    assert any("carry" in m for m in said)
+    said.clear()
+    assert marks.tail_round(eng, DB, token, said.append) == first
+    assert not said                      # the facts held: nothing chosen
+    facts[0] = {"family": "redis", "version": (7, 2), "cluster": False, "can_create": True}
+    again = marks.tail_round(eng, DB, token, said.append)
+    assert any("choosing the mark again" in m for m in said)
+    assert again == 'multi' == eng._mark_rung
+    assert marks.kept_rung(token) == again
+    assert marks.tail_start(eng, DB, False, token, said.append) is None
+
+
+def test_the_tails_round_lands_in_one_unit_and_its_reader_leaves_it_out(
+        space, tmp_path):
+    from migkit.engines.redis import OwnGroups
+    eng, dstc, srcc = _eng(space), space.dst.client(), space.src.client()
+    marks.tail_start(eng, DB, True, tmp_path / "tail.token", lambda m: None)
+    srcc.mset({"w16f:a": "1", "w16f:b": "2"})
+    dstc.delete("w16f:a", "w16f:b", "w16f:app")
+    lines = eng.mark_watch("dst", lambda: (
+        eng._refresh_keys(0, {"w16f:a": "write", "w16f:b": "write"}),
+        dstc.set("w16f:app", "x")))
+    groups = eng.mark_groups(lines)
+    own = [g for g in groups if g["own"]]
+    assert len(own) == 1                  # both keys, one MULTI / EXEC
+    keys = {c[1] for c in own[0]["commands"] if c[0].upper() == "RESTORE"}
+    assert keys == {"w16f:a", "w16f:b"}
+    assert own[0]["commands"][0][:2] == ["HSET", "migkit:origin"]
+    assert dstc.get("w16f:a") == "1" and dstc.get("w16f:b") == "2"
+    # the reader of the way back: a stream's commands, the unit left out
+    stream = [[b"MULTI"], [b"HSET", b"migkit:origin", b"writer", b"migkit"],
+              [b"SET", b"w16f:a", b"1"], [b"EXEC"], [b"SET", b"w16f:app", b"x"]]
+    gate, passed = OwnGroups("migkit:origin"), []
+    for argv in stream:
+        passed += gate.feed(argv)
+    assert passed == [[b"SET", b"w16f:app", b"x"]]
+    # an application's own transaction goes through whole
+    gate = OwnGroups("migkit:origin")
+    got = [a for argv in [[b"MULTI"], [b"SET", b"k", b"v"], [b"EXEC"]]
+           for a in gate.feed(argv)]
+    assert got == [[b"MULTI"], [b"SET", b"k", b"v"], [b"EXEC"]]

@@ -836,7 +836,13 @@ class RedisEngine(Engine):
                          None if isinstance(h, Exception) else h))
 
         def send(abs_ok):
-            write = dst.pipeline(transaction=False)
+            mark = self.__dict__.get("_mark_rung") == "multi"
+            # a tail that marks sends each batch as one MULTI / EXEC whose
+            # first command is the mark: the keys of a batch land with it
+            # or not at all
+            write = dst.pipeline(transaction=mark)
+            if mark:
+                write.execute_command(*self._mark_command())
             n = 0
             for k, at, payload, h in rows:
                 if abs_ok:
@@ -2352,7 +2358,13 @@ class RedisEngine(Engine):
                        else "update") in carried]
         gone = [k for k, a, b in applied if b == "none"]
         if gone:
-            dst.delete(*gone)
+            if self.__dict__.get("_mark_rung") == "multi":
+                unit = dst.pipeline(transaction=True)
+                unit.execute_command(*self._mark_command())
+                unit.delete(*gone)
+                unit.execute()
+            else:
+                dst.delete(*gone)
         here = [k for k, a, b in applied if b != "none"]
         if here:
             self._carry(src, dst, here, self._carry_plan(db))
@@ -2536,9 +2548,13 @@ class RedisEngine(Engine):
         done = 0
         lands = self._landing_pace(where)
         try:
+            groups = OwnGroups(self.MARK_KEY) \
+                if self.__dict__.get("_mark_rung") else None
             for _ in stream.commands():
                 with guard:
-                    spaces.route(stream.offset, stream.argv, spec)
+                    for argv in (groups.feed(stream.argv) if groups
+                                 else (stream.argv,)):
+                        spaces.route(stream.offset, argv, spec)
                     if not spaces.ready() or not lands.due(
                             stream.buffered()):
                         continue
@@ -2845,6 +2861,13 @@ class RedisEngine(Engine):
 
     MARK_KEY = "migkit:origin"
 
+    def _mark_command(self):
+        """The command that opens a unit the tail writes, naming the
+        batch (`NeutralMark.format_marker`)."""
+        from .. import marks
+        from ..barriers import NeutralMark
+        return NeutralMark.format_marker("redis", batch=marks.tail_batch(self))
+
     def mark_facts(self, side, db):
         c = self._client(side)
         version = tuple(int(x) for x in
@@ -2991,9 +3014,12 @@ class RedisEngine(Engine):
         connection goes on from the state last saved."""
         import json
 
-        from .. import failpoint, tailctl
+        from .. import failpoint, marks, tailctl
         env = [tailctl.position(token_path)]
         state = dict((env[0] or {}).get("token") or {})
+        # how what the tail writes is marked, taken once from the target
+        # and chosen again only between two looks
+        marks.tail_start(self, db, go, token_path, log)
         log("following the source as its replica, ctrl-c to stop"
             + ("" if go else " (count-only, add --go to copy)"))
         if not go:
@@ -3015,6 +3041,7 @@ class RedisEngine(Engine):
             failpoint.hit("tail.saved")
 
         def look(at):
+            marks.tail_round(self, db, token_path, log)
             before = _rounds_of(state)
             ends = time.monotonic() + tailctl.BEAT_EVERY
             self.follow_live(db, state, save, log,
@@ -3514,6 +3541,39 @@ class KeyspaceStates:
             f"db{d} {st['state']} from offset {st['seam']:,}: "
             + ", ".join(f"{n:,} {k}" for k, n in sorted(st["counts"].items())
                         if n) for d, st in sorted(self.spaces.items()))
+
+
+class OwnGroups:
+    """A replica stream's commands with the transactions migkit wrote
+    left out: each MULTI .. EXEC is held until its EXEC, and let through
+    whole (`feed`) unless its first command is the mark, the hash `key`
+    (`RedisEngine.mark_unit`). What is outside a transaction passes as it
+    is. A transaction the stream ends in the middle of is held until the
+    next call that finishes it."""
+
+    def __init__(self, key):
+        self.key, self.open, self.opened = key, None, None
+
+    @staticmethod
+    def _text(word):
+        return word.decode("latin-1") if isinstance(word, bytes) else str(word)
+
+    def feed(self, argv):
+        verb = self._text(argv[0]).upper() if argv else ""
+        if verb == "MULTI" and self.open is None:
+            self.open, self.opened = [], argv
+            return []
+        if self.open is None:
+            return [argv]
+        if verb != "EXEC":
+            self.open.append(argv)
+            return []
+        held, self.open = self.open, None
+        first = held[0] if held else None
+        if first and self._text(first[0]).upper() == "HSET" \
+                and len(first) > 1 and self._text(first[1]) == self.key:
+            return []
+        return [self.opened, *held, argv]
 
 
 def _rounds_of(state):

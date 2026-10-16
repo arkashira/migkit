@@ -808,6 +808,11 @@ class KafkaEngine(Engine):
                     for m in batch:
                         if ahead > 0:
                             ahead -= 1
+                        elif self.__dict__.get("_mark_rung") \
+                                and self.mark_own(m.headers):
+                            # what the way back of a two-way hop wrote
+                            # here is not carried back again
+                            pass
                         else:
                             sends.append((m.offset, producer.send(
                                 topic, **self._carried(topic, p, m,
@@ -913,7 +918,7 @@ class KafkaEngine(Engine):
         it carries (`HEADER`), so it is not sent twice."""
         import json
 
-        from .. import failpoint, tailctl, topicstates
+        from .. import failpoint, marks, tailctl, topicstates
         state = self._tail_state(db, token_path)
         log("following the source's topics, ctrl-c to stop"
             + ("" if go else " (count-only, add --go to copy)"))
@@ -942,8 +947,12 @@ class KafkaEngine(Engine):
 
         topics = topicstates.TopicSet(self, db, state, log)
         shown = [""]
+        # how what the tail produces is marked, taken once from the
+        # target and chosen again only between two rounds
+        marks.tail_start(self, db, go, token_path, log)
 
         def look(at):
+            marks.tail_round(self, db, token_path, log)
             went = self._tail_round(db, topics, save, log)
             if went:
                 seen[0] += went
@@ -2345,6 +2354,16 @@ class KafkaEngine(Engine):
     def _carried(self, topic, p, m, marked):
         """What `producer.send` is given for source message `m`."""
         headers = list(m.headers or [])
+        if self.__dict__.get("_mark_rung") == "header":
+            # a record the tail writes is marked as migkit's own, the
+            # source's headers beside it (`marks`, `mark_unit`)
+            from .. import marks
+            from ..barriers import NeutralMark
+            headers = [h for h in headers
+                       if h[0] not in (NeutralMark.KAFKA_HEADER,
+                                       "migkit-writer")] \
+                + NeutralMark.format_marker("kafka", batch=marks.tail_batch(
+                    self))
         if marked:
             headers = [h for h in headers if h[0] != self.HEADER] + [
                 (self.HEADER, self._position(p, m.offset))]

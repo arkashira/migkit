@@ -476,7 +476,15 @@ def settle(pair, db, token_path, exact, log):
     the token before anything is applied. A kept rung the side no longer
     allows is climbed from again where no batch depends on it; where
     batches are numbered on it, the tail stops and says so."""
-    dst = pair.dst_engine
+    return settle_engine(pair.dst_engine, db, token_path, exact, log,
+                         hop=getattr(pair, "hop", None))
+
+
+def settle_engine(dst, db, token_path, exact, log, hop=None):
+    """`settle` for an engine that is its own pair - one engine object
+    reading the source and writing the target, the tails of the document
+    stores, the key-value stores and the brokers. The facts the rung was
+    taken on are kept on the engine (`boundary`)."""
     name = kept_rung(token_path)
     if name is not None:
         r = rung(getattr(dst, "CANON_ENGINE", ""), name)
@@ -501,11 +509,64 @@ def settle(pair, db, token_path, exact, log):
                     f" ({why}); choosing again")
                 name = None
     if name is None:
-        name = choice(dst, "dst", db, exact, log,
-                      hop=getattr(pair, "hop", None)).rung.name
+        name = choice(dst, "dst", db, exact, log, hop=hop).rung.name
         _keep_rung(token_path, name)
     dst._mark_rung = name
+    dst._mark_taken = _taken(dst, db)
     return name
+
+
+def _taken(dst, db):
+    """The side's facts as a rung is taken on them, to be compared at the
+    next boundary: what `Engine.mark_facts` says of the target."""
+    return {k: v for k, v in dst.mark_facts("dst", db).items()
+            if k != "can_create"}
+
+
+def boundary(dst, db, token_path, exact, log):
+    """A safe boundary of a tail (between two rounds, nothing in flight):
+    where the target's facts are no longer those its rung was taken on
+    (`Engine.mark_facts` - a server upgraded, a collection's images
+    turned off, a cluster joined), the rung is chosen again, through the
+    same probe and the same decision engine as at the start, and kept in
+    the token. A tail that numbers its batches on the rung keeps it where
+    the side still allows it (`settle_engine` stops it where it does
+    not). Returns the rung the tail stands on."""
+    now = _taken(dst, db)
+    if now == dst.__dict__.get("_mark_taken"):
+        return dst.__dict__.get("_mark_rung")
+    log("two_way: the target's facts changed; choosing the mark again")
+    if not (exact and saved(token_path).get("batch") is not None):
+        _keep_rung(token_path, None)
+    return settle_engine(dst, db, token_path, exact, log)
+
+
+def tail_start(dst, db, go, token_path, log):
+    """The mark an engine that is its own pair writes its tail's changes
+    with, taken before the first one is read: the rung `settle_engine`
+    stands on where the hop is two-way and the tail applies, else None -
+    and the engine writes bare, as a one-way tail does."""
+    from . import twoway
+    dst.__dict__.pop("_mark_rung", None)
+    if not go or twoway.settings(getattr(dst, "hop", None)) is None:
+        return None
+    return settle_engine(dst, db, token_path, False, log)
+
+
+def tail_round(dst, db, token_path, log):
+    """What a tail does between two rounds for its mark: `boundary`, where
+    the tail marks at all."""
+    if dst.__dict__.get("_mark_rung") is None:
+        return None
+    return boundary(dst, db, token_path, False, log)
+
+
+def tail_batch(dst):
+    """The number the next unit of this tail's writes carries in its mark,
+    counted from 1 for the life of the engine object."""
+    n = dst.__dict__.get("_mark_batch", 0) + 1
+    dst._mark_batch = n
+    return n
 
 
 def exact_wanted(hop):

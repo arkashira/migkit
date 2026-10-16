@@ -16,7 +16,7 @@ from migkit.config import Endpoint, Hop
 from tests import servers
 from tests.conftest import needs_docker
 
-# `cutover.two-way` on kafka is proved here once the depth probe (capabilities.py) reads `mark_unit` as the way
+PROVES = [("cutover.two-way", ("kafka",))]
 
 pytestmark = needs_docker
 
@@ -92,3 +92,43 @@ def test_doctor_names_the_rung_and_teardown_removes_the_probe_topics(
     marks.teardown(eng, "dst", DB)
     assert not eng.__dict__.get("_mark_topics")
     assert "_mark_rung" not in eng.__dict__
+
+def test_the_rung_is_taken_once_per_tail_and_again_at_a_boundary(
+        tmp_path, monkeypatch):
+    """No server: the tail takes its rung from the side's facts once
+    (`marks.tail_start`), keeps it while the facts hold, and takes it again
+    through the same probe and decision at a boundary where they changed."""
+    hop = Hop(name="w16f", engine="kafka", databases=[DB],
+              source=Endpoint(host="127.0.0.1", port=1),
+              target=Endpoint(host="127.0.0.1", port=1),
+              options={"two_way": True})
+    eng = engines.get_engine(hop)
+    facts = [{"family": "kafka", "headers": True, "can_create": True}]
+    monkeypatch.setattr(eng, "mark_facts", lambda side, db: dict(facts[0]))
+    monkeypatch.setattr(eng, "mark_prove", lambda *a: None)
+    monkeypatch.setattr(eng, "mark_timed",
+                        lambda side, db, rung, rounds: [1e-5] * rounds)
+    said, token = [], tmp_path / "tail.token"
+    first = marks.tail_start(eng, DB, True, token, said.append)
+    assert first == 'header' and eng._mark_rung == first
+    assert any("carry" in m for m in said)
+    said.clear()
+    assert marks.tail_round(eng, DB, token, said.append) == first
+    assert not said                      # the facts held: nothing chosen
+    facts[0] = {"family": "kafka", "headers": True, "can_create": True, "brokers": 3}
+    again = marks.tail_round(eng, DB, token, said.append)
+    assert any("choosing the mark again" in m for m in said)
+    assert again == 'header' == eng._mark_rung
+    assert marks.kept_rung(token) == again
+    assert marks.tail_start(eng, DB, False, token, said.append) is None
+
+
+def test_the_tails_records_carry_the_header_and_its_reader_skips_them(space):
+    eng, topic = _eng(space), _topic()
+    eng._mark_rung = "header"
+    m = type("M", (), {"headers": [("app", b"1")], "value": b"v", "key": b"k",
+                       "timestamp": 1, "offset": 0})()
+    sent = eng._carried(topic, 0, m, False)
+    assert eng.mark_own(sent["headers"]) and ("app", b"1") in sent["headers"]
+    eng._mark_rung = None
+    assert not eng.mark_own(eng._carried(topic, 0, m, False)["headers"])

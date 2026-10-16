@@ -1401,7 +1401,9 @@ def _items():
                                       " the target paused for a repair and"
                                       " let go", own("pause_writer")),
         "cutover.two-way": ("what migkit writes marked, so a way back does"
-                            " not carry it twice", own("origin_mark")),
+                            " not carry it twice",
+                            lambda n, c: _own(c, "origin_mark")
+                            or _own(c, "mark_unit")),
         "cutover.jobs": ("scheduled jobs in the database run on one side at"
                          " a time", _jobs),
         "security.tls": ("its connections verified: the server's"
@@ -2306,8 +2308,8 @@ DEPTH_GAPS = {
     },
     "cutover.two-way": {
         **_each(NOT_YET, "P0-PARITY.all",
-                "mongodb mssql redis kafka clickhouse dynamodb oracle db2 "
-                "db2i ase opensearch cassandra redshift snowflake bigquery "
+                "mssql clickhouse oracle db2 "
+                "db2i ase opensearch redshift snowflake bigquery "
                 "iceberg delta tidb cockroachdb dsql couchbase cosmosdb"),
         **_as("stream", "sqlite parquet db2zos duckdb copybook"),
         **_as("schema", "kinesis pubsub"),
@@ -2364,6 +2366,11 @@ _KEYS_GIVEN = ("bigtable firestore datastore keyspaces neptune timestream "
 #: service keeps none a client can read, or its follow is not built - said
 #: as their `stream` is (`GAPS`)
 _UNFOLLOWED = "datastore oceanbase-oracle timestream lindorm"
+#: the managed services whose engine class takes the unit that carries the
+#: mark from the engine it is built on (`mark_unit`), with no server of
+#: their own to prove it on
+_TWO_WAY_INHERITED = ("keyspaces geminidb-cassandra geminidb-redis "
+                      "geminidb-mongo")
 _CN = ("spanner bigtable firestore datastore gaussdb oceanbase "
        "oceanbase-oracle polardbx dcdb keyspaces neptune timestream lindorm "
        "geminidb-cassandra geminidb-redis geminidb-mongo")
@@ -2685,7 +2692,11 @@ _CLOUD_NATIVE_GAPS = {
     },
     "cutover.drain": _as("stream", _UNFOLLOWED),
     "cutover.pause-replication": _each(NOT_APPLICABLE, _ONE_PAUSE, _CN),
-    "cutover.two-way": _each(NOT_YET, "P0-PARITY.all", _CN),
+    # the managed services built on a document, wide-column or key-value
+    # engine take its `mark_unit` (a subclass); their cell is `UNPROVED`
+    "cutover.two-way": _each(
+        NOT_YET, "P0-PARITY.all",
+        " ".join(e for e in _CN.split() if e not in _TWO_WAY_INHERITED)),
     "cutover.jobs": {
         **_each(NOT_APPLICABLE, _NO_JOBS,
                 "spanner bigtable firestore datastore keyspaces neptune "
@@ -2824,6 +2835,14 @@ UNPROVED["verify.value.one-plan"] = "mysql tidb oceanbase polardbx dcdb"
 for _item in ("tail.added", "tail.readded"):
     UNPROVED[_item] = f"{UNPROVED.get(_item, '')} mongodb".strip()
 del _item
+#: the two-way mark is written and read by the real tails of mongodb, redis,
+#: kafka, cassandra and dynamodb (tests/test_the_mark_travels_in_the_atomic_
+#: unit_on_<engine>.py); the services built on them have no server here to
+#: prove it on. cosmosdb (the `_etag` condition of a batch), couchbase (a
+#: transaction's first mutation), and spanner (a row of the origin table
+#: in the transaction) have their rungs written only in `marks`' docstring:
+#: they stay "not yet" above.
+UNPROVED["cutover.two-way"] = _TWO_WAY_INHERITED
 
 
 # --- CockroachDB and Aurora DSQL, on PostgreSQL's wire (P0-PARITY) ----------

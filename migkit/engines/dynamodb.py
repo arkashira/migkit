@@ -471,6 +471,8 @@ class DynamoDBEngine(NeutralCopier, Engine):
         return json.dumps(spec)
 
     def _batch_write(self, client, name, requests):
+        if self.__dict__.get("_mark_rung") == "item":
+            return self._marked_write(name, requests)
         for i in range(0, len(requests), 25):
             want = {name: requests[i:i + 25]}
             wait = 0.05
@@ -480,6 +482,24 @@ class DynamoDBEngine(NeutralCopier, Engine):
                 if want:
                     time.sleep(wait)
                     wait = min(wait * 2, 2)
+
+    #: items a transaction takes, less the origin item that opens it
+    UNIT = 99
+
+    def _marked_write(self, name, requests):
+        """`requests` of one table as the transactions of `mark_unit`, each
+        opening with the item of `migkit_origin` and every put carrying
+        the marker attribute: a transaction commits whole or not at all,
+        so an item lands marked or not at all. A tail's batch larger than
+        a transaction is several, each marked."""
+        from .. import marks
+        for i in range(0, len(requests), self.UNIT):
+            ops = [("put", name, r["PutRequest"]["Item"], None)
+                   if "PutRequest" in r else
+                   ("delete", name, r["DeleteRequest"]["Key"])
+                   for r in requests[i:i + self.UNIT]]
+            self.mark_unit("dst", None, "item", marks.tail_batch(self), ops,
+                           run_id="tail")
 
     def neutral_write(self, side, db, table, columns, rows):
         """Each item put by its key, which replaces one already there: a
@@ -893,6 +913,12 @@ class DynamoDBEngine(NeutralCopier, Engine):
             return
         declared = self._declared(side, db, t)
         key = self._key_schema(side, db, t)
+        # what the way back of a two-way hop wrote here is not carried
+        # back: its items carry the marker, its deletes are named in the
+        # origin table (`mark_own`)
+        from .. import twoway
+        own = self.mark_units(side) \
+            if twoway.settings(self.hop) is not None else None
         done = set(st.get("done") or [])
         shards = self._shards(side, arn)
         held = {s["ShardId"] for s in shards}
@@ -909,8 +935,10 @@ class DynamoDBEngine(NeutralCopier, Engine):
             recs, closed = self._records(side, arn, sid,
                                          st["shards"].get(sid), room)
             for r in recs:
-                found.append(self._change_of(side, db, t, r, view,
-                                             declared, key, canon))
+                if own is None or not self.mark_own(
+                        self._name(side, db, t), r, own):
+                    found.append(self._change_of(side, db, t, r, view,
+                                                 declared, key, canon))
                 st["shards"][sid] = r["dynamodb"]["SequenceNumber"]
             if closed and len(recs) < room:
                 done.add(sid)

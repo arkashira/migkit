@@ -16,7 +16,7 @@ from migkit.config import Endpoint, Hop
 from tests import servers
 from tests.conftest import needs_docker
 
-# `cutover.two-way` on cassandra is proved here once the depth probe (capabilities.py) reads `mark_unit` as the way
+PROVES = [("cutover.two-way", ("cassandra",))]
 
 pytestmark = needs_docker
 
@@ -115,3 +115,51 @@ def test_doctor_names_the_rung_and_teardown_drops_the_origin_table(
         f" '{DB}'")}
     assert "migkit_origin" not in left and "migkit_probe" not in left
     assert "_mark_rung" not in eng.__dict__
+
+def test_the_rung_is_taken_once_per_tail_and_again_at_a_boundary(
+        tmp_path, monkeypatch):
+    """No server: the tail takes its rung from the side's facts once
+    (`marks.tail_start`), keeps it while the facts hold, and takes it again
+    through the same probe and decision at a boundary where they changed."""
+    hop = Hop(name="w16f", engine="cassandra", databases=[DB],
+              source=Endpoint(host="127.0.0.1", port=1),
+              target=Endpoint(host="127.0.0.1", port=1),
+              options={"two_way": True})
+    eng = engines.get_engine(hop)
+    facts = [{"family": "cassandra", "can_create": True}]
+    monkeypatch.setattr(eng, "mark_facts", lambda side, db: dict(facts[0]))
+    monkeypatch.setattr(eng, "mark_prove", lambda *a: None)
+    monkeypatch.setattr(eng, "mark_timed",
+                        lambda side, db, rung, rounds: [1e-5] * rounds)
+    said, token = [], tmp_path / "tail.token"
+    first = marks.tail_start(eng, DB, True, token, said.append)
+    assert first == 'batch' and eng._mark_rung == first
+    assert any("carry" in m for m in said)
+    said.clear()
+    assert marks.tail_round(eng, DB, token, said.append) == first
+    assert not said                      # the facts held: nothing chosen
+    facts[0] = {"family": "cassandra", "can_create": True, "nodes": 3}
+    again = marks.tail_round(eng, DB, token, said.append)
+    assert any("choosing the mark again" in m for m in said)
+    assert again == 'batch' == eng._mark_rung
+    assert marks.kept_rung(token) == again
+    assert marks.tail_start(eng, DB, False, token, said.append) is None
+
+
+def test_the_tails_stamps_are_listed_first_and_its_reader_leaves_them_out(
+        space, tmp_path, monkeypatch):
+    _table(space)
+    eng = _eng(space)
+    marks.tail_start(eng, DB, True, tmp_path / "tail.token", lambda m: None)
+    assert eng._mark_rung == "batch"
+    eng._origin(DB, [111, 222, 111])
+    assert {111, 222} <= eng.mark_stamps("dst", DB)
+    # the reader of the way back reads the side the stamps are listed on
+    monkeypatch.setattr(eng, "mark_stamps",
+                        lambda side, db: eng.__class__.mark_stamps(
+                            eng, "dst", db))
+    monkeypatch.setattr(eng, "_micros", lambda t: t)
+    rows = [{"cdc$time": 111, "cdc$operation": 1},
+            {"cdc$time": 333, "cdc$operation": 1}]
+    kept = eng._carried(DB, "items", rows)
+    assert [r["cdc$time"] for r in kept] == [333]

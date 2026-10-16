@@ -1,3 +1,4 @@
+import contextlib
 import json
 import re
 import threading
@@ -1754,7 +1755,11 @@ class MongoEngine(Engine):
         return [{"$match": {"$or": [
             {"ns.coll": {"$regex": rx}},
             {"to.coll": {"$regex": rx}},
-            {"ns.coll": {"$exists": False}}]}}]
+            {"ns.coll": {"$exists": False}}]
+            # the origin collection's own writes, which name the
+            # transactions migkit made (`mark_own`)
+            + ([{"ns.coll": self.MARK_COLLECTION}]
+               if (self.hop.options or {}).get("two_way") else [])}}]
 
     def change_point(self, side, db):
         """A resume token for now, read without taking any event off the
@@ -4398,7 +4403,11 @@ class MongoEngine(Engine):
                                  " applied. Move again with --mode full+cdc")
             return at
 
+        from .. import marks
+        marks.tail_start(self, db, go, token_path, log)
+
         def look(token):
+            marks.tail_round(self, db, token_path, log)
             at = where(token)
             if s["gave"] is None or at != s["gave"]:
                 # read from the saved position: what was held is read again
@@ -4417,20 +4426,25 @@ class MongoEngine(Engine):
                                           s["read"][1]),
                 limit=self.TAIL_BATCH, stored=True)]
             went, safe = 0, at
-            for entry in entries:
-                for ev in oplog_events(entry, db, s["txns"]):
-                    coll = ev["ns"].get("coll")
-                    if coll and not self.in_scope(db, coll):
-                        continue
-                    op = ev["operationType"]
-                    if op not in self.STREAM_OPS:
-                        raise self._not_a_row_change(op, ev)
-                    if ev.pop("lookup", False):
-                        ev["fullDocument"] = src[coll].find_one(
-                            ev["documentKey"])
-                    went += self._tail_event(db, dst, ev, True)
-                if not s["txns"]:
-                    safe = entry["ts"]
+            unit = self._tail_unit(dst)
+            with (unit or contextlib.nullcontext()):
+                for entry in entries:
+                    for ev in oplog_events(entry, db, s["txns"]):
+                        coll = ev["ns"].get("coll")
+                        if (unit is not None or (self.hop.options or {}).get(
+                                "two_way")) and self.mark_own(ev):
+                            continue
+                        if coll and not self.in_scope(db, coll):
+                            continue
+                        op = ev["operationType"]
+                        if op not in self.STREAM_OPS:
+                            raise self._not_a_row_change(op, ev)
+                        if ev.pop("lookup", False):
+                            ev["fullDocument"] = src[coll].find_one(
+                                ev["documentKey"])
+                        went += self._tail_event(db, dst, ev, True, unit)
+                    if not s["txns"]:
+                        safe = entry["ts"]
             if entries:
                 s["read"] = (entries[-1]["ts"], False)
                 kept.saw("oplog entries", len(entries),
@@ -4939,6 +4953,14 @@ class MongoEngine(Engine):
 
     MARK_COLLECTION = "migkit_origin"
 
+    def _tail_unit(self, dst):
+        """The unit one round of a tail writes its changes in, marked by
+        the rung the tail stands on (`_MarkedUnit`); None where the tail
+        writes bare. The caller ends it: `commit()`, or `abort()` where
+        the round failed."""
+        rung = self.__dict__.get("_mark_rung")
+        return _MarkedUnit(self, dst, rung) if rung else None
+
     def mark_facts(self, side, db):
         """What decides the rungs of `marks` on this side: transactions
         (a replica set or a sharded cluster) and pre-images on every
@@ -5106,7 +5128,7 @@ class MongoEngine(Engine):
             self._client(side)[there].drop_collection(self.MARK_COLLECTION)
         return steps
 
-    def _tail_event(self, db, dst, ev, go):
+    def _tail_event(self, db, dst, ev, go, unit=None):
         """One row change of the stream applied to the target, only if the
         hop carries that kind of change for the collection (`mapping.ops`,
         `Hop.carries`: a move told to keep what the source deletes does not
@@ -5131,7 +5153,9 @@ class MongoEngine(Engine):
             if "delete" not in carried:
                 return 0
             if go:
-                into.delete_one(key)
+                if unit is not None:
+                    unit.before_delete(into, key)
+                into.delete_one(key, **(unit.options() if unit else {}))
             return 1
         doc = ev.get("fullDocument")
         # an update writes the document it made; one the target lacks is
@@ -5145,10 +5169,15 @@ class MongoEngine(Engine):
             # an oplog's update, as the fields it set and unset: applied
             # to the document the target holds, as a member applies it
             if go and mods:
-                into.update_one(key, mods)
+                if unit is not None:
+                    unit.begin()
+                into.update_one(key, mods, **(unit.options() if unit else {}))
             return 1
         if go and doc is not None:
-            into.replace_one(key, doc, upsert="insert" in carried)
+            if unit is not None:
+                doc = unit.stamped(doc)
+            into.replace_one(key, doc, upsert="insert" in carried,
+                             **(unit.options() if unit else {}))
         return 1
 
     def tail_apply(self, db, go, token_path, log):
@@ -5170,7 +5199,7 @@ class MongoEngine(Engine):
 
         from bson.json_util import dumps, loads
 
-        from .. import tailctl
+        from .. import marks, tailctl
         from pymongo.errors import PyMongoError
         way = self.follow_way(db)
         if way.rung is None:
@@ -5211,6 +5240,9 @@ class MongoEngine(Engine):
         log("tailing change stream, ctrl-c to stop"
             + ("" if go else " (count-only, add --go to apply)"))
         s = SimpleNamespace(stream=None, n=0, env=env, kept=gens)
+        # how what the tail writes is marked, taken once from the target
+        # and chosen again only between two rounds
+        marks.tail_start(self, db, go, token_path, log)
 
         def close():
             if s.stream is not None:
@@ -5221,6 +5253,19 @@ class MongoEngine(Engine):
                 s.stream = None
 
         def look(at):
+            marks.tail_round(self, db, token_path, log)
+            unit = self._tail_unit(dst) if go else None
+            try:
+                got = look_in(at, unit)
+            except BaseException:
+                if unit is not None:
+                    unit.abort()
+                raise
+            if unit is not None:
+                unit.commit()
+            return got
+
+        def look_in(at, unit):
             if s.stream is None:
                 kwargs = {"full_document": "updateLookup",
                           **self._expanded_events()}
@@ -5263,6 +5308,13 @@ class MongoEngine(Engine):
                     self._new_generations(db, ev, s.kept, go, log)
                     after = ev["_id"]
                     continue
+                if (unit is not None or (self.hop.options or {}).get(
+                        "two_way")) and self.mark_own(ev):
+                    # what the way back of a two-way hop wrote here: asked
+                    # before the scope is, as the origin document of a
+                    # transaction is outside it
+                    after = ev["_id"]
+                    continue
                 if coll and (not self.in_scope(db, coll)
                              or coll in s.kept["parked"]):
                     after = ev["_id"]
@@ -5271,7 +5323,7 @@ class MongoEngine(Engine):
                     raise self._not_a_row_change(op, ev)
                 n += 1
                 try:
-                    self._tail_event(db, dst, ev, go)
+                    self._tail_event(db, dst, ev, go, unit)
                 except PyMongoError as e:
                     stop = self._write_refused(e, f"{db}.{coll}")
                     if stop is None:
@@ -5465,4 +5517,78 @@ class _TtlWindow:
                 f"{self.db}: {len(failed)} TTL indexes were not put back:"
                 f" {', '.join(failed)}. Their values are in"
                 f" {self.record.path}")
+        return False
+
+
+class _MarkedUnit:
+    """One round of a tail's writes on the target as the atomic unit
+    `MongoEngine.mark_unit` writes: under `txn_doc` one transaction whose
+    first write is a document of `migkit_origin`, begun at the round's
+    first write and committed at its end; under `field` each document is
+    written with the mark in it and a delete first sets it, so the
+    delete's pre-image carries it. A round that fails aborts, and leaves
+    neither the mark nor its writes. A `with` block commits at its end."""
+
+    def __init__(self, eng, dst, rung):
+        self.eng, self.dst, self.rung = eng, dst, rung
+        self.session = None
+        self.number = None
+
+    def _meta(self):
+        from .. import marks
+        from ..barriers import NeutralMark
+        if self.number is None:
+            self.number = marks.tail_batch(self.eng)
+        return NeutralMark.format_marker("mongodb", batch=self.number)
+
+    def begin(self):
+        if self.rung == "txn_doc" and self.session is None:
+            self.session = self.dst.client.start_session()
+            self.session.start_transaction()
+            meta = self._meta()
+            self.dst[self.eng.MARK_COLLECTION].insert_one(
+                {"_id": f"tail:{id(self.eng)}:{self.number}", **meta},
+                session=self.session)
+
+    def options(self):
+        self.begin()
+        return {"session": self.session} if self.session is not None else {}
+
+    def stamped(self, doc):
+        """`doc` as it is written: whole, with the mark in it under
+        `field`."""
+        self.begin()
+        if self.rung != "field":
+            return doc
+        return {**doc, **self._meta()}
+
+    def before_delete(self, into, key):
+        self.begin()
+        if self.rung == "field":
+            into.update_one(key, {"$set": self._meta()})
+
+    def commit(self):
+        if self.session is not None:
+            self.session.commit_transaction()
+            self.session.end_session()
+            self.session = None
+        self.number = None
+
+    def abort(self):
+        if self.session is not None:
+            try:
+                self.session.abort_transaction()
+            finally:
+                self.session.end_session()
+                self.session = None
+        self.number = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, value, tb):
+        if kind is None:
+            self.commit()
+        else:
+            self.abort()
         return False

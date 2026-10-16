@@ -16,7 +16,7 @@ from migkit.config import Endpoint, Hop
 from tests import servers
 from tests.conftest import needs_docker
 
-# `cutover.two-way` on mongodb is proved here once the depth probe (capabilities.py) reads `mark_unit` as the way
+PROVES = [("cutover.two-way", ("mongodb",))]
 
 pytestmark = needs_docker
 
@@ -134,3 +134,74 @@ def test_doctor_names_the_rung_and_teardown_removes_the_origin(
     marks.teardown(eng, "dst", DB)
     assert "migkit_origin" not in there.list_collection_names()
     assert "_mark_rung" not in eng.__dict__
+
+def test_the_rung_is_taken_once_per_tail_and_again_at_a_boundary(
+        tmp_path, monkeypatch):
+    """No server: the tail takes its rung from the side's facts once
+    (`marks.tail_start`), keeps it while the facts hold, and takes it again
+    through the same probe and decision at a boundary where they changed."""
+    hop = Hop(name="w16f", engine="mongodb", databases=[DB],
+              source=Endpoint(host="127.0.0.1", port=1),
+              target=Endpoint(host="127.0.0.1", port=1),
+              options={"two_way": True})
+    eng = engines.get_engine(hop)
+    facts = [{"family": "mongodb", "version": (7, 0), "transactions": True, "pre_images": False, "can_create": True}]
+    monkeypatch.setattr(eng, "mark_facts", lambda side, db: dict(facts[0]))
+    monkeypatch.setattr(eng, "mark_prove", lambda *a: None)
+    monkeypatch.setattr(eng, "mark_timed",
+                        lambda side, db, rung, rounds: [1e-5] * rounds)
+    said, token = [], tmp_path / "tail.token"
+    first = marks.tail_start(eng, DB, True, token, said.append)
+    assert first == 'txn_doc' and eng._mark_rung == first
+    assert any("carry" in m for m in said)
+    said.clear()
+    assert marks.tail_round(eng, DB, token, said.append) == first
+    assert not said                      # the facts held: nothing chosen
+    facts[0] = {"family": "mongodb", "version": (7, 0), "transactions": False, "pre_images": True, "can_create": True}
+    again = marks.tail_round(eng, DB, token, said.append)
+    assert any("choosing the mark again" in m for m in said)
+    assert again == 'field' == eng._mark_rung
+    assert marks.kept_rung(token) == again
+    assert marks.tail_start(eng, DB, False, token, said.append) is None
+
+
+def test_the_tails_round_is_one_transaction_with_the_origin_document_first(
+        space, tmp_path):
+    from bson.raw_bson import RawBSONDocument
+    import bson
+    eng = _eng(space)
+    marks.tail_start(eng, DB, True, tmp_path / "tail.token", lambda m: None)
+    assert eng._mark_rung == "txn_doc"
+    dst = eng._client("dst")[eng._d("dst", DB)]
+    dst["w16f"].delete_many({})
+    dst[eng.MARK_COLLECTION].delete_many({})
+    docs = [RawBSONDocument(bson.encode({"_id": i, "v": i})) for i in range(3)]
+    evs = [{"operationType": "insert", "ns": {"coll": "w16f"},
+            "documentKey": {"_id": i}, "fullDocument": d}
+           for i, d in enumerate(docs)]
+    with dst["w16f"].watch([], **eng._expanded_events()) as stream:
+        with eng._tail_unit(dst) as unit:
+            for ev in evs:
+                assert eng._tail_event(DB, dst, ev, True, unit) == 1
+        app = dst["w16f"].insert_one({"_id": 99})
+        got = _drain(stream)
+    assert dst["w16f"].count_documents({}) == 4
+    assert dst[eng.MARK_COLLECTION].count_documents({}) == 1
+    # read in the stream's order, as the tail reads it: the origin
+    # document is asked first and names the transaction
+    seen = [(e["ns"]["coll"], eng.mark_own(e)) for e in got
+            if e["operationType"] == "insert"]
+    assert [own for coll, own in seen if coll == "w16f"] == [
+        True, True, True, False]
+    assert seen[0] == (eng.MARK_COLLECTION, True)
+    # a round that fails leaves neither the mark nor its writes
+    dst["w16f"].delete_many({})
+    dst[eng.MARK_COLLECTION].delete_many({})
+    try:
+        with eng._tail_unit(dst) as unit:
+            eng._tail_event(DB, dst, evs[0], True, unit)
+            raise RuntimeError("stop")
+    except RuntimeError:
+        pass
+    assert dst["w16f"].count_documents({}) == 0
+    assert dst[eng.MARK_COLLECTION].count_documents({}) == 0

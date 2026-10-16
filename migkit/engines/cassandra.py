@@ -2461,6 +2461,15 @@ class CassandraEngine(NeutralCopier, Engine):
         row, for a hop that says nothing of its operations."""
         from ..config import OPS
         carried = self.hop.carries(db, *self.hop.parts_of(table))
+        if self.__dict__.get("_mark_rung"):
+            # what the way back of a two-way hop wrote here: the log rows
+            # at a write time `migkit_origin` lists are not carried back
+            try:
+                stamps = self.mark_stamps("src", db)
+            except Exception:  # noqa: BLE001 - no origin table: none yet
+                stamps = frozenset()
+            rows = [r for r in rows
+                    if not self.mark_own(stamps, self._micros(r["cdc$time"]))]
         if carried >= frozenset(OPS):
             return rows
         return [r for r in rows if self._operation(r) in carried]
@@ -2491,6 +2500,7 @@ class CassandraEngine(NeutralCopier, Engine):
             if text not in prepared:
                 prepared[text] = dst.prepare(text)
             batch.append((prepared[text], args))
+        self._origin(db, [a[0] for _, a in deletes])
         self._sent(execute_concurrent(dst, batch, concurrency=64), table)
         key, select, writes = self._row_writer(db, table)
         src = self._session("src")
@@ -2505,8 +2515,36 @@ class CassandraEngine(NeutralCopier, Engine):
                 raise got
             for row in got:
                 batch += writes(row, touched[full])
+        import re
+        self._origin(db, [int(w) for stmt, _ in batch for w in re.findall(
+            r"timestamp (\d+)", stmt.query_string, re.I)] + list(
+            touched.values()))
         self._sent(execute_concurrent(dst, batch, concurrency=64), table)
         return len(rows)
+
+    def _origin(self, db, stamps):
+        """The write times a round is about to write cells at, listed in
+        `migkit_origin` on the target before any cell is: one logged batch
+        of rows, so the reader of the way back finds a cell it did not
+        write beside no stamp, and a stamp whose cells never landed is
+        harmless. Nothing where the tail writes bare. A cell the
+        application writes at the very microsecond of one listed is taken
+        for migkit's own: the limit of attributing by write time."""
+        if not self.__dict__.get("_mark_rung") or not stamps:
+            return
+        from cassandra.query import BatchStatement, BatchType, SimpleStatement
+        from .. import marks
+        self._mark_tables("dst", db)
+        ks = self._q(self._ks("dst", db))
+        number = marks.tail_batch(self)
+        unit = BatchStatement(batch_type=BatchType.LOGGED)
+        for stamp in sorted({int(x) for x in stamps}):
+            unit.add(SimpleStatement(
+                f"INSERT INTO {ks}.{self.MARK_TABLE} (origin, \"batch\", seq,"
+                " tail_token, run_id, written_at) VALUES (%s, %s, %s, %s, %s,"
+                " toTimestamp(now()))"),
+                ("migkit", stamp, number, "", "tail"))
+        self._session("dst").execute(unit)
 
     def _look(self, db, token):
         """(position after, log rows carried): every table's log from the
@@ -2676,9 +2714,13 @@ class CassandraEngine(NeutralCopier, Engine):
         to the source's clock less the confidence window, and carries it
         (`_follow_table`). A Cassandra source, a table with its log off, or
         a keyspace of tablets is refused with the reason (`_logged`)."""
-        from .. import tailctl
+        from .. import marks, tailctl
+        # how what the tail writes is marked, taken once from the target
+        # and chosen again only between two looks
+        marks.tail_start(self, db, go, token_path, log)
 
         def look(token):
+            marks.tail_round(self, db, token_path, log)
             after, went = self._look(db, token)
             return after, went, True
 

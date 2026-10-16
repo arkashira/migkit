@@ -255,7 +255,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/engines/provedsql.py` - A digest worked out by a server that speaks PostgreSQL's or MySQL's SQL without being either - GaussDB, OceanBase, PolarDB-X, TDSQL - truste Classes: ProvedDigest.
 - `migkit/engines/pubsub.py` - Google Cloud Pub/Sub as the destination of a change stream (backlog 33). Classes: PubSubEngine.
 - `migkit/engines/qdrant.py` - Qdrant as a side of a pair (backlog R16b), through its HTTP API. Classes: QdrantEngine.
-- `migkit/engines/redis.py` - (no docstring) Classes: RedisEngine, LiveRefused, ReplicaStream, KeyspaceStates, RdbUnread, RdbReader.
+- `migkit/engines/redis.py` - (no docstring) Classes: RedisEngine, LiveRefused, ReplicaStream, KeyspaceStates, OwnGroups, RdbUnread.
 - `migkit/engines/saas.py` - SaaS applications as sources, read by programs (backlog ER7): one adapter for every kind of connector, feeding migkit's own writers and its  Classes: Stream, Program, Singer, Airbyte, Dlt, Seen.
 - `migkit/engines/saas_salesforce.py` - Salesforce as a program source (backlog ER7): objects read through its REST API, and followed through its own change events. Classes: Salesforce.
 - `migkit/engines/sapodp.py` - SAP application data through ODP over OData (backlog ER6): the extractors and CDS views an SAP system (ECC, S/4HANA, BW) publishes for extra Classes: Refused, SapOdpEngine.
