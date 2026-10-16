@@ -859,6 +859,12 @@ def pull_move(hop, db, workers, go, log):
             local = fp.import_tables(sch, tbls, fetch)
             for t in tbls:
                 work += _table_work(hop, eng, db, sch, t, local, known)
+        plan = schedule(hop, db, known, carried, workers)
+        if plan is not None:
+            work = in_schedule(work, plan)
+            if log:
+                for line in plan.lines():
+                    log(line)
         t = trials(hop, db, lf, log)
         with movers._IndexWindow(hop, db, workers, log):
             _run_ranges(hop, db, work, workers, quiet, log, t, lf)
@@ -1330,16 +1336,108 @@ def relay_compression(hop, sample, rows, codec=None, clock=None,
         [wide], sample, codec, **({"clock": clock} if clock else {}))
 
 
-def plan_line(hop, via, db=None):
-    """The plan's line about where migkit stands, from the round trips it
-    measures now, or ""."""
-    ms = round_trips(hop, db)
-    relay = False
+#: rows of the largest table read as the relay's sample: enough for the
+#: levels to show their ratio, little enough for a plan to read
+SAMPLE_ROWS = 2000
+
+
+def _relay_sample(hop, db=None):
+    """(bytes, rows) of a batch of the source's largest table as text, as
+    the rows travel; (b"", 0) where none could be read."""
+    db = db or _first_db(hop)
+    try:
+        conn = _connect(hop.source, db)
+    except Exception:  # noqa: BLE001 - nothing read, nothing chosen
+        return b"", 0
+    try:
+        name = _one(conn, "select quote_ident(n.nspname) || '.' ||"
+                          " quote_ident(c.relname) from pg_class c join"
+                          " pg_namespace n on n.oid = c.relnamespace where"
+                          " c.relkind = 'r' and n.nspname not in"
+                          " ('pg_catalog', 'information_schema') order by"
+                          " c.relpages desc limit 1")
+        if not name:
+            return b"", 0
+        with conn.cursor() as cur:
+            cur.execute(f"select t::text from {name} t limit %s",
+                        (SAMPLE_ROWS,))
+            rows = [r[0] for r in cur.fetchall()]
+        return "\n".join(rows).encode(), len(rows)
+    except Exception:  # noqa: BLE001
+        return b"", 0
+    finally:
+        conn.close()
+
+
+def _relayed(hop):
     try:
         from . import tunnel
         t = tunnel.of(hop.source)
-        relay = bool(t and t.has("psql", "zstd"))
+        return bool(t and t.has("psql", "zstd"))
     except Exception:  # noqa: BLE001
-        relay = False
-    return placement(ms.get("src"), ms.get("dst"), servers_seen(hop),
-                     direct(via), relay, allowed(hop))
+        return False
+
+
+def relay_choice(hop, db=None, sample=None, rows=None):
+    """The wide leg's `movers.Compressing` where the source is read through
+    a relay, from a sample of its rows (read here where none is given)
+    against the link this hop measured (`relay_compression`), the
+    decision kept in the run's record; None where there is no relay, no
+    sample or no measured link. What the plan says and the copy through
+    the relay takes (`physical.compression`)."""
+    if not _relayed(hop):
+        return None
+    if sample is None:
+        sample, rows = _relay_sample(hop, db)
+    got = relay_compression(hop, sample, rows)
+    chosen = next(iter(got.values()), None)
+    if chosen is not None:
+        from . import decide
+        decide.record(hop, chosen.choice)
+    return chosen
+
+
+def plan_line(hop, via, db=None, sample=None, rows=None):
+    """The plan's line about where migkit stands, from the round trips it
+    measures now, and where the source is read through a relay, how the
+    wide leg compresses (`relay_choice`), or ""."""
+    ms = round_trips(hop, db)
+    relay = _relayed(hop)
+    out = placement(ms.get("src"), ms.get("dst"), servers_seen(hop),
+                    direct(via), relay, allowed(hop))
+    chosen = relay_choice(hop, db, sample, rows) if relay else None
+    if chosen is not None:
+        out = "; ".join(x for x in (out, chosen.line()) if x)
+    return out
+
+
+# --- the leg's schedule ------------------------------------------------------
+
+def schedule(hop, db, known, tables, workers, model=None):
+    """`planner.Overlap` of the leg's tables from the rates this hop's move
+    measured (`model`, else the one kept beside its report): each table
+    sent at its share of the measured rate, its check read at the
+    source's rate beside the next table's send. None where nothing was
+    measured, and the plan's order stands."""
+    from . import planner
+    from .guarantees import Semantics
+    if model is None:
+        from . import model as resource_model
+        try:
+            model = resource_model.load(hop.report_dir(db))
+        except Exception:  # noqa: BLE001 - unmeasured: no schedule
+            model = None
+    facts = {t: known.get(t) or {} for t in tables}
+    sem = {t: Semantics(table=t) for t in tables}
+    return planner.scheduled(model, facts, sem, n=max(1, int(workers or 1)))
+
+
+def in_schedule(work, plan):
+    """`work` ([(label, statement)]) in the order `plan` starts each
+    table's send, a table's ranges together; as given where there is no
+    plan. Only the order changes: every range is still run."""
+    if plan is None:
+        return list(work)
+    start = {t: s for t, s, _ in plan.copies}
+    last = max(start.values(), default=0.0) + 1.0
+    return sorted(work, key=lambda w: (start.get(w[0], last), w[0]))

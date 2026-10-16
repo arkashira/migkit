@@ -1147,14 +1147,20 @@ def _storage_read(f):
     return f.get("source") is not None and f.get("target") is not None
 
 
+#: the storage whose pages or parts the physical copy carries as they are:
+#: a PostgreSQL heap, an InnoDB table (the clone copies InnoDB's own
+#: files; any other engine's table it leaves empty), a plain MergeTree
+PLAIN_STORAGE = ("heap", "innodb", "mergetree")
+
+
 def _plain_heap(tables):
-    return all(m in ("heap", "mergetree") for m in (tables or {}).values())
+    return all(m in PLAIN_STORAGE for m in (tables or {}).values())
 
 
 def storage_copy_case(facts):
     """The way a database is copied, decided from its tables' storage: the
     physical way (pages, parts) only where every table of both sides is a
-    plain heap or MergeTree - an extension's columnar access method, a
+    plain heap, InnoDB table or MergeTree (`PLAIN_STORAGE`) - an extension's columnar access method, a
     table engine that merges rows or one that holds none of its own
     (memory, remote, null) is not a page of the same shape, so the rows are
     read and written (the logical way), and each table that is not plain
@@ -1165,13 +1171,13 @@ def storage_copy_case(facts):
         needs=(decide.Need("storage read on both sides", _storage_read,
                            lambda f: f.get("not_read")
                            or "the storage was not read"),
-               decide.Need("every table a plain heap or MergeTree",
+               decide.Need("every table a plain heap, InnoDB or MergeTree",
                            lambda f: _plain_heap(f.get("source"))
                            and _plain_heap(f.get("target")),
                            lambda f: "tables stored otherwise: " + ", ".join(
                                sorted(t for side in ("source", "target")
                                       for t, m in (f.get(side) or {}).items()
-                                      if m not in ("heap", "mergetree"))[:5]))),
+                                      if m not in PLAIN_STORAGE)[:5]))),
         because="every table is stored the plain way on both sides")
     logical = decide.Rung(
         "logical", "rows read and written", frozenset({"copy"}),
@@ -1180,7 +1186,7 @@ def storage_copy_case(facts):
                           need=("copy",))
     odd = sorted({t: m for side in ("source", "target")
                   for t, m in (facts.get(side) or {}).items()
-                  if m not in ("heap", "mergetree")}.items())
+                  if m not in PLAIN_STORAGE}.items())
     return ScenarioDecision("copy way by storage", choice, tuple(
         f"{t}: stored as {m}, not copied as pages" for t, m in odd[:5]))
 
@@ -1189,7 +1195,9 @@ def storage_copy_way(hop, eng, db):
     """(the copy way the tables' storage allows, the decision) for a
     database - "physical" or "logical" - recorded in the run's record; None
     where the storage cannot be read of either side. The one answer the
-    move's copy-way choice asks before it offers pages or parts."""
+    move's copy-way choice asks before it offers pages or parts
+    (`physical.storage_held`, from `physical.choose` and `physical.carry`),
+    so the plan's line is the way that runs."""
     try:
         facts = storage_copy_facts(eng, db)
     except Exception:  # noqa: BLE001 - unread storage keeps the logical way

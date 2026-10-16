@@ -1044,16 +1044,21 @@ def costs(hop):
     return out
 
 
-def choose(hop, eng, mode):
+def choose(hop, eng, mode, db=None):
     """(the rung that carries this move, why) - or (None, every reason the
     rungs gave). (None, "") where the hop allows no physical seed.
+
+    The tables' storage is asked first (`scenarios.storage_copy_way`, for
+    `db` or else every database the engine lists), the same answer the
+    plan says and the run's `carry` takes: a table not stored as plain
+    pages holds the copy to the rows.
 
     `decide.climb` over this engine's rungs for what the hop asks (the
     local copy, or the cloud it names), with the logical copy as a rung
     where the hop measured one: a rung never measured is tried before one
     that was, so each gets its number once; after that the cheaper a row
     ranks first."""
-    got = _candidates(hop, mode)
+    got = _candidates(hop, mode, eng, [db] if db else None)
     if isinstance(got, str):
         return None, got
     candidates, cost = got
@@ -1065,9 +1070,10 @@ def choose(hop, eng, mode):
     return got.rung, got.reason
 
 
-def _candidates(hop, mode):
+def _candidates(hop, mode, eng=None, dbs=None):
     """(the rungs the seed climbs, their costs on this hop), or the reason
-    there are none - "" where the hop allows no physical seed."""
+    there are none - "" where the hop allows no physical seed, the
+    storage's own decision where a table of `dbs` is not plain pages."""
     if not settings(hop) or mode not in ("full", "full+cdc"):
         return ""
     engine = _engine_of(hop)
@@ -1077,10 +1083,34 @@ def _candidates(hop, mode):
         return ("a physical seed" + (f" through {want}" if want else "")
                 + f" is not built for {hop.engine}; the logical copy"
                   " carries it")
+    if eng is not None:
+        held = storage_held(hop, eng, dbs)
+        if held:
+            return held
     cost = costs(hop)
     if LOGICAL.name in cost:
         candidates.append(LOGICAL)
     return candidates, cost
+
+
+def storage_held(hop, eng, dbs=None):
+    """The storage's decision of the copy way (`scenarios.storage_copy_way`,
+    the plan's own line) where it holds a database of `dbs` - every one
+    the engine lists where None - to the rows, in its words; "" where
+    every database read may be copied as pages, or its storage was not
+    read (the physical rungs' own needs then decide)."""
+    from . import scenarios
+    if dbs is None:
+        try:
+            dbs = list(eng.databases())
+        except Exception:  # noqa: BLE001 - unlisted: nothing asked
+            dbs = []
+    said = []
+    for d in dbs:
+        got = scenarios.storage_copy_way(hop, eng, d)
+        if got is not None and got[0] != "physical":
+            said.append(f"{d}: {got[1].words()}")
+    return "; ".join(said)
 
 
 def _why_not(hop, passed, chosen=None, ranked=()):
@@ -1355,11 +1385,20 @@ ZSTD = decide.Rung(
 NEAR = 0.002
 
 
-def compression(hop, version, rtt=None):
+def compression(hop, version, rtt=None, chosen=None):
     """(the rung the pages travel by, why): each way tried once on this
     hop, then the one measured faster (`decide.HopCosts`, kept beside the
-    hop's rates under `physical-pages `). Untried, a near source sends them
-    as they are and a far one compresses them."""
+    hop's rates under `physical-pages `). Untried, the wide leg's choice
+    measured from a sample against the link (`chosen`, a
+    `movers.Compressing` from `legs.relay_compression`) orders them; with
+    none, a near source sends them as they are and a far one compresses
+    them."""
+    if chosen is not None:
+        ways = (PLAIN, ZSTD) if chosen.level is None else (ZSTD, PLAIN)
+        got = decide.climb("the pages", ways, {"version": version},
+                           costs=decide.HopCosts(hop, "physical-pages "))
+        return got.rung, (got.reason + "; " + chosen.line()
+                          if got.rung is ways[0] else got.reason)
     if rtt is None:
         from .tunnel import _round_trip
         rtt = _round_trip(hop.source.host, hop.source.port)
@@ -1369,7 +1408,14 @@ def compression(hop, version, rtt=None):
     return got.rung, got.reason
 
 
-def _pg_script(hop, opts, compressed):
+def zstd_level(chosen):
+    """The level the source compresses its pages at: the wide leg's
+    measured choice where it compresses, else the fastest (1)."""
+    level = getattr(chosen, "level", None)
+    return min(22, max(1, int(level))) if isinstance(level, int) else 1
+
+
+def _pg_script(hop, opts, compressed, level=1):
     """The shell command line that empties the target's data directory,
     copies the source's pages into it and proves the copy.
 
@@ -1381,7 +1427,8 @@ def _pg_script(hop, opts, compressed):
     needs is parsed through (`pg_verifybackup`)."""
     host, port = _source_address(hop, opts)
     q = shlex.quote
-    comp = " --compress=server-zstd:level=1" if compressed else ""
+    comp = (f" --compress=server-zstd:level={int(level)}" if compressed
+            else "")
     return (
         "IFS= read -r PGPASSWORD; export PGPASSWORD;" + _far_tls(hop)
         + f" D={q(str(opts['data']))};"
@@ -1402,7 +1449,9 @@ def _pg_copy(hop, eng, opts, version, log):
     """Stop the target, copy the source's pages into its data directory,
     prove them, start it. {"start", "end", "kb", "way"} the copy reported;
     the way the pages travelled is timed and kept for the next choice."""
-    way, why = compression(hop, version)
+    from . import legs
+    chosen = legs.relay_choice(hop)
+    way, why = compression(hop, version, chosen=chosen)
     _local(opts["stop"], "stop")
     log("the target's server stopped; copying the source's pages into its"
         f" data directory, {way.said} ({why})")
@@ -1412,7 +1461,8 @@ def _pg_copy(hop, eng, opts, version, log):
     # directory under it would take two copies into one
     from . import runner
     got = _on_target(opts, runner.locked_script(
-        _pg_script(hop, opts, way is ZSTD), f"{opts['data']}.migkit-lock"),
+        _pg_script(hop, opts, way is ZSTD, zstd_level(chosen)),
+        f"{opts['data']}.migkit-lock"),
         hop.source.password)
     if got.returncode != 0 or "verified" not in got.stdout:
         raise SystemExit(
@@ -2032,7 +2082,7 @@ def carry(hop, eng, db, mode, go, log, ask=None):
     from by itself (`decide.attempt`), down to the logical copy, and said -
     what not taking the faster way means, its time and its load on the
     source, where a change on the source is what held it back."""
-    got = _candidates(hop, mode)
+    got = _candidates(hop, mode, eng, [db] if db else None)
     if isinstance(got, str):
         if got:
             log(f"the physical copy is not taken: {got}")
