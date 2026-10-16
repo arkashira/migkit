@@ -35,7 +35,7 @@ UNPROVED_ON = "built; not run on a real Amazon Keyspaces table"
 #: the ways built here and run against no such server: the whole
 #: list, the matrix reads it from this source (`capabilities`)
 UNPROVED_ITEMS = (
-    "assess.brands assess.capacity assess.engine-checks assess.preflight "
+    "operations.fencing assess.brands assess.capacity assess.engine-checks assess.preflight "
     "assess.versions cutover.drain cutover.rollback cutover.two-way "
     "move.bulk move.create-missing move.load-window move.sized "
     "schema.indexes scope.copy scope.deep scope.listings scope.names "

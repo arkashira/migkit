@@ -18,7 +18,7 @@ None.
 | conversion | 6 | 58 | 39425 | a value or an object as another engine takes it: canonical text, transforms, types, stored code |
 | reporting | 7 | 10 | 7437 | what the operator reads: the verdict, the result shape, the log, the metrics, the notices |
 | decision | 8 | 31 | 31754 | choosing: the rungs, the cost model, the joint plan, what each engine can do |
-| engines | 9 | 78 | 124903 | the contract every engine fills and each engine's own adapter |
+| engines | 9 | 78 | 124905 | the contract every engine fills and each engine's own adapter |
 | integrations | 9 | 22 | 23102 | the programs, libraries and provider APIs migkit wraps, and the other tools it meets |
 | workflows | 10 | 36 | 48256 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
 | cli | 11 | 4 | 10085 | the command line and the guide that asks for two addresses |
@@ -248,7 +248,7 @@ None.
 | `migkit/engines/firestore.py` | - | 1368 | 1: tooluse | conversion 10, decision 4, engines 18, integrations 2, workflows 4 | google-cloud-datastore, google-cloud-firestore | 3: firestore_as_a_side_of_a_pair, the_cloud_native_services_as_sides, the_cloud_native_services_own_bulk_paths |
 | `migkit/engines/gaussdb.py` | - | 770 | 0 | conversion 1, decision 7, engines 6 | - | 4: gaussdb_as_a_side_of_a_pair, the_cloud_native_services_as_sides, the_cloud_native_services_own_bulk_paths (+1) |
 | `migkit/engines/gcp.py` | - | 53 | 3: engines.bigtable, engines.firestore, engines.spanner | integrations 1 | - | 2: bigtable_as_a_side_of_a_pair, firestore_as_a_side_of_a_pair |
-| `migkit/engines/geminidb.py` | - | 206 | 0 | engines 5 | - | 2: geminidb_on_its_apis_stand_ins, the_cloud_native_services_as_sides |
+| `migkit/engines/geminidb.py` | - | 208 | 0 | engines 5 | - | 2: geminidb_on_its_apis_stand_ins, the_cloud_native_services_as_sides |
 | `migkit/engines/generic.py` | - | 2662 | 2: engines, leaves | conversion 3, decision 15, engines 5, execution 5, persistence 2, workflows 7 | reladiff | 19: a_repair_never_writes_what_the_hop_leaves_out, every_check_runs, every_engine_declares_its_gaps (+16) |
 | `migkit/engines/hetero.py` | - | 6121 | 15: archive, capabilities, charsets, cli, consolidate (+10) | configuration 1, conversion 39, decision 11, engines 10, execution 16, persistence 14, reporting 3, safety 2, scope 2, workflows 36 | - | 168: a_batch_the_target_committed_is_never_applied_twice, a_bigquery_pair_follows_the_hops_mapping, a_clone_goes_on_exactly_mysql (+165) |
 | `migkit/engines/hooks.py` | - | 121 | 40: changetopic, drainmark, drift, engines.ase, engines.bigtable (+35) | - | - | 1: an_engine_asks_its_workflow_through_a_hook |

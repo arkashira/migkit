@@ -70,7 +70,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 ## Depth by engine
 
-88 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: built, unproved 1084, n/a 1436, not yet 1405, test owed 300, untested 4, yes 963. A cell below is the ways proved of the items that apply.
+88 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: built, unproved 1088, n/a 1436, not yet 1405, test owed 300, yes 963. A cell below is the ways proved of the items that apply.
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -149,11 +149,11 @@ Built, unproved - a way the code has on an engine no sandbox here can run; the e
 - dcdb: built; not run on a real PolarDB-X or TDSQL instance (54 cells)
 - dsql: built; not run on a real Aurora DSQL cluster, only on a PostgreSQL server and on fakes: the statistics refreshed, the snapshot's mark and large values read in pieces (19 cells)
 - gaussdb: built; not run on a real GaussDB instance (34 cells)
-- geminidb-cassandra: built; not run on a real GeminiDB instance (45 cells)
-- geminidb-mongo: built; not run on a real GeminiDB instance (56 cells)
-- geminidb-redis: built; not run on a real GeminiDB instance (29 cells)
+- geminidb-cassandra: built; not run on a real GeminiDB instance (46 cells)
+- geminidb-mongo: built; not run on a real GeminiDB instance (57 cells)
+- geminidb-redis: built; not run on a real GeminiDB instance (30 cells)
 - kafka: built; not run on a real broker that takes transactional producers (6 cells)
-- keyspaces: built; not run on a real Amazon Keyspaces table (44 cells)
+- keyspaces: built; not run on a real Amazon Keyspaces table (45 cells)
 - lindorm: built; not run on a real Lindorm instance (14 cells)
 - mssql: built; not run on a real SQL Server, only on its edge edition in the sandbox (stopped Agent, CLR off, a thinner catalogue); a cell whose lane test is not written yet is owed that test (27 cells)
 - oceanbase: built; not run on a real OceanBase tenant (62 cells)
@@ -268,7 +268,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | cutover.jobs | mysql postgres | clickhouse oracle | mssql | analyticdb-mysql analyticdb-postgres ase bigquery cockroachdb couchbase db2 db2i db2zos dcdb gaussdb generic lindorm oceanbase oceanbase-oracle opensearch polardbx redshift singlestore snowflake synapse teradata timestream yugabytedb | the rest (30) |
 | security.tls | the rest (44) | oracle | analyticdb-mysql analyticdb-postgres singlestore yugabytedb | ase db2 db2zos generic mssql neo4j qdrant saas synapse | hetero |
 | managed.catalogued | the rest (36) | - | - | analyticdb-mysql analyticdb-postgres ase couchbase db2i db2zos delta duckdb generic iceberg neo4j parquet qdrant saas sapodp singlestore snowflake sqlite synapse tidb yugabytedb | copybook hetero |
-| operations.fencing | cassandra clickhouse mongodb mysql oracle postgres redis | - | analyticdb-mysql analyticdb-postgres cockroachdb dcdb dsql gaussdb kafka oceanbase polardbx singlestore tidb yugabytedb | the rest (33) | hetero saas sapodp |
+| operations.fencing | cassandra clickhouse mongodb mysql oracle postgres redis | - | analyticdb-mysql analyticdb-postgres cockroachdb dcdb dsql gaussdb geminidb-cassandra geminidb-mongo geminidb-redis kafka keyspaces oceanbase polardbx singlestore tidb yugabytedb | the rest (33) | hetero saas sapodp |
 
 ## Source layout
 
