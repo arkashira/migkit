@@ -260,6 +260,9 @@ VARS = {
                                   "text", "groups"),
     "MIGKIT_WEB_SAML_NAME": Var("the attribute naming the person, where"
                                 " not the name identifier", "text"),
+    "MIGKIT_WEB_SAML_ENCRYPTED": Var("demand an encrypted assertion from the"
+                                     " SAML identity provider: a plain one"
+                                     " is refused", "flag", False),
     "MIGKIT_WEB_SCIM_TOKEN": Var("the bearer token the provider provisions"
                                  " people and groups with; set, only people"
                                  " it provisioned sign in", "secret"),

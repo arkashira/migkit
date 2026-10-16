@@ -122,9 +122,22 @@ MIGKIT_WEB_SAML_GROUPS=groups        # the attribute groups are in
 MIGKIT_WEB_SAML_NAME=email           # where the name identifier is not the e-mail
 ```
 
-The provider signs the response or the assertion (SHA-256 or stronger)
-and leaves the assertion unencrypted - TLS carries it; an encrypted one is
-refused, said. Only an answer to a request the view made is taken
+The provider signs the response or the assertion (SHA-256 or stronger).
+The view keeps a key and certificate of its own in its state directory
+(`saml-sp.key`, 0600, and `saml-sp.crt`) and publishes the certificate in
+its metadata: an assertion encrypted to it (RSA-OAEP key transport, AES-GCM
+or AES-CBC content; never RSA 1.5) is opened, and with
+`MIGKIT_WEB_SAML_ENCRYPTED=1` an assertion that is not encrypted is
+refused. What the provider is asked for follows what its metadata
+publishes: its sign-in request is signed with that key where the metadata
+says it takes only signed ones, and a sign-out goes to its single logout
+(redirect binding, signed) so its session ends with the view's; a logout
+the provider starts is taken only signed, ends the sessions it names
+and is answered at `/auth/saml/slo`. Where the metadata offers no single
+logout, signing out ends the view's session only. Every call to a
+provider asks the egress gate first (the `provider` kind of
+`MIGKIT_EGRESS`, and `MIGKIT_EGRESS_TO`): a sign-in the gate refuses is
+said and no connection is opened. Only an answer to a request the view made is taken
 (sign-ins the provider starts on its own are not), once.
 
 ## SCIM provisioning
@@ -216,6 +229,8 @@ up with the reports; a run that checks an approval given in the view reads
 
 ## Not done
 
-* An encrypted SAML assertion, a signed authentication request, SAML
-  single logout and OpenID Connect back-channel logout: signing out ends
-  the view's session, not the provider's.
+* OpenID Connect single logout (RP-initiated and back-channel): signing
+  out of a view that signs in through OpenID Connect ends the view's
+  session, not the provider's.
+* The SAML encryption and single logout are proved against stand-in
+  providers, not a real one.

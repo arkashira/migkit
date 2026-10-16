@@ -6439,3 +6439,78 @@ def dialect_bulk(facts, costs=None):
              " resumably", footprint=1,
              because="the first way that holds")),
         f, costs=costs or None, prove=False)
+
+
+# ---- what a SAML identity provider is asked for (backlog DEC1001.gui, W2) ----
+
+def saml_asks(facts):
+    """What the view asks of one SAML identity provider, each part a climb
+    over the provider's published metadata and what the view holds - none
+    a fixed default: {"request": how the sign-in request goes, "logout":
+    how a sign-out reaches the provider, "assertion": what an answer may
+    carry}. `facts`: `key` (the view holds a key and certificate of its
+    own), `wants_signed` (the provider's metadata says it takes only signed
+    requests), `logout_to` (the address of its single logout by redirect,
+    or empty), `demanded` (the operator demands an encrypted assertion).
+    A part with no rung is a blocker, said in its `reason`, never a quiet
+    weaker way."""
+    f = dict(facts)
+    request = climb("how the sign-in request is made", (
+        Rung("signed", "the sign-in request signed with the view's own key",
+             needs=(Need("the provider takes signed requests",
+                         lambda x: bool(x.get("wants_signed")),
+                         "the provider's metadata does not ask for signed"
+                         " requests"),
+                    Need("a key of the view's own",
+                         lambda x: bool(x.get("key")),
+                         "the view holds no key to sign with")),
+             because="the provider's metadata says it takes only signed"
+                     " requests"),
+        Rung("plain", "the sign-in request unsigned",
+             needs=(Need("a provider that does not demand signed requests",
+                         lambda x: not x.get("wants_signed"),
+                         "the provider's metadata demands signed requests,"
+                         " and the view holds no key to sign them"),),
+             footprint=1,
+             because="the provider's metadata does not ask for signed"
+                     " requests")), f, prove=False)
+    logout = climb("how a sign-out reaches the identity provider", (
+        Rung("redirect", "a signed logout request by the redirect binding,"
+             " the provider's session ended with the view's",
+             needs=(Need("a single logout address in the provider's"
+                         " metadata",
+                         lambda x: bool(x.get("logout_to")),
+                         "the provider's metadata offers no single logout"
+                         " by redirect"),
+                    Need("a key of the view's own",
+                         lambda x: bool(x.get("key")),
+                         "the view holds no key to sign a logout with")),
+             because="the provider publishes a single logout and the view"
+                     " holds a key to sign the request"),
+        Rung("local", "the view's session ended; the provider's is its own",
+             footprint=1,
+             because="the provider publishes no single logout the view can"
+                     " use")), f, prove=False)
+    assertion = climb("what an answer from the identity provider may carry",
+                      (
+        Rung("encrypted", "only an encrypted assertion, opened with the"
+             " view's key",
+             needs=(Need("an encryption demanded",
+                         lambda x: bool(x.get("demanded")),
+                         "no encryption is demanded"),
+                    Need("a key of the view's own",
+                         lambda x: bool(x.get("key")),
+                         "the view holds no key to open an assertion"
+                         " with")),
+             because="the operator demands an encrypted assertion, and an"
+                     " unencrypted one is refused"),
+        Rung("either", "a signed assertion, plain or encrypted",
+             needs=(Need("no encryption demanded",
+                         lambda x: not x.get("demanded"),
+                         "an encryption is demanded and the view holds no"
+                         " key to open one"),),
+             footprint=1,
+             because="no encryption is demanded: a signed assertion stands,"
+                     " opened first where it is encrypted")), f,
+        prove=False)
+    return {"request": request, "logout": logout, "assertion": assertion}

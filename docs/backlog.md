@@ -5942,8 +5942,16 @@ the gaps nothing above covers yet, now items of their own.
   built, not run against a real account; the other providers not asked);
   the assessment's observed class for a server no hop has assessed. The
   Terraform provider and the Kubernetes operator: not in 1.0, lead
-  decision (2026-10-16). Not built: an encrypted SAML assertion, a signed
-  authentication request, single logout.
+  decision (2026-10-16). DEC1001.gui built, proved against stand-in
+  providers (`tests/test_the_views_sign_in_decrypts_signs_and_logs_out.py`):
+  an encrypted SAML assertion opened with the view's own key (and a plain
+  one refused where encryption is demanded), a signed authentication
+  request, SAML single logout both ways (the view's sign-out reaches the
+  provider, the provider's ends the sessions it names), each asked for as
+  a rung on the provider's published metadata (`decide.saml_asks`), and
+  every call to the provider through the egress gate (`provider` kind).
+  Not built: OpenID Connect single logout (RP-initiated and back-channel);
+  not run against a real provider.
 * **W3. Code conversion at enterprise breadth.** Beyond R11: PL/SQL
   packages with the emulation libraries they need (orafce and the
   like), T-SQL at depth, and the SQL embedded in application code

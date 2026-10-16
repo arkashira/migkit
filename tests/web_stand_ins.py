@@ -156,6 +156,7 @@ class Issuer:
         self.alg = "RS256"
         self.says_issuer = None   #: a discovery document naming another
         self.token_calls = 0
+        self.calls = []           #: the path of every request that reached it
         self.srv = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self.url = f"http://127.0.0.1:{self.srv.server_address[1]}"
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
@@ -230,6 +231,7 @@ class Issuer:
 
             def do_GET(self):
                 path = urlsplit(self.path).path
+                issuer.calls.append(path)
                 if path == "/.well-known/openid-configuration":
                     return self._json(200, issuer.discovery())
                 if path == "/jwks":
@@ -244,6 +246,7 @@ class Issuer:
                 size = int(self.headers.get("Content-Length") or 0)
                 form = {k: v[0] for k, v in parse_qs(
                     self.rfile.read(size).decode()).items()}
+                issuer.calls.append(urlsplit(self.path).path)
                 if urlsplit(self.path).path != "/token":
                     return self._json(404, {"error": "not_found"})
                 issuer.token_calls += 1
@@ -289,8 +292,9 @@ class SamlIdp:
 
     ENTITY = "https://idp.example.com/saml"
     SSO = "https://idp.example.com/saml/sso"
+    SLO = "https://idp.example.com/saml/slo"
 
-    def __init__(self, where):
+    def __init__(self, where, wants_signed=False, slo=False):
         from cryptography import x509
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import rsa
@@ -317,10 +321,15 @@ class SamlIdp:
             '<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:'
             f'metadata" entityID="{self.ENTITY}"><md:IDPSSODescriptor'
             ' protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:'
-            'protocol"><md:KeyDescriptor use="signing"><ds:KeyInfo'
+            f'protocol"{" WantAuthnRequestsSigned=\"true\"" if wants_signed else ""}>'
+            '<md:KeyDescriptor use="signing"><ds:KeyInfo'
             ' xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:X509Data>'
             f"<ds:X509Certificate>{der}</ds:X509Certificate></ds:X509Data>"
-            "</ds:KeyInfo></md:KeyDescriptor><md:SingleSignOnService"
+            "</ds:KeyInfo></md:KeyDescriptor>"
+            + (f'<md:SingleLogoutService Binding="urn:oasis:names:tc:SAML:2.0:'
+               f'bindings:HTTP-Redirect" Location="{self.SLO}"/>'
+               if slo else "") +
+            "<md:SingleSignOnService"
             ' Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect"'
             f' Location="{self.SSO}"/></md:IDPSSODescriptor>'
             "</md:EntityDescriptor>")
@@ -370,7 +379,9 @@ class SamlIdp:
     def answer(self, redirect_url, name="ann@example.com",
                groups=("change-board",), sp=URL, sign=True, audience=None,
                recipient=None, in_response_to=None, life=300,
-               encrypted=False, beside=None, status="Success"):
+               encrypted=False, beside=None, status="Success",
+               encrypt_to=None, how="oaep-sha1", cipher="gcm",
+               sign_response=False, index="_s1"):
         """(SAMLResponse, RelayState) as the provider posts them back."""
         rid, relay, _ = self.request_of(redirect_url)
         acs = f"{sp}/auth/saml/acs"
@@ -378,8 +389,11 @@ class SamlIdp:
         a = self._assertion(answered, name, groups,
                             audience or f"{sp}/auth/saml/metadata",
                             recipient or acs, life)
+        a = a.replace('SessionIndex="_s1"', f'SessionIndex="{index}"')
         if sign:
             a = self.sign(a)
+        if encrypt_to is not None:
+            a = self.encrypt(a, encrypt_to, how, cipher)
         if encrypted:
             a = (f'<saml:EncryptedAssertion xmlns:saml="{SAML_A}">'
                  "<xenc:EncryptedData xmlns:xenc="
@@ -396,4 +410,141 @@ class SamlIdp:
                f"<saml:Issuer>{self.ENTITY}</saml:Issuer><samlp:Status>"
                '<samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:'
                f'status:{status}"/></samlp:Status>{a}</samlp:Response>')
+        if sign_response:
+            xml = self.sign(xml)
         return base64.b64encode(xml.encode()).decode(), relay
+
+    # ---- encryption: what a provider does with the view's certificate
+
+    @staticmethod
+    def encrypt(assertion_xml, cert_pem, how="oaep-sha1", cipher="gcm"):
+        """An EncryptedAssertion of `assertion_xml` for the certificate:
+        a fresh content key wrapped with it (`how`: oaep-sha1,
+        oaep-sha256 or rsa-1_5) and the content under AES (`cipher`: gcm
+        or cbc)."""
+        import os
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, padding as sympad
+        from cryptography.hazmat.primitives.asymmetric import padding
+        from cryptography.hazmat.primitives.ciphers import (
+            Cipher, algorithms, modes)
+        xenc, xenc11 = ("http://www.w3.org/2001/04/xmlenc#",
+                        "http://www.w3.org/2009/xmlenc11#")
+        pub = x509.load_pem_x509_certificate(cert_pem.encode()).public_key()
+        key, body = os.urandom(32), assertion_xml.encode()
+        if cipher == "gcm":
+            iv = os.urandom(12)
+            enc = Cipher(algorithms.AES(key), modes.GCM(iv)).encryptor()
+            blob = iv + enc.update(body) + enc.finalize() + enc.tag
+            algo = xenc11 + "aes256-gcm"
+        else:
+            iv = os.urandom(16)
+            pad = 16 - len(body) % 16
+            padded = body + os.urandom(pad - 1) + bytes([pad])
+            enc = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()
+            blob = iv + enc.update(padded) + enc.finalize()
+            algo = xenc + "aes256-cbc"
+        if how == "rsa-1_5":
+            wrapped = pub.encrypt(key, padding.PKCS1v15())
+            method = f'<xenc:EncryptionMethod Algorithm="{xenc}rsa-1_5"/>'
+        elif how == "oaep-sha256":
+            wrapped = pub.encrypt(key, padding.OAEP(
+                mgf=padding.MGF1(hashes.SHA256()),
+                algorithm=hashes.SHA256(), label=None))
+            method = (f'<xenc:EncryptionMethod Algorithm="{xenc11}rsa-oaep">'
+                      f'<ds:DigestMethod Algorithm="{xenc}sha256"/>'
+                      f'<xenc11:MGF Algorithm="{xenc11}mgf1sha256"/>'
+                      "</xenc:EncryptionMethod>")
+        else:
+            wrapped = pub.encrypt(key, padding.OAEP(
+                mgf=padding.MGF1(hashes.SHA1()), algorithm=hashes.SHA1(),
+                label=None))
+            method = (f'<xenc:EncryptionMethod Algorithm='
+                      f'"{xenc}rsa-oaep-mgf1p"/>')
+        b = lambda x: base64.b64encode(x).decode()  # noqa: E731
+        return (
+            f'<saml:EncryptedAssertion xmlns:saml="{SAML_A}"'
+            f' xmlns:xenc="{xenc}" xmlns:xenc11="{xenc11}"'
+            ' xmlns:ds="http://www.w3.org/2000/09/xmldsig#">'
+            f'<xenc:EncryptedData Type="{xenc}Element">'
+            f'<xenc:EncryptionMethod Algorithm="{algo}"/><ds:KeyInfo>'
+            f"<xenc:EncryptedKey>{method}<xenc:CipherData><xenc:CipherValue>"
+            f"{b(wrapped)}</xenc:CipherValue></xenc:CipherData>"
+            "</xenc:EncryptedKey></ds:KeyInfo><xenc:CipherData>"
+            f"<xenc:CipherValue>{b(blob)}</xenc:CipherValue>"
+            "</xenc:CipherData></xenc:EncryptedData>"
+            "</saml:EncryptedAssertion>")
+
+    # ---- single logout: the redirect binding, both ways
+
+    def _redirect(self, dest, param, xml, relay=None, sign=True):
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import padding
+        from urllib.parse import urlencode
+        packer = zlib.compressobj(9, zlib.DEFLATED, -15)
+        packed = packer.compress(xml.encode()) + packer.flush()
+        pairs = [(param, base64.b64encode(packed).decode())]
+        if relay:
+            pairs.append(("RelayState", relay))
+        alg = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"
+        if sign:
+            pairs.append(("SigAlg", alg))
+        query = urlencode(pairs)
+        if sign:
+            sig = self.key.sign(query.encode(), padding.PKCS1v15(),
+                                hashes.SHA256())
+            query += "&" + urlencode(
+                {"Signature": base64.b64encode(sig).decode()})
+        return dest + "?" + query
+
+    def logout_request(self, name, index=None, sp=URL, sign=True,
+                       issuer=None, rid=None):
+        """The address a provider sends the browser to, to end `name`'s
+        sign-in at the view."""
+        rid = rid or "_l" + secrets.token_hex(8)
+        idx = f"<samlp:SessionIndex>{index}</samlp:SessionIndex>" \
+            if index else ""
+        xml = (f'<samlp:LogoutRequest xmlns:samlp="{SAML_P}"'
+               f' xmlns:saml="{SAML_A}" ID="{rid}" Version="2.0"'
+               f' IssueInstant="{_instant()}"'
+               f' Destination="{sp}/auth/saml/slo"'
+               f' NotOnOrAfter="{_instant(300)}"><saml:Issuer>'
+               f"{issuer or self.ENTITY}</saml:Issuer><saml:NameID>{name}"
+               f"</saml:NameID>{idx}</samlp:LogoutRequest>")
+        return self._redirect(f"{sp}/auth/saml/slo", "SAMLRequest", xml,
+                              sign=sign)
+
+    def logout_response(self, request_url, sp=URL, status="Success"):
+        """The provider's answer to the logout request the view sent."""
+        rid, _, _ = self.request_of(request_url)
+        xml = (f'<samlp:LogoutResponse xmlns:samlp="{SAML_P}"'
+               f' xmlns:saml="{SAML_A}" ID="_o{secrets.token_hex(8)}"'
+               f' Version="2.0" IssueInstant="{_instant()}"'
+               f' Destination="{sp}/auth/saml/slo" InResponseTo="{rid}">'
+               f"<saml:Issuer>{self.ENTITY}</saml:Issuer><samlp:Status>"
+               '<samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:'
+               f'status:{status}"/></samlp:Status></samlp:LogoutResponse>')
+        return self._redirect(f"{sp}/auth/saml/slo", "SAMLResponse", xml)
+
+    @staticmethod
+    def signed_by(url, cert_pem):
+        """Whether a redirect the view made carries a signature of the
+        certificate's key over its query, as received."""
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import padding
+        from urllib.parse import unquote
+        parts = dict(p.partition("=")[::2] for p in
+                     urlsplit(url).query.split("&"))
+        if "Signature" not in parts:
+            return False
+        data = "&".join(f"{k}={parts[k]}" for k in
+                        ("SAMLRequest", "SAMLResponse", "RelayState",
+                         "SigAlg") if k in parts)
+        pub = x509.load_pem_x509_certificate(cert_pem.encode()).public_key()
+        try:
+            pub.verify(base64.b64decode(unquote(parts["Signature"])),
+                       data.encode(), padding.PKCS1v15(), hashes.SHA256())
+            return True
+        except Exception:  # noqa: BLE001 - not signed by it
+            return False

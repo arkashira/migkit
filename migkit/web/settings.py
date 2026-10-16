@@ -77,6 +77,7 @@ class Settings:
     saml_metadata: str = ""
     saml_groups: str = "groups"
     saml_name: str = ""
+    saml_encrypted: bool = False
     scim_token: str = ""
     session_hours: float = 12.0
     idle_minutes: float = 60.0
@@ -153,6 +154,7 @@ def load(port, environ=None):
         saml_metadata=envkeys.text("MIGKIT_WEB_SAML_METADATA", env),
         saml_groups=envkeys.text("MIGKIT_WEB_SAML_GROUPS", env, "groups"),
         saml_name=envkeys.text("MIGKIT_WEB_SAML_NAME", env),
+        saml_encrypted=envkeys.flag("MIGKIT_WEB_SAML_ENCRYPTED", env),
         scim_token=_secret(envkeys.text("MIGKIT_WEB_SCIM_TOKEN", env)),
         session_hours=envkeys.number("MIGKIT_WEB_SESSION_HOURS", env),
         idle_minutes=envkeys.number("MIGKIT_WEB_IDLE_MINUTES", env),

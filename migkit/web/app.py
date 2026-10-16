@@ -98,6 +98,7 @@ class App:
             Rule("/auth/saml/start", endpoint="saml_start"),
             Rule("/auth/saml/acs", endpoint="saml_acs", methods=["POST"]),
             Rule("/auth/saml/metadata", endpoint="saml_metadata"),
+            Rule("/auth/saml/slo", endpoint="saml_slo"),
             Rule("/auth/local", endpoint="local_signin", methods=["POST"]),
             Rule("/setup", endpoint="setup", methods=["GET", "POST"]),
             Rule("/new-hop", endpoint="new_hop", methods=["GET", "POST"]),
@@ -475,6 +476,30 @@ class App:
         return Response(self.saml.metadata_xml(),
                         mimetype="application/samlmetadata+xml")
 
+    def _p_saml_slo(self, request):
+        """The provider's single logout: its answer to a sign-out made
+        here, or a sign-out it starts - the sessions it names end, and it
+        is answered."""
+        if self.saml is None:
+            return Response("not found", 404)
+        raw = request.query_string.decode("latin-1")
+        try:
+            if request.args.get("SAMLResponse"):
+                self.saml.logout_done(raw, request.args)
+                self.record({"op": "logout-confirmed",
+                             "from": request.remote_addr})
+                return _redirect("/signin")
+            ended, back = self.saml.logout_asked(raw, request.args)
+        except Refused as e:
+            self.record({"op": "logout-refused", "why": str(e),
+                         "from": request.remote_addr})
+            return Response(str(e), 400, mimetype="text/plain")
+        self.record({"op": "signed-out-by-provider", "sessions": ended,
+                     "from": request.remote_addr})
+        r = _redirect(back)
+        r.delete_cookie(self.cookie, path="/", secure=self.settings.https)
+        return r
+
     def _p_local_signin(self, request):
         if self.local is None:
             return Response("not found", 404)
@@ -606,7 +631,14 @@ class App:
                 return self._error(request, 403, "not from this view's page")
             self.store.close_session(request.cookies.get(self.cookie))
             self.record({"op": "signed-out", "by": me[0].id})
-        r = _redirect("/signin")
+            # the provider's session ends with this one, where it offers a
+            # single logout to ask it by
+            there = self.saml.logout_begin(me[0]) if self.saml else None
+            if there:
+                self.record({"op": "logout-asked", "by": me[0].id})
+        else:
+            there = None
+        r = _redirect(there or "/signin")
         r.delete_cookie(self.cookie, path="/", secure=self.settings.https)
         return r
 

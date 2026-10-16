@@ -817,6 +817,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: no signing certificate - an answer could not be proved
 
+* <...>: <...>: <...>
+
 * MIGKIT_WEB_URL=<...> is not an address people open: https://host[:port], no path
 
 * MIGKIT_WEB_TLS_CERT and MIGKIT_WEB_TLS_KEY go together: the certificate and its private key
