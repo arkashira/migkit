@@ -28,10 +28,6 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ## Upward imports still listed: 381
 
-### (not listed)
-
-- `migkit/anchor.py:452` persistence -> decision (`decide`)
-
 ### a brand's confidence is a rung (`decide.brand_confidence`) the configuration reads once the server's signs are in; the rung moves below configuration
 
 - `migkit/variants.py:397` configuration -> decision (`decide`)
@@ -981,6 +977,10 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### scope reaches `verdict` (reporting); the shared piece moves below both, or the call is inverted
 
 - `migkit/result_scope.py:200` scope -> reporting (`verdict`)
+
+### the anchor's interval is a rung (`decide.anchor_interval`) on the measured entry rate; the anchor hands the rate in as a fact
+
+- `migkit/anchor.py:452` persistence -> decision (`decide`)
 
 ### the decision engine asks an engine (`engines.base`) what it can do; ends when the engine contract is a package below decision
 
