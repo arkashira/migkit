@@ -3975,6 +3975,8 @@ running work merges.
 
 * AUD-Z.workers DONE 2026-10-16: no width is a literal outside `decide.py` - a driver's requests in flight are `decide.request_width` asked before every chunk, the installer's fetches `decide.fetch_width`; tests/test_a_drivers_requests_in_flight_are_decided.py, the lint test's `OWED` empty.
 
+* AUD-Z.rungs-owed slice C DONE W20C 2026-10-16: the 75 owed rungs of 29 ladders (reader_server_id through written_in_pieces) held and refused on fakes in tests/test_the_{session_and_failure,warehouse,redis,reshard_and_slice,copy_way,server_reading}_ladders_decide_on_facts.py, out of `OWED`; no rung unreachable.
+
 Done when every ID in the research document is fixed with its test or
 struck with the owner's reason, the lint tests hold, and the final suite
 runs through `tools/final_suite.py` with its time measured.
