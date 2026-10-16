@@ -118,6 +118,8 @@ class KeyspacesEngine(CassandraEngine):
     _sessions = {}
 
     def _session(self, side):
+        from ..cloudapi import gate
+        gate(self)
         from cassandra import ConsistencyLevel
         from cassandra.auth import PlainTextAuthProvider
         from cassandra.cluster import EXEC_PROFILE_DEFAULT, Cluster, \
@@ -240,6 +242,8 @@ class KeyspacesEngine(CassandraEngine):
     # ---- the CDC stream ------------------------------------------------------
 
     def _streams(self):
+        from ..cloudapi import gate
+        gate(self)
         held = self.__dict__.get("_streams_client")
         if held is None:
             import boto3

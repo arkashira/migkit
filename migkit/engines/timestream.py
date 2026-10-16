@@ -57,6 +57,8 @@ class TimestreamEngine(NeutralCopier, Engine):
         return self.hop.target_db(db) if side == "dst" else db
 
     def _client(self, side, kind):
+        from ..cloudapi import gate
+        gate(self)
         held = self.__dict__.setdefault("_clients", {})
         if (side, kind) not in held:
             import boto3
@@ -475,6 +477,8 @@ class TimestreamEngine(NeutralCopier, Engine):
     def _batch_loaded(self, db, table, log):
         """The table's records loaded by the service's batch load from one
         file written for it; the records in it."""
+        from ..cloudapi import gate
+        gate(self)
         import csv
         import io
 

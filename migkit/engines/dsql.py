@@ -88,6 +88,8 @@ class DsqlEngine(PgWireEngine):
     def _password(self, side, ep):
         """The endpoint's password, or an IAM token DSQL is signed in with,
         made again when it is ten minutes old (tokens last fifteen)."""
+        from ..cloudapi import gate
+        gate(self)
         if ep.password and str(ep.options.get("auth", "")) != "aws_iam":
             return ep.password
         made = self.__dict__.setdefault("_tokens", {})
@@ -249,6 +251,8 @@ class DsqlEngine(PgWireEngine):
         """How far behind DSQL publishes, in nanoseconds: the stream's
         `BehindSourceLag` at its largest over the last ten minutes, and a
         minute more for the metric's own period - or the order window."""
+        from ..cloudapi import gate
+        gate(self)
         spec = self._changes_spec() or {}
         kept = self.__dict__.get("_lag")
         if kept and time.time() - kept[1] < 60:

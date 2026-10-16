@@ -420,6 +420,8 @@ def _confidence(family, fields, server, evidence):
         sources.append(f"the hop (managed.service {facts['named']})")
     if facts["api"]:
         sources.append(f"the provider's own API ({facts['api']})")
+    elif fields.get("_api_said"):
+        sources.append(f"the provider's own API ({fields['_api_said']})")
     if choice.rung is None:
         return server or "unknown", "not told apart", tuple(sources)
     told = (facts["api"] or facts["named"] or server or facts["endpoint"])
@@ -468,15 +470,70 @@ def identify(family, raw):
                  sources=sources)
 
 
-def context(ep):
+def context(ep, eng=None, side=None):
     """What beside a side's server tells its brand, for `identify`: the
-    service its address names (`clouds.from_host`) and the one the hop
-    names (`managed.service`)."""
+    service its address names (`clouds.from_host`), the one the hop
+    names (`managed.service`) and, where the engine and side are given,
+    what the provider's own API says of it (`api_facts`)."""
     from . import clouds
     named = (getattr(ep, "options", None) or {}).get("managed") or {}
-    return {"_endpoint": clouds.from_host(ep.host).service or "",
-            "_named": str(named.get("service") or "")
-            if isinstance(named, dict) else ""}
+    got = {"_endpoint": clouds.from_host(ep.host).service or "",
+           "_named": str(named.get("service") or "")
+           if isinstance(named, dict) else ""}
+    if eng is not None and side is not None:
+        got.update({k: v for k, v in api_facts(
+            getattr(eng, "hop", None), eng, side).items()
+            if k in ("_api", "_api_said")})
+    return got
+
+
+#: the provider's product words, as the brands here name them
+_PRODUCT_BRAND = {"docdb": "documentdb", "msk": "msk"}
+
+
+def api_facts(hop, eng, side):
+    """{"_api": the brand the provider's own API confirms of the side, or
+    "", "_api_said": why it was not asked or not confirmed, "_retention":
+    the change stream log retention in seconds the cluster's parameters
+    hold, or None} - read once through `cloudapi` behind the egress gate's
+    `provider` kind, where the decision engine asks it
+    (`decide.provider_asked`). A provider not reached leaves each fact
+    unknown, never a guess; the call is the provider client's own, held to
+    its own timeouts and asked once, never retried here."""
+    from . import cloudapi, decide, egress, managed
+    out = {"_api": "", "_api_said": "", "_retention": None}
+    which = "src" if side in ("src", "source") else "dst"
+    if hop is None:
+        return out
+    try:
+        api = managed.api_conf(hop, eng, which)[0]
+    except (Exception, SystemExit):  # noqa: BLE001 - not a managed side
+        api = None
+    ok, why = egress.decide(hop, "provider")
+    choice = decide.provider_asked({"managed": api is not None,
+                                    "egress": ok, "refused": why})
+    if choice.rung is None:
+        out["_api_said"] = f"not asked: {choice.reason}"
+        if not ok:
+            egress.permit(hop, "provider")
+        return out
+    try:
+        a = managed.adapter(hop, eng, which)
+        got = a.instance()
+    except (Exception, SystemExit) as e:  # noqa: BLE001 - said, unknown
+        out["_api_said"] = ("not reached: "
+                            + str(e).splitlines()[0][:160] if str(e)
+                            else "not reached")
+        return out
+    ep = hop.source if which == "src" else hop.target
+    there = str(getattr(got, "host", "") or "").lower()
+    if there and there != str(ep.host or "").lower():
+        out["_api_said"] = "it describes another address than the side's"
+        return out
+    out["_api"] = _PRODUCT_BRAND.get(str(got.product), str(got.product))
+    if got.product == "docdb":
+        out["_retention"] = cloudapi.retention(a)
+    return out
 
 
 def acts_on(brand, step):

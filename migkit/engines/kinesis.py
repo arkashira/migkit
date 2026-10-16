@@ -33,6 +33,8 @@ class KinesisEngine(Engine):
     EXPRESSES_ABSENT = True
 
     def _client(self):
+        from ..cloudapi import gate
+        gate(self)
         import boto3
         ep = self.hop.target
         kw = {"region_name": ep.options.get("region") or "us-east-1"}

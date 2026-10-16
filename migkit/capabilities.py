@@ -3503,6 +3503,15 @@ UNPROVED_WHY = {}
 #: (engine, item, what) of a declaration naming an engine the module does
 #: not serve; `depth_failing` lists them as unknown
 _BAD_DECLARATIONS = []
+#: the modules beside the engines' that declare cells of their own, for
+#: what they serve that is no engine - a cloud provider (the cloud side of
+#: readiness, its sign-in and forwarders) or a managed brand sharing its
+#: open-source engine's module. Each declares `UNPROVED_ON` and
+#: `UNPROVED_ITEMS` as {who: words}, read literally as an engine's are
+DECLARING = ("cloud_readiness.py", "variants.py")
+#: {who: (the reason its module gives, its cells)} of those modules, for
+#: the state's "built, unproved" block (`tools/gen_codemap.py`)
+UNPROVED_ELSEWHERE = {}
 
 
 @functools.lru_cache(maxsize=None)
@@ -3573,6 +3582,22 @@ def _merge_declared():
                 continue
             for engine in [who] if who else served:
                 _owed(engine, item)
+    from pathlib import Path
+    home = Path(__file__).resolve().parent
+    for name in DECLARING:
+        reason, items = _module_declares(home / name)
+        if not isinstance(reason, dict):
+            continue
+        items = items if isinstance(items, dict) else {}
+        for who in items:
+            if who not in reason:
+                _BAD_DECLARATIONS.append((who, items[who], "no reason"))
+        for who, why in reason.items():
+            cells = items.get(who, "")
+            if not isinstance(cells, str):
+                cells = " ".join(cells)
+            UNPROVED_ELSEWHERE[who] = (" ".join(why.split()),
+                                       tuple(cells.split()))
 
 
 _merge_declared()

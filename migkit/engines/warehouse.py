@@ -1610,6 +1610,8 @@ class RedshiftEngine(_CatalogWarehouse):
         return bucket, prefix.strip("/"), str(role)
 
     def _s3(self, side):
+        from ..cloudapi import gate
+        gate(self)
         import boto3
         opts = self._endpoint(side).options or {}
         kw = {}
@@ -2594,6 +2596,8 @@ class BigQueryEngine(BigQueryChanges, BigQueryChecks, _Warehouse):
     JOBS_ASKED_EVERY = 600
 
     def _client(self, side):
+        from ..cloudapi import gate
+        gate(self)
         known = self.__dict__.setdefault("_clients", {})
         if side in known:
             return known[side]
@@ -2615,6 +2619,8 @@ class BigQueryEngine(BigQueryChanges, BigQueryChecks, _Warehouse):
         return known[side]
 
     def _credentials(self, side):
+        from ..cloudapi import gate
+        gate(self)
         opts = self._endpoint(side).options or {}
         if opts.get("anonymous"):
             from google.auth.credentials import AnonymousCredentials
@@ -2626,6 +2632,8 @@ class BigQueryEngine(BigQueryChanges, BigQueryChecks, _Warehouse):
         return {}
 
     def _write_client(self, side):
+        from ..cloudapi import gate
+        gate(self)
         known = self.__dict__.setdefault("_writers", {})
         if side in known:
             return known[side]

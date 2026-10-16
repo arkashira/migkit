@@ -140,6 +140,12 @@ Built, unproved - a way the code has on an engine no sandbox here can run; the e
 - oceanbase: built; not run on a real OceanBase tenant (62 cells)
 - oceanbase-oracle: built; not run on a real OceanBase tenant (22 cells)
 - polardbx: built; not run on a real PolarDB-X or TDSQL instance (42 cells)
+- aws: built; not run against a real AWS account (managed.sign-in, managed.forwarder, managed.readiness, managed.brand-api, managed.retention-api, managed.egress-gate)
+- azure: built; not run against a real Azure account (managed.sign-in, managed.forwarder, managed.readiness, managed.egress-gate)
+- documentdb: built; not run against a real DocumentDB cluster (brand.told, preflight.change-streams, preflight.retention, tail.ddl-snapshot)
+- gcp: built; not run against a real Google Cloud account (managed.sign-in, managed.forwarder, managed.readiness, managed.egress-gate)
+- msk: built; not run against a real MSK cluster (brand.told, sign-in.iam, sign-in.mechanisms)
+- redis-enterprise: built; not run against a real Redis Enterprise (brand.told)
 
 Per item: the engines in each state - "test owed" is a way in the code whose test on that engine is not written (`UNPROVED`); "built, unproved" is one whose engine module declares it was not run on a real server.
 
@@ -236,7 +242,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 
 ## Source layout
 
-370 upward imports still listed (`docs/agents/LAYERS.md`; the list only shrinks); 0 files no package claims (`docs/agents/INVENTORY.md`).
+377 upward imports still listed (`docs/agents/LAYERS.md`; the list only shrinks); 0 files no package claims (`docs/agents/INVENTORY.md`).
 
 Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 2862 ordered pairs of 54 engines; 26 shape lacks, 71 capability lacks, 2150 depth lacks in all; fewest kinesis -> postgres (6), most oceanbase-oracle -> db2i (143).
 

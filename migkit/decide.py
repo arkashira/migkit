@@ -5092,3 +5092,29 @@ def written_in_pieces(facts):
         Rung("pieces", "a value too large for one statement written in"
              " pieces, inside its row's transaction", because=said)), f)
     return got.path == "pieces", got
+
+
+# --- whether a side's provider is asked what it holds of it (W17F2) ---------
+
+def provider_asked(facts):
+    """`Choice` of whether the provider's own API is asked what it holds of
+    a side - the brand it confirms, a cluster parameter the plan needs -
+    from `managed` (the side is a managed service a provider's API holds),
+    `egress` (the egress lets calls to the provider's API out) and
+    `refused` (the setting's words where it does not). No rung: the facts
+    stay unknown and what reads them says so; the confidence they would
+    raise stays where the server's own signs put it."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    return climb("whether the provider's own API is asked of the side", (
+        Rung("ask", "the provider's own API asked once, within the"
+             " provider client's own timeouts",
+             needs=(Need("the side is a managed service",
+                         lambda x: x.get("managed") is True,
+                         "the side is run by its owner: no provider's API"
+                         " holds it"),
+                    Need("the egress lets the call out",
+                         lambda x: x.get("egress") is True,
+                         lambda x: x.get("refused") or "the egress does not"
+                         " let calls to the provider's own API out")),
+             because="a fact the provider holds of the side, stronger than"
+                     " any sign the server gives"),), f)

@@ -118,6 +118,8 @@ class MskToken:
         return f"MskToken({self.region}, expires {int(self.expires)})"
 
     def _creds(self):
+        from ..cloudapi import gate
+        gate(self)
         if self._credentials is not None:
             return self._credentials()
         import botocore.session
@@ -247,6 +249,8 @@ class KafkaEngine(Engine):
     def _provider_credentials():
         """Whether this machine has the provider's credentials to sign
         Amazon MSK's IAM token with (the provider's library finds them)."""
+        from ..cloudapi import gate
+        gate(None)
         try:
             import botocore.session
             return botocore.session.Session().get_credentials() is not None

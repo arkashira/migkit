@@ -637,7 +637,7 @@ class MongoEngine(Engine):
                 asked = False
             ep = self.hop.source if side == "src" else self.hop.target
             from .. import variants
-            out.update(variants.context(ep), _asked=str(asked))
+            out.update(variants.context(ep, self, side), _asked=str(asked))
             return out
         return (one("src"), one("dst"))
 
@@ -789,9 +789,18 @@ class MongoEngine(Engine):
         if brand.told:
             streams = list(self._client("src").admin.aggregate(
                 [{"$listChangeStreams": 1}]))
+        from .. import rehearsal, variants
+        retention_s = (variants.api_facts(self.hop, self, "src")
+                       ["_retention"] if brand.told else None)
+        # the move's length as this hop's plan forecast it: the slow end
+        # of each phase, the retention outlasting the longest plausible
+        got = rehearsal.forecast(self.hop, db) or {}
+        spans = [p.get("p90") or p.get("p50") for p in got.get("phases")
+                 or () if isinstance(p, dict)]
+        forecast_s = (sum(spans) if spans and None not in spans else None)
         return self.documentdb_preflight(
             db, self.neutral_tables("src", db) if brand.told else [],
-            streams, None, None, brand)
+            streams, retention_s, forecast_s, brand)
 
     def _server_versions(self):
         s, d = self._brands()

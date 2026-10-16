@@ -192,6 +192,8 @@ class SpannerEngine(DigestsInSQL, _Folded, NeutralCopier, Engine):
         return self.hop.target_db(db) if side == "dst" else db
 
     def _client(self, side):
+        from ..cloudapi import gate
+        gate(self)
         held = self.__dict__.setdefault("_clients", {})
         if side not in held:
             from google.cloud import spanner

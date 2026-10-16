@@ -25,13 +25,22 @@ import datetime
 import ipaddress
 import socket
 
-#: built and proved on stand-ins only. A plain entry, with its reason in
-#: words, until the declaration seam (W17A's reason carrier) takes it
-UNPROVED = {
-    f"managed.{part}.{who}": f"built; not run against a real {name} account"
-    for who, name in (("aws", "AWS"), ("gcp", "Google Cloud"),
-                      ("azure", "Azure"))
-    for part in ("sign-in", "forwarder", "readiness")}
+#: built and proved on stand-ins only, per provider: read literally by the
+#: declaration seam (`capabilities._merge_declared`, `DECLARING`) into the
+#: state's "built, unproved" block
+UNPROVED_ON = {
+    "aws": "built; not run against a real AWS account",
+    "gcp": "built; not run against a real Google Cloud account",
+    "azure": "built; not run against a real Azure account",
+}
+UNPROVED_ITEMS = {
+    "aws": "managed.sign-in managed.forwarder managed.readiness"
+           " managed.brand-api managed.retention-api managed.egress-gate",
+    "gcp": "managed.sign-in managed.forwarder managed.readiness"
+           " managed.egress-gate",
+    "azure": "managed.sign-in managed.forwarder managed.readiness"
+             " managed.egress-gate",
+}
 
 
 def _net(cidr):

@@ -543,6 +543,8 @@ class _Documents(NeutralCopier, Engine):
     # documents by. The emulator serves none of it, and says so.
 
     def _admin(self, side):
+        from ..cloudapi import gate
+        gate(self)
         held = self.__dict__.setdefault("_admins", {})
         if side not in held:
             from google.cloud import firestore_admin_v1

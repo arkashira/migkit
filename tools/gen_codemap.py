@@ -333,6 +333,9 @@ def _depth(capabilities):
     for n in sorted(caps.UNPROVED_WHY):
         cells = sum(1 for i in caps.DEPTH if state(n, i) == "built, unproved")
         out.append(f"- {n}: {caps.UNPROVED_WHY[n]} ({cells} cells)")
+    # what serves no engine - a provider, a brand - declared beside them
+    for n, (why, cells) in sorted(caps.UNPROVED_ELSEWHERE.items()):
+        out.append(f"- {n}: {why} ({', '.join(cells) or 'no cells'})")
     out += ["", "Per item: the engines in each state - \"test owed\" is a way"
             " in the code whose test on that engine is not written"
             " (`UNPROVED`); \"built, unproved\" is one whose engine module"

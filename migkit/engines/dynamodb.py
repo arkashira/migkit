@@ -90,6 +90,8 @@ class DynamoDBEngine(NeutralCopier, Engine):
     RESUMES_BY_KEY = False
 
     def _client(self, side):
+        from ..cloudapi import gate
+        gate(self)
         import boto3
         ep = self.hop.source if side == "src" else self.hop.target
         kw = {}
@@ -701,6 +703,8 @@ class DynamoDBEngine(NeutralCopier, Engine):
     CHANGE_POINT_READS_ONLY = True
 
     def _streams(self, side):
+        from ..cloudapi import gate
+        gate(self)
         import boto3
         ep = self.hop.source if side == "src" else self.hop.target
         kw = {"region_name": ep.options.get("region") or "us-east-1"}
@@ -1088,6 +1092,8 @@ class DynamoDBEngine(NeutralCopier, Engine):
 
     def mark_stream(self, side, table):
         """Every record the table's stream holds."""
+        from ..cloudapi import gate
+        gate(self)
         import boto3
         c = self._client(side)
         s = boto3.client(

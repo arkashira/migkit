@@ -46,6 +46,8 @@ class PubSubEngine(Engine):
 
     def _publisher(self):
         """One publisher for the engine's life, keeping order by key."""
+        from ..cloudapi import gate
+        gate(self)
         got = self.__dict__.get("_client")
         if got is not None:
             return got

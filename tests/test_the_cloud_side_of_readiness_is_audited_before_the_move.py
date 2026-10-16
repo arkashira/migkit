@@ -222,5 +222,16 @@ def test_assess_says_the_cloud_side(monkeypatch):
 def test_each_provider_cell_is_declared_built_and_unproved():
     for who in ("aws", "gcp", "azure"):
         for part in ("sign-in", "forwarder", "readiness"):
-            assert cr.UNPROVED[f"managed.{part}.{who}"].startswith(
+            assert cr.UNPROVED_ON[who].startswith(
                 "built; not run against a real")
+
+
+def test_the_seam_carries_the_readiness_cells_into_the_state():
+    from pathlib import Path
+    from migkit import capabilities as caps
+    for who in ("aws", "gcp", "azure"):
+        why, cells = caps.UNPROVED_ELSEWHERE[who]
+        assert why == cr.UNPROVED_ON[who] and "managed.readiness" in cells
+    state = (Path(caps.__file__).resolve().parents[1] / "docs" / "agents"
+             / "STATE.md").read_text()
+    assert "- aws: built; not run against a real AWS account" in state

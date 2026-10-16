@@ -597,6 +597,8 @@ def refresh(region="us-east-1", session=None, names=None):
     The description gives the network's baseline and peak where AWS
     publishes them per network card, and the EBS baseline and maximum; the
     price list is asked for all the types at once."""
+    from .cloudapi import gate
+    gate(None)
     if session is None:
         import boto3
         session = boto3.session.Session()
@@ -712,6 +714,8 @@ def maybe_refresh(cloud, region, log=None):
     """`refresh` for an AWS hop where the operator asked for it, this
     machine has AWS credentials and the kept copy is older than
     `REFRESH_DAYS`; said in a line, never a reason to stop."""
+    from .cloudapi import gate
+    gate(None)
     if cloud != "aws" or os.environ.get("MIGKIT_CATALOG_REFRESH") != "1":
         return ""
     try:

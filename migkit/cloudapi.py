@@ -790,6 +790,7 @@ class Aws(Adapter):
               "deleting", "deleted", "inaccessible-encryption-credentials")
 
     def _session(self):
+        gate(self)
         import boto3
         profile = self.conf.get("profile") or None
         got = boto3.Session(profile_name=profile)
@@ -799,6 +800,7 @@ class Aws(Adapter):
         return got
 
     def _credentials(self):
+        gate(self)
         session = self._session()
         got = session.get_credentials()
         named = self.conf.get("profile") or os.environ.get("AWS_PROFILE") \
@@ -1719,6 +1721,7 @@ class Gcp(Adapter):
         self.project = str(self.conf.get("project") or "")
 
     def _credentials(self):
+        gate(self)
         import google.auth
         from google.auth import _cloud_sdk
         from google.auth.exceptions import DefaultCredentialsError
@@ -1752,6 +1755,7 @@ class Gcp(Adapter):
         return self.project
 
     def api(self):
+        gate(self)
         if self._api is None:
             from googleapiclient import discovery
             name, version = self.API[self.product]
@@ -1798,6 +1802,7 @@ class Gcp(Adapter):
 
     def _streams(self):
         """The change-stream API's streams resource, in this project."""
+        gate(self)
         from googleapiclient import discovery
         if self.__dict__.get("_stream_api") is None:
             self._stream_api = discovery.build(
@@ -2499,6 +2504,7 @@ class Azure(Adapter):
         self.pg = self.product == "flexible-postgres"
 
     def _credentials(self):
+        gate(self)
         if self.role:
             raise SystemExit(
                 "Azure's API assumes no role: it acts as the identity signed"
@@ -5955,6 +5961,7 @@ def _rds_token(ep):
 
 
 def _google_chain(ep):
+    gate(None)
     import google.auth
     import google.auth.transport.requests
     creds, _ = google.auth.default(scopes=[_GOOGLE_SCOPE])
@@ -6002,6 +6009,7 @@ def _azure_metadata(ep):
 
 
 def _azure_chain(ep):
+    gate(None)
     from azure.identity import DefaultAzureCredential
     got = DefaultAzureCredential().get_token(
         _audience(ep).rstrip("/") + "/.default")
@@ -6177,3 +6185,37 @@ def _ranges(first, last):
 
 _NETWORK = {"aws": _aws_network, "gcp": _gcp_network,
             "azure": _azure_network}
+
+
+def gate(owner=None, kind="provider"):
+    """The one gate every provider client is made behind (backlog R6.cloud,
+    C1.managed): asked where a module makes the client of a cloud
+    provider's own API - its data API where the side is the provider's
+    service, its control plane, its object store - before the client is
+    made. `owner` is the hop, or what carries it (an engine's `hop`), or
+    None for the machine's own setting alone; `kind` is the send's kind
+    where the module has its own (the audit anchor, the run state's
+    bucket). A refusal is said once a run and stops the call with the
+    setting that said no and what lets it out."""
+    from . import egress
+    hop = owner if hasattr(owner, "options") and hasattr(owner, "source") \
+        else getattr(owner, "hop", None)
+    ok, why = egress.decide(hop, kind)
+    if ok:
+        return
+    egress.permit(hop, kind)
+    raise SystemExit(f"{why}; let them out (MIGKIT_EGRESS, or the hop's"
+                     " options.egress) to make this call")
+
+
+def retention(a):
+    """The change stream log retention, in seconds, a DocumentDB cluster's
+    parameter group holds (`change_stream_log_retention_duration`), read
+    through the adapter's own parameter read; None where it does not say."""
+    name = "change_stream_log_retention_duration"
+    try:
+        got = a._params(a._describe(), [name]).get(name) or {}
+    except (Exception, SystemExit):  # noqa: BLE001 - not said: unknown
+        return None
+    value = _num(got.get("value"))
+    return int(value) if value is not None else None

@@ -411,6 +411,8 @@ class Azure:
         self.hop, self.opts, self.engine = hop, opts, engine
 
     def client(self):
+        from .cloudapi import gate
+        gate(self)
         from azure.identity import DefaultAzureCredential
         if self.engine == "postgres":
             from azure.mgmt.postgresqlflexibleservers import \
@@ -500,6 +502,8 @@ class Google:
         self.hop, self.opts, self.engine = hop, opts, engine
 
     def client(self):
+        from .cloudapi import gate
+        gate(self)
         from googleapiclient import discovery
         return discovery.build("sqladmin", "v1beta4", cache_discovery=False)
 

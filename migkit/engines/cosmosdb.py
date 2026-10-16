@@ -206,6 +206,8 @@ class CosmosEngine(NeutralCopier, Engine):
         return self.hop.source if side == "src" else self.hop.target
 
     def _client(self, side):
+        from ..cloudapi import gate
+        gate(self)
         held = self.__dict__.setdefault("_clients", {})
         if side not in held:
             from azure.cosmos import CosmosClient

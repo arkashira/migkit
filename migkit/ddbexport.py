@@ -58,6 +58,8 @@ def where(hop):
 
 
 def _s3(eng, side):
+    from .cloudapi import gate
+    gate(None)
     import boto3
     ep = eng.hop.source if side == "src" else eng.hop.target
     kw = {"region_name": ep.options.get("region") or "us-east-1"}

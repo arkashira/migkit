@@ -329,6 +329,8 @@ class LocalStore:
 
 def _bucket(cfg):
     """(client, bucket, prefix) for the s3 backend."""
+    from .cloudapi import gate
+    gate(None, 'evidence')
     try:
         import boto3
     except ImportError:

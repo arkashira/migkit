@@ -2527,7 +2527,13 @@ class MongoHold(Hold):
                      lambda f: {"fsync", "unlock"} <= set(f["actions"]
                                                           or ()),
                      "migkit's account may not block the server's"
-                     " writes")),
+                     " writes"), Need(
+                     "the server not locked already",
+                     lambda f: f.get("locked") is not True,
+                     "the server is locked already (fsyncLock), by another"
+                     " session or left by a crash: a lock of migkit's on"
+                     " top would be lifted with theirs - lift it until the"
+                     " server reports no lock, then run again")),
                  because="every database on the server is the hop's;"
                          " before 6.0 it has no write block, so it is"
                          " locked (fsyncLock)"),
@@ -2553,7 +2559,9 @@ class MongoHold(Hold):
                     "buildInfo").get("versionArray", [0, 0])[:2])),
                 "actions": _read(lambda: _mongo_actions(c)),
                 "commands": _read(lambda: _mongo_commands(c)),
-                "auth": _read(lambda: _mongo_auth(c))}
+                "auth": _read(lambda: _mongo_auth(c)),
+                "locked": _read(lambda: bool(c.admin.command(
+                    "currentOp").get("fsyncLock")))}
 
     def kept(self, db, record):
         name = self.eng._d(self.side, db)
@@ -3169,7 +3177,7 @@ def _ms_lit(text):
 
 class MSSQLHold(Hold):
     def rungs(self):
-        from .decide import Rung
+        from .decide import Need, Rung
         return (
             Rung("mssql_read_only", "the database read-only for everyone,"
                  " what was open rolled back", gives=frozenset({DATABASE}),
@@ -3188,7 +3196,17 @@ class MSSQLHold(Hold):
                             " give back the users' rights (CONTROL)"),
                         _is("kill", "migkit's account may end sessions",
                             "migkit's account may not end other sessions"
-                            " (ALTER ANY CONNECTION)")),
+                            " (ALTER ANY CONNECTION)"),
+                        # the sessions to end are found in
+                        # sys.dm_exec_requests / sys.dm_exec_sessions, which
+                        # show another session's work only to an account
+                        # granted VIEW SERVER STATE
+                        Need("migkit's account sees other sessions' work",
+                             lambda f: f.get("sees") is not False,
+                             "migkit's account cannot see other sessions'"
+                             " requests (VIEW SERVER STATE), so the"
+                             " application's open sessions to end cannot be"
+                             " found")),
                  because="per user"))
 
     def readers(self, dbs):
@@ -3200,7 +3218,10 @@ class MSSQLHold(Hold):
                                          for d in dbs)),
             "kill": _read(lambda: int(self.one(
                 dbs[0], "select has_perms_by_name(null, null,"
-                        " 'ALTER ANY CONNECTION')") or 0) == 1)}
+                        " 'ALTER ANY CONNECTION')") or 0) == 1),
+            "sees": _read(lambda: int(self.one(
+                dbs[0], "select has_perms_by_name(null, null,"
+                        " 'VIEW SERVER STATE')") or 0) == 1)}
 
     def name(self, db):
         return self.eng._d(self.side, db)
@@ -3714,24 +3735,56 @@ def _kafka_deny(kind, name, principal="User:*", filtered=False):
 
 class KafkaHold(Hold):
     def rungs(self):
-        from .decide import Rung
+        from .decide import Need, Rung
+        # a deny is an access-list entry: made only by a principal the
+        # cluster lets alter its access lists
+        alters = Need("migkit may change the cluster's access lists",
+                      lambda f: f.get("alters") is not False,
+                      "migkit's principal may not change the cluster's"
+                      " access lists (ALTER on the cluster, or a super"
+                      " user)")
         return (
             Rung("kafka_cluster", "every principal's writes to the hop's"
                  " topics refused, and every transactional producer on the"
                  " cluster kept from committing", gives=frozenset({SERVER}),
                  needs=(_alone("topics"), _is(
                      "authorizer", "access checked on the cluster", "the"
-                     " cluster checks no access (no authorizer)")),
+                     " cluster checks no access (no authorizer)"), alters),
                  because="every topic on the cluster is the hop's"),
             Rung("kafka_topics", "every principal's writes to the hop's"
                  " topics refused", gives=frozenset({DATABASE}),
                  needs=(_is("authorizer", "access checked on the cluster",
                             "the cluster checks no access (no"
-                            " authorizer)"),),
+                            " authorizer)"), alters),
                  because="per topic"))
 
+    def may_alter(self):
+        """Whether migkit's principal may change the cluster's access
+        lists: a super user, or allowed ALTER (or ALL) on the cluster; None
+        where its principal cannot be told."""
+        from kafka.admin import (ACLFilter, ACLOperation, ACLPermissionType,
+                                 ACLResourcePatternType,
+                                 ResourcePatternFilter, ResourceType)
+        me = self.principal()
+        if me is None:
+            return None
+        if me in self.super_users():
+            return True
+        admin = self.eng._admin(self.side)
+        try:
+            got, _ = admin.describe_acls(ACLFilter(
+                principal=None, host=None, operation=ACLOperation.ANY,
+                permission_type=ACLPermissionType.ALLOW,
+                resource_pattern=ResourcePatternFilter(
+                    ResourceType.CLUSTER, None, ACLResourcePatternType.ANY)))
+        finally:
+            admin.close()
+        return any(str(a.principal) in (me, "User:*") and a.operation in (
+            ACLOperation.ALTER, ACLOperation.ALL) for a in got or ())
+
     def readers(self, dbs):
-        out = {"authorizer": _read(self.authorizer)}
+        out = {"authorizer": _read(self.authorizer),
+               "alters": _read(self.may_alter)}
         if self.side == "dst":
             out.update({
                 "super": _read(lambda: self.principal() is not None
@@ -6334,6 +6387,8 @@ class DynamoDBHold(Hold):
         return self.eng._client(self.side)
 
     def sts(self):
+        from .cloudapi import gate
+        gate(self)
         import boto3
         ep = self.hop.source if self.side == "src" else self.hop.target
         kw = {"region_name": ep.options.get("region") or "us-east-1"}

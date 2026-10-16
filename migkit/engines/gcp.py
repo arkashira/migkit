@@ -22,6 +22,8 @@ def project(ep):
 def credentials(ep):
     """A service account's credentials where the side names its key file;
     None for the SDK's own default."""
+    from ..cloudapi import gate
+    gate(None)
     if not ep.options.get("credentials_file") or ep.options.get("emulator"):
         return None
     from google.oauth2 import service_account

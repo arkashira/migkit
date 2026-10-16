@@ -229,6 +229,8 @@ class NeptuneEngine(NeutralCopier, Engine):
     def _signed(self, side, method, url, body=None, headers=None):
         """A request's headers, signed by Neptune's signature where the
         side signs in by it."""
+        from ..cloudapi import gate
+        gate(self)
         headers = dict(headers or {})
         if self._ep(side).options.get("auth") != "aws_iam":
             return headers
@@ -297,6 +299,8 @@ class NeptuneEngine(NeutralCopier, Engine):
                 yield self._edge(m)
 
     def _cypher(self, side, query, **params):
+        from ..cloudapi import gate
+        gate(self)
         import boto3
         ep = self._ep(side)
         client = boto3.client(
@@ -820,6 +824,8 @@ class NeptuneEngine(NeutralCopier, Engine):
     def _loaded(self, db, table, log):
         """The table's elements loaded by the target cluster from the file
         written for them; the rows the file held."""
+        from ..cloudapi import gate
+        gate(self)
         import boto3
 
         from .. import decide
@@ -939,6 +945,8 @@ class NeptuneEngine(NeutralCopier, Engine):
     # ---- Neptune Streams ---------------------------------------------------
 
     def _data(self, side):
+        from ..cloudapi import gate
+        gate(self)
         held = self.__dict__.setdefault("_data_clients", {})
         if side not in held:
             import boto3

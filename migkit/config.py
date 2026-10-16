@@ -965,6 +965,8 @@ class KeychainEndpoint(SideEndpoint):
 
 
 def _aws_client(service, region=None, role=None):
+    from .cloudapi import gate
+    gate(None)
     try:
         import boto3
     except ImportError:
@@ -2038,6 +2040,8 @@ def _aws_secret(ref):
 
 
 def _gcp_secret(ref):
+    from .cloudapi import gate
+    gate(None)
     try:
         from google.cloud import secretmanager
     except ImportError:
@@ -2053,6 +2057,8 @@ def _gcp_secret(ref):
 
 
 def _azure_secret(ref):
+    from .cloudapi import gate
+    gate(None)
     try:
         from azure.identity import DefaultAzureCredential
         from azure.keyvault.secrets import SecretClient

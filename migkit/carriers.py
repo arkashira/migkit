@@ -257,6 +257,8 @@ class S3Store(Store):
         self._client = None
 
     def _s3(self):
+        from .cloudapi import gate
+        gate(self)
         if self._client is None:
             import boto3
             from botocore.config import Config
@@ -362,6 +364,8 @@ class AzureBlobStore(Store):
         self._client = None
 
     def _box(self):
+        from .cloudapi import gate
+        gate(self)
         if self._client is None:
             from azure.storage.blob import BlobServiceClient
             kw = {"connection_verify": self.ca_bundle} if self.ca_bundle \
@@ -452,6 +456,8 @@ class GcsStore(Store):
         self._bucket = None
 
     def _gcs(self):
+        from .cloudapi import gate
+        gate(self)
         if self._bucket is None:
             from google.cloud import storage
             client = storage.Client(

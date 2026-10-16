@@ -159,16 +159,16 @@ def test_redis_holds_the_server_or_refuses_the_accounts(tmp_path,
 def test_sql_server_is_read_only_unless_its_group_forbids(tmp_path,
                                                           monkeypatch):
     hop = _hop(tmp_path, "mssql")
-    _facts(monkeypatch, freeze.MSSQLHold, alter=True,
+    _facts(monkeypatch, freeze.MSSQLHold, alter=True, sees=True,
            control=True, kill=True, **{"alone in its group": True})
     assert freeze.choose(hop, _Eng("mssql"), ["app"]).rung.name == \
         "mssql_read_only"
-    _facts(monkeypatch, freeze.MSSQLHold, alter=True,
+    _facts(monkeypatch, freeze.MSSQLHold, alter=True, sees=True,
            control=True, kill=True, **{"alone in its group": False})
     got = freeze.choose(hop, _Eng("mssql"), ["app"])
     assert got.rung.name == "mssql_deny" and "availability group" in \
         got.reason, got
-    _facts(monkeypatch, freeze.MSSQLHold, alter=True,
+    _facts(monkeypatch, freeze.MSSQLHold, alter=True, sees=True,
            control=False, kill=True, **{"alone in its group": False})
     got = freeze.choose(hop, _Eng("mssql"), ["app"])
     assert got.rung is None and "CONTROL" in got.reason, got
@@ -550,3 +550,53 @@ def test_a_thaw_goes_through_the_hold_of_the_side_it_was_taken_on(
     assert freeze.server_state(hop) is None
     assert json.loads(freeze._server_path(hop, "dst").read_text())[
         "way"] == "redis_pause"
+
+
+# --- W17F2: the facts SQL Server, Cassandra, Kafka and MongoDB give --------
+
+def test_sql_server_ends_sessions_only_where_it_sees_them(tmp_path,
+                                                          monkeypatch):
+    hop = _hop(tmp_path, "mssql")
+    given = dict(alter=True, control=True, kill=True,
+                 **{"alone in its group": False})
+    _facts(monkeypatch, freeze.MSSQLHold, sees=True, **given)
+    assert freeze.choose(hop, _Eng("mssql"), ["app"]).rung.name == \
+        "mssql_deny"
+    _facts(monkeypatch, freeze.MSSQLHold, sees=False, **given)
+    got = freeze.choose(hop, _Eng("mssql"), ["app"])
+    assert got.rung is None and "VIEW SERVER STATE" in got.reason, got
+
+
+def test_cassandra_without_the_right_to_revoke_says_it_holds_nothing(
+        tmp_path, monkeypatch):
+    hop = _hop(tmp_path, "cassandra")
+    _facts(monkeypatch, freeze.CassandraHold, authorizer=True,
+           authorize=False, cache=2.0, budget=30.0)
+    got = freeze.choose(hop, _Eng("cassandra"), ["app"])
+    assert got.rung is None and "AUTHORIZE" in got.reason, got
+
+
+def test_kafka_denies_only_where_its_principal_may_alter_access(
+        tmp_path, monkeypatch):
+    hop = _hop(tmp_path, "kafka")
+    _facts(monkeypatch, freeze.KafkaHold, authorizer=True, alters=True)
+    assert freeze.choose(hop, _Eng("kafka"), ["cluster"]).rung.name == \
+        "kafka_cluster"
+    _facts(monkeypatch, freeze.KafkaHold, authorizer=True, alters=False)
+    got = freeze.choose(hop, _Eng("kafka"), ["cluster"])
+    assert got.rung is None and "ALTER on the cluster" in got.reason, got
+
+
+def test_mongodb_locks_a_server_no_one_has_locked_already(tmp_path,
+                                                          monkeypatch):
+    hop = _hop(tmp_path, "mongodb")
+    given = dict(version=(5, 0), actions={"fsync", "unlock"},
+                 commands={"fsync", "fsyncUnlock", "setUserWriteBlockMode",
+                           "grantRolesToUser", "revokeRolesFromUser"},
+                 auth=True)
+    _facts(monkeypatch, freeze.MongoHold, locked=False, **given)
+    assert freeze.choose(hop, _Eng("mongodb"), ["app"],
+                         "server").rung.name == "mongo_fsync"
+    _facts(monkeypatch, freeze.MongoHold, locked=True, **given)
+    got = freeze.choose(hop, _Eng("mongodb"), ["app"], "server")
+    assert got.rung is None and "locked already" in got.reason, got

@@ -1877,6 +1877,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * migkit asks no API of <...>; it asks <...>
 
+* <...>; let them out (MIGKIT_EGRESS, or the hop's options.egress) to make this call
+
 * <...>'s API is asked here for <...>; <...> is not one of them
 
 * <...> has no restore point ready to copy from: make one first

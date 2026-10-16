@@ -145,3 +145,58 @@ def test_the_open_source_server_is_told_as_itself_and_sure(key, engine,
         b = get_engine(hop)._brands()[0]
     assert (b.name, b.confidence) == (brand, "sure"), b
     assert b.sources and not variants.acts_on(b, "a step")
+
+
+# --- W17F2: the provider's own API, asked behind the egress gate -----------
+
+def _docdb_raw():
+    from migkit import variants as v
+    for name, sigs, _ in v.SIGNATURES["mongodb"]:
+        if name == "documentdb":
+            key, needle = sigs[0]
+            return {key: needle or "yes", "version": "5.0.0"}
+    raise AssertionError("no DocumentDB sign")
+
+
+def test_the_provider_confirming_the_brand_makes_it_sure(monkeypatch):
+    from types import SimpleNamespace
+    from migkit import egress, managed, variants as v
+    side = SimpleNamespace(host="10.0.0.5", port=27017, options={})
+    hop = SimpleNamespace(name="hx", options={}, source=side, target=side)
+    eng = SimpleNamespace(hop=hop)
+    monkeypatch.setattr(managed, "api_conf", lambda h, e, w: ("aws", {}))
+    asked = []
+
+    class Fake:
+        def instance(self):
+            asked.append(1)
+            return SimpleNamespace(product="docdb", host="10.0.0.5")
+
+        def _describe(self):
+            return {"groups": [("cluster", "g")]}
+
+        def _params(self, d, names):
+            return {"change_stream_log_retention_duration":
+                    {"value": "10800"}}
+    monkeypatch.setattr(managed, "adapter", lambda h, e, w: Fake())
+    raw = {**_docdb_raw(), **v.context(side, eng, "src")}
+    got = v.identify("mongodb", raw)
+    assert got.name == "documentdb" and got.confidence == "sure"
+    assert any("provider's own API" in s for s in got.sources)
+    assert v.api_facts(hop, eng, "src")["_retention"] == 10800
+    # unreachable: the fact unknown, the server's sign alone - likely
+    monkeypatch.setattr(managed, "adapter", lambda h, e, w: (_ for _ in ())
+                        .throw(OSError("no route")))
+    got = v.identify("mongodb", {**_docdb_raw(),
+                                 **v.context(side, eng, "src")})
+    assert got.confidence == "likely", got
+    # refused by the egress: not asked, said, confidence unchanged
+    monkeypatch.setattr(managed, "adapter", lambda h, e, w: Fake())
+    monkeypatch.setenv("MIGKIT_EGRESS", "none")
+    egress._SAID.clear()
+    n = len(asked)
+    got = v.identify("mongodb", {**_docdb_raw(),
+                                 **v.context(side, eng, "src")})
+    assert got.confidence == "likely" and len(asked) == n
+    assert any("not asked" in s and "MIGKIT_EGRESS" in s
+               for s in got.sources), got.sources

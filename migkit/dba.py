@@ -1138,6 +1138,8 @@ def _crdb(hop, e, key, side, dbs, where, read, write, follow, native):
 
 
 def _dsql(hop, e, key, side, dbs, where, read, write, follow, native):
+    from .cloudapi import gate
+    gate(hop)
     out = _pgwire(hop, e, key, side, dbs, read, write)
     if not follow:
         return out

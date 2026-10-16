@@ -127,6 +127,8 @@ def _now():
 
 def _client(conf):
     """The store's client, from its own credentials chain."""
+    from .cloudapi import gate
+    gate(None, 'anchor')
     try:
         import boto3
     except ImportError:
