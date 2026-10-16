@@ -51,7 +51,7 @@ def _hop(pg_pair, tmp_path):
 
 
 @pytest.fixture
-def pair(pg_pair):
+def pair(pg_pair, tmp_path):
     src, dst = pg_pair["src"], pg_pair["dst"]
     for port in (src, dst):
         psql(port, "drop table if exists child, parent cascade")
@@ -61,7 +61,9 @@ def pair(pg_pair):
               " generate_series(1, 1000) g;"
               " insert into child select g, 1 + g % 1000, 'c' || g from"
               " generate_series(1, 100000) g; analyze")
-    return pg_pair
+    yield pg_pair
+    # a copier a stopped test leaves behind must not write into the next
+    subprocess.run(["pkill", "-TERM", "-f", f"pgcopydb.*{tmp_path}"])
 
 
 def _digest(port):
@@ -194,3 +196,50 @@ def test_a_copy_stopped_mid_window_leaves_the_keys_off_for_the_next_window(
     assert psql(pair["dst"], FKS).stdout.strip() == before
     assert not list(tmp_path.rglob("dropped-fks.*.json"))
     assert not movers._fks_off(_hop(pair, tmp_path), "postgres")
+
+
+def test_a_resume_after_a_key_that_could_not_go_back_puts_it_back_once(
+        pair, tmp_path):
+    """The run that stopped on `NotPutBack` goes on once the row is gone:
+    the key an earlier load took off goes back at the end of this one,
+    validated and once, and no row is on the target twice."""
+    before = psql(pair["dst"], FKS).stdout.strip()
+    hit = []
+
+    def row_without_a_parent(keys, copying, conn):
+        if copying > 0 and keys == 0 and not hit:
+            conn.execute("insert into child values (-1, 999999, 'orphan')")
+            hit.append(True)
+    first = Watch(pair["dst"], row_without_a_parent)
+    first.start()
+    try:
+        with pytest.raises(NotPutBack):
+            movers.pgcopydb_move(_hop(pair, tmp_path), "postgres", 2, True,
+                                 None)
+    finally:
+        first.stop.set()
+        first.join(5)
+    assert hit and list(tmp_path.rglob("dropped-fks.*.json"))
+    psql(pair["dst"], "delete from child where id = -1")
+
+    said = []
+    again = Watch(pair["dst"])
+    again.start()
+    try:
+        movers.pgcopydb_move(_hop(pair, tmp_path), "postgres", 2, True,
+                             said.append)
+    finally:
+        again.stop.set()
+        again.join(5)
+    assert [x for x in said if "an earlier load took off and did not put"
+            " back go back at the end of this one" in x], said
+    assert len([x for x in said if x.endswith("foreign keys put back")]) == 1
+    assert psql(pair["dst"], FKS).stdout.strip() == before
+    assert not list(tmp_path.rglob("dropped-fks.*.json"))
+    assert not movers._fks_off(_hop(pair, tmp_path), "postgres")
+    # no row twice: the table is whole once (a part of it the program
+    # loads again is loaded into a table it emptied first, else its
+    # primary key would have refused the COPY and the move failed)
+    assert psql(pair["dst"], "select count(*), count(distinct id) from"
+                " child").stdout.strip() == "100000|100000"
+    assert _digest(pair["dst"]) == _digest(pair["src"])
