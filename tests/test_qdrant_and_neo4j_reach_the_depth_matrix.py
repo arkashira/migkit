@@ -244,9 +244,9 @@ def test_the_change_capture_is_followed_in_order_keyed_by_the_source_id(
         "db.cdc.current": [{"id": "c0"}],
         "db.cdc.query": EVENTS}, types=["KNOWS"])
     changes, token = eng.neutral_changes("src", "neo4j")
-    assert changes == [] and token == {"cdc": "c0"}
+    assert changes == [] and token == {"cdc": "c0", "seen": 0}
     changes, token = eng.neutral_changes("src", "neo4j", token)
-    assert token == {"cdc": "c4"}
+    assert token == {"cdc": "c4", "seen": len(EVENTS)}
     assert asked[-1][1]["from"] == "c0"
     got = [(c["op"], c["table"], c["key"]) for c in changes]
     assert got == [("insert", "nodes", {"id": "p1"}),

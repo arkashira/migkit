@@ -22,12 +22,30 @@ one statement, the key property indexed per label on the target first.
 Its changes are Neo4j's change data capture (5.13 and later, with the
 database's `txLogEnrichment` set): one log per database, each change at
 its id, in commit order. A server without it says so, and the follow is
-refused, naming the setting. A change id is opaque, so no fence is read
-off it: the fence is not yet built (UNPROVED, capabilities).
+refused, naming the setting. A change id is opaque - the server
+promises no order to read off it - so a position is counted: the changes
+read since the copy point travel with the id (`change_position`), and the
+changes still ahead of it are asked of the log (`changes_behind`).
+
+A database can also move as a dump loaded on the target (`neo4j-admin`,
+named by the side's `admin` option, through a directory both reach,
+`dump_dir`). It stops both databases, so it is taken only where both
+sides' `stop_database` option says it may be, the target holds nothing,
+and a graph is large enough that the dump and load, timed on the disk
+measured in `dump_dir`, beat the id ranges timed on the first one read.
+Users are carried by name, status, home database and roles; their
+passwords are not readable, so each is made with a password nobody knows
+and must be reset.
 """
 import base64
 import json
+import os
+import secrets
+import shlex
+import shutil
+import subprocess
 import time
+import uuid
 import urllib.error
 import urllib.request
 
@@ -407,6 +425,211 @@ class Neo4jEngine(NeutralCopier, Engine):
     def apply(self, db, action):
         return self._as_pair().apply(db, action)
 
+    # ---- moving a database: id ranges or its dump ------------------------------
+
+    def _admin(self, side):
+        got = self._ep(side).options.get("admin")
+        return shlex.split(got) if isinstance(got, str) else list(got or [])
+
+    def _may_stop(self, side):
+        return self._ep(side).options.get("stop_database") in (
+            True, "true", "on", "yes")
+
+    def _folder(self, side):
+        o = self._ep(side).options
+        return str(o.get("dump_dir") or self._ep("src").options.get(
+            "dump_dir") or "")
+
+    def _sizes(self, db):
+        """What a copy by ranges costs, from the first range read: the
+        elements, the bytes a stored element takes as the wire carries it
+        and the seconds the whole graph would take at the rate that read
+        ran at."""
+        t0 = time.monotonic()
+        rows, _ = self._range("src", db, "nodes", -1, BATCH)
+        took = max(time.monotonic() - t0, 1e-6)
+        per = (sum(len(json.dumps(r, default=str)) for r in rows)
+               / len(rows)) if rows else 0
+        n = sum(self._count("src", db, t) for t in TABLES)
+        rate = (len(rows) * per) / took
+        return {"elements": n, "bytes": n * per,
+                "ranges_s": n * per / rate if rate else 0.0}
+
+    def _disk_rate(self, folder):
+        """Bytes a second the folder takes a written, synced file at,
+        timed on a probe file that is removed."""
+        path = os.path.join(folder, f".probe-{uuid.uuid4().hex}")
+        blob = os.urandom(8 << 20)
+        t0 = time.monotonic()
+        try:
+            with open(path, "wb") as f:
+                f.write(blob)
+                f.flush()
+                os.fsync(f.fileno())
+        finally:
+            took = max(time.monotonic() - t0, 1e-6)
+            if os.path.exists(path):
+                os.unlink(path)
+        return len(blob) / took
+
+    def _move_ways(self):
+        from .. import decide
+        return (
+            decide.Rung(
+                "dump", "the database dumped and loaded on the target",
+                needs=(
+                    decide.Need(
+                        "every element moved as it is",
+                        lambda f: not f["changed"],
+                        "{rung} carries the whole store, and a row filter,"
+                        " mask, label or type scope changes what moves"),
+                    decide.Need(
+                        "both sides allowed to stop the database",
+                        lambda f: f["stoppable"],
+                        "{rung} stops the database on both sides, and the"
+                        " `stop_database` option of one of them does not"
+                        " allow it"),
+                    decide.Need(
+                        "an admin command and a shared directory",
+                        lambda f: f["admin"],
+                        "{rung} needs the `admin` command on both sides"
+                        " (found on this machine) and a `dump_dir` they"
+                        " both reach"),
+                    decide.Need("a target holding nothing",
+                                lambda f: f["empty"],
+                                "{rung} replaces the target's database, and"
+                                " the target holds elements"),
+                    decide.Need(
+                        "a graph the ranges would take longer over",
+                        lambda f: f["sizes"]["ranges_s"] > 2 * f["sizes"][
+                            "bytes"] / f["disk"],
+                        lambda f: f"the ranges take about"
+                        f" {f['sizes']['ranges_s']:.1f}s, no longer than a"
+                        " dump and load on this disk")),
+                because="the store copied whole, ids and indexes with it",
+                leaves="a dump file in the shared directory", external=True),
+            decide.Rung("ranges", "the elements in ranges of their id",
+                        leaves="nothing"))
+
+    def _program(self, cmd, log):
+        done = subprocess.run(cmd, capture_output=True, text=True)
+        if done.returncode:
+            from .. import decide
+            raise decide.Blocked(
+                (done.stderr or done.stdout or "the command failed"
+                 ).strip().splitlines()[-1][:160])
+        log(f"{' '.join(cmd[-3:-1])}: done")
+
+    def _dump_load(self, db, log):
+        """The source's database dumped while stopped and loaded on the
+        target while stopped; both are started again whatever happened."""
+        from .. import decide
+        sdb, tdb = self._d("src", db), self._d("dst", db)
+        folder = self._folder("src")
+        known = {r["name"] for r in self._run(
+            "dst", "system", "SHOW DATABASES YIELD name RETURN name")}
+        self._run("src", "system", f"STOP DATABASE {quoted(sdb)} WAIT")
+        try:
+            self._program(self._admin("src") + [
+                "database", "dump", f"--to-path={folder}", sdb], log)
+        finally:
+            self._run("src", "system", f"START DATABASE {quoted(sdb)} WAIT")
+        if tdb in known:
+            self._run("dst", "system", f"STOP DATABASE {quoted(tdb)} WAIT")
+        try:
+            self._program(self._admin("dst") + [
+                "database", "load", f"--from-path={self._folder('dst')}",
+                "--overwrite-destination=true", tdb], log)
+        finally:
+            self._run("dst", "system", f"CREATE DATABASE {quoted(tdb)} IF NOT"
+                      " EXISTS WAIT" if tdb not in known else
+                      f"START DATABASE {quoted(tdb)} WAIT")
+        for t in TABLES:
+            a, b = self._count("src", db, t), self._count("dst", db, t)
+            if a != b:
+                raise decide.Blocked(f"the loaded database holds {b:,}"
+                                     f" {t}, the source {a:,}")
+
+    def move_table(self, db, sch, tbl, chunk, ck, log):
+        from .. import decide
+        if tbl != "nodes":
+            return super().move_table(db, sch, tbl, chunk, ck, log)
+        src, dst = self._admin("src"), self._admin("dst")
+
+        def changed():
+            try:
+                return any(self.hop.row_filter(db, t) or self.hop.masks(db, t)
+                           or self._scope("src", t) or self._scope("dst", t)
+                           or not self.in_scope(db, t) for t in TABLES)
+            except SystemExit:
+                return True
+        facts = decide.Facts(
+            {"changed": changed(), "stoppable": self._may_stop("src") and self._may_stop("dst"),
+             "admin": bool(src and dst and self._folder("src")
+                           and self._folder("dst")
+                           and shutil.which(src[0]) and shutil.which(dst[0])
+                           and os.path.isdir(self._folder("src")))},
+            empty=lambda: not any(self._count("dst", db, t) for t in TABLES),
+            sizes=lambda: self._sizes(db),
+            disk=lambda: self._disk_rate(self._folder("src")))
+
+        def run(choice):
+            if choice.rung.name == "dump":
+                self._dump_load(db, log)
+                for t in TABLES:
+                    st = ck.setdefault(self.move_key(db, "", t), {})
+                    st["done"], st["way"] = True, "dump"
+                ck.save()
+                return None
+            return super(Neo4jEngine, self).move_table(db, sch, tbl, chunk,
+                                                       ck, log)
+        return self._attempt(f"moving {db}", self._move_ways(), run, facts,
+                             log=log)[1]
+
+    # ---- users ----------------------------------------------------------------
+
+    def _users(self, side):
+        try:
+            rows = self._run(side, "system", "SHOW USERS YIELD user, roles,"
+                             " suspended, home RETURN user, roles,"
+                             " suspended, home")
+        except RuntimeError:
+            rows = self._run(side, "system", "SHOW USERS YIELD user,"
+                             " suspended, home RETURN user, suspended, home")
+        return [r for r in rows if r.get("user")]
+
+    def carry_database_objects(self, db, log=None):
+        """The source's users made on the target: name, status, home
+        database and roles. A password cannot be read, so each is made with
+        one nobody knows and must be changed at first sign-in."""
+        say = log or (lambda m: None)
+        have = {u["user"] for u in self._users("dst")}
+        made, unroled = [], []
+        for u in self._users("src"):
+            if u["user"] in have:
+                continue
+            name = quoted(u["user"])
+            home = (f" SET HOME DATABASE {quoted(u['home'])}"
+                    if u.get("home") else "")
+            self._run("dst", "system", f"CREATE USER {name} IF NOT EXISTS"
+                      f" SET PASSWORD $pw CHANGE REQUIRED SET STATUS"
+                      f" {'SUSPENDED' if u.get('suspended') else 'ACTIVE'}"
+                      f"{home}", pw=secrets.token_urlsafe(24))
+            for role in u.get("roles") or []:
+                try:
+                    self._run("dst", "system",
+                              f"GRANT ROLE {quoted(role)} TO {name}")
+                except RuntimeError:
+                    unroled.append(f"{u['user']}:{role}")
+            made.append(u["user"])
+        if made:
+            say(f"{len(made)} users made on the target with a password"
+                " nobody knows: reset each one's password before it signs in")
+        if unroled:
+            say("roles the target does not have, not granted: "
+                + ", ".join(unroled[:5]))
+        return made
+
     # ---- the deep check ------------------------------------------------------
 
     def _constraints(self, side, db):
@@ -490,7 +713,22 @@ class Neo4jEngine(NeutralCopier, Engine):
         why = self._cdc_on(db)
         if why:
             raise SystemExit(f"{db}: its changes cannot be followed - {why}")
-        return {"cdc": self._run(side, db, "CALL db.cdc.current()")[0]["id"]}
+        return {"cdc": self._run(side, db, "CALL db.cdc.current()")[0]["id"],
+                "seen": 0}
+
+    @staticmethod
+    def change_position(token):
+        """Changes read since the copy point: the server's change id says
+        nothing of order, so the position is counted beside it."""
+        return int((token or {}).get("seen") or 0)
+
+    def changes_behind(self, side, db, token, most=100_000):
+        """(changes in the log after `token`, whether that is all of them):
+        counted up to `most`, which is what a fence waits to see at zero."""
+        rows = self._run(side, db, "CALL db.cdc.query($from) YIELD id RETURN"
+                         " id LIMIT $most", **{"from": token["cdc"],
+                                               "most": int(most)})
+        return len(rows), len(rows) < int(most)
 
     def copy_point(self, side, db):
         return self.change_point(side, db)
@@ -557,7 +795,8 @@ class Neo4jEngine(NeutralCopier, Engine):
                     not names or set(tags) & set(names)):
                 out.append(got)
         last = rows[-1]["id"] if rows else token["cdc"]
-        return out, {"cdc": last}
+        return out, {"cdc": last, "seen": self.change_position(token)
+                     + len(rows)}
 
     def position_lost(self, side, db, token):
         """Why the log no longer holds `token`, or None: the server refuses
@@ -598,7 +837,9 @@ class Neo4jEngine(NeutralCopier, Engine):
                           "item": "changes followed through the database's"
                                   " change capture",
                           "detail": "needs txLogEnrichment FULL or DIFF on"
-                                    " the source database"})
+                                    " the source database; change ids are"
+                                    " opaque, so positions are counted"
+                                    " changes, not read from the id"})
         return items
 
     def _assess_extra(self):

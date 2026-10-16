@@ -407,6 +407,14 @@ PROFILES = {p.key: p for p in (
                  ("MSSQL_TELEMETRY_ENABLED", "false")),
             vm=True, platform="" if "azure-sql-edge" in MSSQL_IMAGE
             else "linux/amd64", user="sa", password=STRONG, start_s=480),
+    Profile("qdrant", "qdrant", "qdrant/qdrant:v1.12.4", 6333, 36, mb=200,
+            start_s=90),
+    Profile("neo4j", "neo4j", "neo4j:5.26-enterprise", 7474, 38, mb=1200,
+            env=(("NEO4J_AUTH", "neo4j/" + STRONG),
+                 ("NEO4J_ACCEPT_LICENSE_AGREEMENT", "eval"),
+                 ("NEO4J_server_memory_heap_max__size", "512m"),
+                 ("NEO4J_server_memory_pagecache_size", "128m")),
+            user="neo4j", password=STRONG, start_s=240),
     Profile("oracle", "oracle", "gvenzl/oracle-free:slim-faststart", 1521,
             34, roles=("one",), mb=2000,
             env=(("ORACLE_PASSWORD", STRONG),), vm=True, user="system",
@@ -1325,6 +1333,75 @@ class _Dynamo:
             c.delete_table(TableName=t)
 
 
+class _Http:
+    """A server answering JSON over HTTP at its host port."""
+    READY = "/"
+
+    def http(self, s, method, path, body=None, auth=None):
+        import base64
+        import json
+        import urllib.request
+        req = urllib.request.Request(
+            f"http://{s.host}:{s.port}{path}", method=method,
+            data=None if body is None else json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"})
+        if auth:
+            req.add_header("Authorization", "Basic " + base64.b64encode(
+                ":".join(auth).encode()).decode())
+        with urllib.request.urlopen(req, timeout=15) as r:
+            raw = r.read()
+        return json.loads(raw) if raw else None
+
+    def sql(self, s, statement, db=None):
+        raise TypeError("this server takes HTTP: server.port is its address")
+
+    def ready(self, s):
+        self.http(s, "GET", self.READY)
+        return True
+
+    def baseline(self, s):
+        return {}
+
+    def open(self, s, db):
+        pass
+
+
+class _Qdrant(_Http):
+    READY = "/collections"
+
+    def reset(self, s):
+        for c in self.http(s, "GET", "/collections")["result"]["collections"]:
+            self.http(s, "DELETE", f"/collections/{c['name']}")
+
+
+class _Neo4j(_Http):
+    @staticmethod
+    def cypher(s, db, statement):
+        return _Http().http(
+            s, "POST", f"/db/{db}/tx/commit",
+            {"statements": [{"statement": statement}]},
+            auth=(s.profile.user, s.profile.password))
+
+    def ready(self, s):
+        self.cypher(s, "system", "SHOW DATABASES")
+        return True
+
+    def open(self, s, db):
+        self.cypher(s, "system", f"CREATE DATABASE `{db}` IF NOT EXISTS WAIT")
+
+    def reset(self, s):
+        got = self.cypher(s, "system", "SHOW DATABASES YIELD name RETURN name")
+        for d in got["results"][0]["data"]:
+            if d["row"][0] not in ("system", "neo4j"):
+                self.cypher(s, "system", f"DROP DATABASE `{d['row'][0]}`"
+                                         " IF EXISTS WAIT")
+        self.cypher(s, "neo4j", "MATCH (n) DETACH DELETE n")
+        users = self.cypher(s, "system", "SHOW USERS YIELD user RETURN user")
+        for u in users["results"][0]["data"]:
+            if u["row"][0] != s.profile.user:
+                self.cypher(s, "system", f"DROP USER `{u['row'][0]}`")
+
+
 class _ObjectStore:
     @staticmethod
     def client(s):
@@ -1450,7 +1527,7 @@ _ENGINES = {"postgres": _Postgres(), "mysql": _MySQL(), "mongo": _Mongo(),
             "redis": _Redis(), "kafka": _Kafka(), "cassandra": _Cassandra(),
             "clickhouse": _ClickHouse(), "opensearch": _OpenSearch(),
             "dynamodb": _Dynamo(), "objectstore": _ObjectStore(), "mssql": _SqlServer(),
-            "oracle": _Oracle()}
+            "oracle": _Oracle(), "qdrant": _Qdrant(), "neo4j": _Neo4j()}
 
 
 # ---- what a test file holds (for the lanes and the lock) --------------------

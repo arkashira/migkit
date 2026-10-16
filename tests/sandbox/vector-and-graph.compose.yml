@@ -1,0 +1,21 @@
+# A vector store and a graph store for migkit's sandbox: two of each, the
+# graph with change capture on. Bring up with
+# `docker compose -f tests/sandbox/vector-and-graph.compose.yml up -d`.
+services:
+  qdrant-src:
+    image: qdrant/qdrant:v1.12.4
+    ports: ["127.0.0.1:26333:6333"]
+  qdrant-dst:
+    image: qdrant/qdrant:v1.12.4
+    ports: ["127.0.0.1:26334:6333"]
+  neo4j-src: &graph
+    image: neo4j:5.26-enterprise
+    ports: ["127.0.0.1:27474:7474"]
+    environment: &graph-env
+      NEO4J_AUTH: neo4j/CHANGE_ME-Test1
+      NEO4J_ACCEPT_LICENSE_AGREEMENT: eval
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 128m
+  neo4j-dst:
+    <<: *graph
+    ports: ["127.0.0.1:27475:7474"]

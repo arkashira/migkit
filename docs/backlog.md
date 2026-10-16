@@ -8026,6 +8026,25 @@ out of the comparison - a wrong vector would pass. So:
   path, Neo4j's dump and load, its users, a fence on its change ids,
   servers of each in the sandbox (`tests/servers.py`) and the depth items
   marked not yet under R16b and R16c in `capabilities.py`.
+* **b, c deeper (W13J, 2026-10-16)**: Qdrant makes a collection with the
+  source's HNSW and quantization and the deep check holds the target to
+  them; recall at k is measured on a sample sized to one hit in k, each
+  answer scored against the source's exact nearest points, and a target
+  significantly behind the source fails (a warning while it still indexes);
+  a collection moves by pages or by the server's snapshot, decided from the
+  measured round trip and the rate of one real page. Neo4j: a dump and load
+  rung chosen against id ranges from the ranges' measured rate and the
+  shared directory's measured disk rate (only where both sides allow the
+  stop, nothing is scoped and the target holds nothing); users carried by
+  name, status, home and roles with passwords nobody knows; a change
+  position counted beside the opaque change id (`change_position`,
+  `changes_behind`); sandbox profiles `qdrant` and `neo4j` in
+  `tests/servers.py` and `tests/sandbox/vector-and-graph.compose.yml`.
+  Not done: the fence (`fence_wait`) still delegates to the pair and does
+  not yet read `changes_behind`; the snapshot restore and the dump and load
+  are proved by their decision and not run against a server (no sandbox
+  start); sparse-only collections have no recall check; the depth cells
+  for these ways are not yet named in `capabilities.py` (W13M).
 
 ### R17. The path between the databases, and what it carries (a, b and
 c done 2026-09-27; d begun: the read beside the source)
