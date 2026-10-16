@@ -949,6 +949,16 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: <...> triggers were not switched on again: <...>. What to run is in <...>
 
+* <...>: the source's log can be followed no way here - <...>
+
+* the server migkit owns would not restore the log backup in standby: <...>
+
+* <...>: the log backups are restored onto the server migkit owns, which is not reachable
+
+* <...>.<...>: a delete in the source's log names a row whose key cannot be read from it: run check on the table
+
+* <...>.<...>: a row the source's log changed is no longer where the log put it, and no delete of it follows: run check on the table, then start the tail again
+
 ## Redis
 
 * pip install 'migkit[redis]' for redis support
@@ -1125,6 +1135,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: the target's Data Pump said it finished, and <...> hold other than the source held at SCN <...> - it said: <...> | <...>
 
+* <...>: no reader of the source's redo keeps up here - <...>
+
 * MIGKIT_ORACLE_READER=<...> is not one of <...>, <...>
 
 * the redo-file reader started here did not come up; what it said is in <...>
@@ -1142,6 +1154,12 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * the <...> is <...> (<...>), and this hop names it <...>: name its engine <...>
 
 * <...>: the server's load read <...> rows and loaded <...> (<...> skipped or rejected). The table is not taken as moved: its messages are on the target; move it with the table copier
+
+* <...>.<...>: a row the source's log changed is no longer where the log put it, and no delete of it follows: run check on the table, then start the tail again
+
+* <...>.<...>: a delete in the source's log names a row whose key cannot be read from it: run check on the table
+
+* the source's log could not be read (SQL code <...>)
 
 ## Db2 for i
 

@@ -4287,6 +4287,14 @@ class MSSQLEngine(DbapiRows, Engine):
         finally:
             conn.close()
 
+    def log_follower(self):
+        """The follower of the source's own log where neither tracking
+        way is on (`engines.mssql_log`: its live log, or its log backups
+        restored onto a server migkit owns): the one hook it is reached
+        by, wired into the follow ladder by this module's owner."""
+        from . import mssql_log
+        return mssql_log
+
     def neutral_changes(self, side, db, token=None, limit=1000):
         """Each row changed since `token`, as it is now: a delete where it
         is gone. Read through `_ct_read`, which stops rather than hand on

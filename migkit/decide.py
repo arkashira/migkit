@@ -4846,3 +4846,128 @@ WAYS["partitioned"].update({
     "gaussdb": ("yes", "@_deep_partitions"),
     "oceanbase-oracle": ("yes", "@_deep_partitions"),
 })
+
+
+# ---- the log readers no sandbox here runs (backlog LT.R6, LT.R2, LT.R3,
+# ---- LT.C5): each a climb over what its server says ---------------------
+
+def db2_log_way(facts):
+    """How a Db2 source's changes are read from its own log
+    (`engines.db2_log`). `facts`: `library` (the data server client's
+    log-read API loads on this machine), `archived` (the database keeps
+    its log past a restart point: archive logging, not circular),
+    `captured` and `tables` (of the tables in scope, how many log their
+    whole row: `SYSCAT.TABLES.DATACAPTURE` other than 'N'). A table that
+    logs its whole row hands its change over from the log; one that logs
+    only the bytes an update changed names the row by its record id, and
+    the row is read from the source as it is now - which the later
+    changes of it, also in the log, converge on."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    base = (
+        Need("the log-read API on this machine",
+             lambda x: bool(x.get("library")),
+             "the source's log cannot be read from this machine: install"
+             " the database's data server client (its runtime, with the"
+             " log-read API) here, or follow the source another way"),
+        Need("a log kept past its restart point",
+             lambda x: bool(x.get("archived")),
+             "the source's log is circular, so a record is overwritten"
+             " once its transaction ends and a reader that falls behind"
+             " loses changes: set the database's log archiving on"
+             " (LOGARCHMETH1) and take the backup it then asks for"))
+    said = (f"{f.get('captured', 0)} of the {f.get('tables', 0)} tables in"
+            " scope log their whole row")
+    return climb("how a Db2 source's changes are read", (
+        Rung("images", "every row change read whole from the log",
+             needs=base + (Need(
+                 "every table logging its whole row",
+                 lambda x: x.get("tables", 0) > 0
+                 and x.get("captured", 0) >= x.get("tables", 0),
+                 lambda x: f"only {said}"),),
+             because=said + ": the log holds each row before and after"),
+        Rung("by record", "each changed row named by its record id in the"
+             " log, read from the source as it is now", footprint=1,
+             needs=base + (Need("a table in scope",
+                                lambda x: x.get("tables", 0) > 0,
+                                "no table is in scope"),),
+             because=said + "; an update of the rest logs only the bytes"
+                     " it changed, so the row is read by its record id")),
+        f)
+
+
+def mssql_log_way(facts, costs=None):
+    """How a SQL Server source is followed without Change Tracking or
+    Change Data Capture (`engines.mssql_log`): its live log read where its
+    account may, or its log backups restored, one after the other, onto a
+    server migkit owns and read there. `facts`: `live` (the log answered
+    the account), `recovery` (the database's recovery model), `standby`
+    (the hop names a server migkit owns to restore onto), `chain` (the log
+    backups since the position follow on, none missing), and `costs`
+    the lag each way was measured at here."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    said = f"the recovery model is {f.get('recovery') or 'unknown'}"
+    return climb("how a SQL Server source's log is followed", (
+        Rung("live log", "the source's live log, read as it is written",
+             needs=(Need("the log readable by the account",
+                         lambda x: bool(x.get("live")),
+                         "the source's account may not read its live log"
+                         " (it needs the server's administrator role)"),),
+             because=said + ": the live log names every row change as it"
+                     " commits; a position the log has since let go"
+                     " stops the tail, named"),
+        Rung("log backups", "each log backup restored onto a server"
+             " migkit owns, read there", footprint=1,
+             needs=(Need("log backups taken",
+                         lambda x: str(x.get("recovery") or "").upper()
+                         in ("FULL", "BULK_LOGGED"),
+                         lambda x: f"{said}, which takes no log backups"),
+                    Need("a server migkit owns",
+                         lambda x: bool(x.get("standby")),
+                         "the hop names no server migkit owns to restore"
+                         " the log backups onto (log_standby)"),
+                    Need("an unbroken chain", lambda x: x.get("chain")
+                         is not False,
+                         "a log backup since the position is missing: the"
+                         " chain is broken, so the changes in the gap"
+                         " cannot be read")),
+             because=said + ": the source only takes its log backups, as"
+                     " it does anyway; the lag is a backup's interval",
+             leaves="a database in standby on the server migkit owns")),
+        f, costs=costs or None, prove=False)
+
+
+def oracle_reader_rungs():
+    """The ways an Oracle source's redo is read (`oracle_redo.choice`):
+    the redo-file reader beside the redo, then LogMiner - which holds
+    unless the rate it mined here is below the source's busiest hour of
+    redo (`oracle_logminer.reader_check` measures both), when it would
+    fall behind and the climb says so rather than start a tail that never
+    catches up."""
+    def behind(f):
+        m = f.get("rates")
+        return bool(m) and m[1] < m[0]
+
+    return (
+        Rung("redo-files", "the redo-file reader, beside the redo",
+             needs=(Need("to run beside the source's redo",
+                         lambda f: f["listening"] or (
+                             f["platform"] and f["program"]
+                             and f["redo here"]),
+                         "{rung} is not run beside this source's redo: the"
+                         " source names no redo_reader, and this machine"
+                         " cannot read its redo files with the program"),),
+             because="it reads the redo files themselves, so the database"
+                     " does no mining for it",
+             footprint=1),
+        Rung("logminer", "migkit's LogMiner reader",
+             needs=(Need("mining as fast as the source writes redo",
+                         lambda f: not behind(f),
+                         lambda f: "LogMiner mined"
+                         f" {f['rates'][1] / 2 ** 20:.2f} MB of redo a second"
+                         " here, under the"
+                         f" {f['rates'][0] / 2 ** 20:.2f} MB a second the"
+                         " source wrote at its busiest hour: it would fall"
+                         " behind - run the redo-file reader beside the"
+                         " redo and name it (redo_reader: host:port)"),),
+             because="in every edition, on a managed database, with"
+                     " nothing installed"))

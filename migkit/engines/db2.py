@@ -966,12 +966,9 @@ class Db2Engine(CatalogChecks, FoldsToCapitals, DbapiRows, Engine):
         """The reader of the source's change log, where one is installed
         (`engines.db2_log`, which fills `neutral_changes`, `copy_point`
         and `CHANGE_POINT_READS_ONLY` for the pair's delta and tail): the
-        one hook it is reached by; None until then."""
-        import importlib
-        import importlib.util
-        if importlib.util.find_spec(f"{__package__}.db2_log") is None:
-            return None
-        return importlib.import_module(f"{__package__}.db2_log")
+        one hook it is reached by."""
+        from . import db2_log
+        return db2_log
 
     def src_lsn(self, db):
         return self._as_pair().src_lsn(db)

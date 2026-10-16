@@ -5616,6 +5616,26 @@ Still open: bulk paths (container copy jobs), point-in-time snapshots.
   partial updates into full images; NOLOGGING operations detected.
   Db2 without `DATA CAPTURE CHANGES` reaches only D1 (D2 on
   undocumented layouts) - said.
+  *Built 2026-10-16, unproved on a real server (LT.R2, LT.R3, LT.R6):*
+  SQL Server's live log and its log-backup chain (`engines/mssql_log.py`,
+  ranked by `decide.mssql_log_way` on the account's reach, the recovery
+  model, a server migkit owns and the chain unbroken, the measured lag
+  ordering them): on the sandbox's arm64 build an insert, a change and a
+  delete were read back from the live log by the reader, and a log backup
+  restored in standby was taken; the backups' records read on the owned
+  server and the chain are replayed. Db2's log through the client's
+  documented log-read API (`engines/db2_log.py`, `decide.db2_log_way` on
+  the client being here, archive logging and each table's `DATACAPTURE`:
+  whole images, or the row by its record id), the missing client a
+  refusal that says what to install; proved on recorded buffers only.
+  Each resumes from its saved position leaving redelivered transactions
+  out (`tests/test_db2_changes_are_read_from_its_log_on_a_transcript.py`,
+  `tests/test_sql_server_changes_are_read_from_its_log_and_its_backups.py`).
+  Not done: no Db2 server (x86 only) - the record layouts and the API's
+  calling convention are the documentation's, not observed; SQL Server
+  row images beyond int/decimal/char/nvarchar types and LOB columns are
+  read by key; the standby is restored under the source's database name;
+  `mssql.py`/the tail loop reach neither reader yet (their owner's hook).
 * **C1-C6, closed capabilities rebuilt from open parts:** C1 mongosync's
   job from 4.0+ sources to any destination, consistent at any moment,
   the unique-index conversion off the cutover path, and an audit of the
@@ -5643,6 +5663,15 @@ Still open: bulk paths (container copy jobs), point-in-time snapshots.
   `tests/test_oracle_mines_on_its_own_instance.py`); migkit does not build
   the source's redo dictionary itself (an offered source change); shipped
   logs behind every saved position are not yet removed.
+  *2026-10-16 (LT.C5, LT.* redo program):* the redo-file program's
+  stream followed end to end on a recorded transcript - START, begins,
+  changes, commits, a checkpoint, a stop mid-transaction, CONTINUE from
+  the saved position, the unconfirmed messages sent again and left out,
+  CONFIRM only after the batch was applied
+  (`tests/test_oracle_is_mined_on_a_standby_and_the_redo_program_is_followed_end_to_end.py`);
+  the reader is the decision's (`decide.oracle_reader_rungs`), LogMiner
+  refused where it was measured mining slower than the source's busiest
+  hour. Still unproved on a real Oracle with the program or a standby.
   *Built 2026-10-16 (LT.C4, LT.C6, P0-PARITY.tail on Redis):* `redis.
   ReplicaStream` (migkit a replica: offsets, resume by +CONTINUE),
   `KeyspaceStates` (joining/live/left/parked per database, seam = offset,

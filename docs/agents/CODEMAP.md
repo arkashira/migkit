@@ -200,7 +200,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/workload.py` - Whether the target answers the source's own queries as well as the source does (backlog 24, problems file G1; R23, 4).
 - `migkit/zones.py` - The time zone the data is written in, against the one the server declares (backlog 23).
 
-## `migkit/engines/` (66 modules)
+## `migkit/engines/` (68 modules)
 
 - `migkit/engines/__init__.py` - (no docstring)
 - `migkit/engines/ase.py` - SAP ASE (Sybase) as one side of a pair (backlog 34). Classes: AseEngine.
@@ -215,6 +215,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/engines/cosmosdb.py` - Azure Cosmos DB for NoSQL as a side of a pair (backlog ER5), through its Python SDK. (Its MongoDB and Cassandra APIs are those engines' side Classes: CosmosLanes, CosmosEngine.
 - `migkit/engines/couchbase.py` - Couchbase as a side of a pair (backlog ER4), through its Python SDK. Classes: CouchbaseEngine.
 - `migkit/engines/db2.py` - Db2 (LUW) as one side of a pair (backlog 34), through `ibm_db`. Classes: Db2Engine.
+- `migkit/engines/db2_log.py` - A Db2 (LUW) source's changes read from its own log, through the log-read API the data server client documents (backlog LT.R6) - the reader ` Classes: Refused, Api, NotRead.
 - `migkit/engines/db2i.py` - Db2 for i (IBM i) as one side of a pair, and a source whose changes are followed through its journal (backlog 34, W5). Classes: Reread, Image, Db2iEngine.
 - `migkit/engines/db2zos.py` - Db2 for z/OS as one side of a pair (backlog 34, W5), through `ibm_db`. Classes: Db2ZosEngine.
 - `migkit/engines/dbapi.py` - Rows read and written through a DB-API driver, rendered in this process. Classes: DbapiRows, FoldsToCapitals.
@@ -237,6 +238,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/engines/lindorm.py` - Alibaba Lindorm's wide tables as a side of a pair (backlog P0-CLOUDS), through LindormTable's SQL on MySQL's wire (its MySQL-protocol endpoi Classes: LindormEngine.
 - `migkit/engines/mongodb.py` - (no docstring) Classes: MongoEngine.
 - `migkit/engines/mssql.py` - (no docstring) Classes: MSSQLEngine.
+- `migkit/engines/mssql_log.py` - A SQL Server source followed through its own log, where neither Change Tracking nor Change Data Capture is on (backlog LT.R2, LT.R3). Classes: NotRead.
 - `migkit/engines/my_pass.py` - MySQL into MySQL with no row passing through migkit (backlog R20 items 1 and 4). Classes: Different, TableCopy.
 - `migkit/engines/mysql.py` - (no docstring) Classes: MySQLEngine.
 - `migkit/engines/neo4j.py` - Neo4j as a side of a pair (backlog R16c), through its HTTP Cypher API. Classes: Neo4jEngine.

@@ -223,23 +223,11 @@ def chosen(eng, side, db):
 
 
 def readers():
-    """The ways a source's redo is read, the first that holds taken."""
-    from ..decide import Need, Rung
-    return (
-        Rung(RUNG, "the redo-file reader, beside the redo",
-             needs=(Need("to run beside the source's redo",
-                         lambda f: f["listening"] or (
-                             f["platform"] and f["program"]
-                             and f["redo here"]),
-                         "{rung} is not run beside this source's redo: the"
-                         " source names no redo_reader, and this machine"
-                         " cannot read its redo files with the program"),),
-             because="it reads the redo files themselves, so the database"
-                     " does no mining for it",
-             footprint=1),
-        Rung(LOGMINER, "migkit's LogMiner reader",
-             because="in every edition, on a managed database, with"
-                     " nothing installed"))
+    """The ways a source's redo is read, the first that holds taken: the
+    decision's own rungs (`decide.oracle_reader_rungs`), LogMiner refused
+    where the rate it was measured mining at is below the source's."""
+    from ..decide import oracle_reader_rungs
+    return oracle_reader_rungs()
 
 
 def choice(eng, side, db):
@@ -256,10 +244,16 @@ def choice(eng, side, db):
         if forced == LOGMINER:
             rungs = tuple(r for r in rungs if r.name == LOGMINER)
         return climb(db, rungs, Facts({"listening": True}))
-    return climb(db, rungs, Facts(
+    got = climb(db, rungs, Facts(
         {"listening": bool(ep.options.get("redo_reader"))},
         platform=lambda: platform_runs_it(), program=lambda: program(),
+        rates=lambda: miner.measured(eng, side, db),
         **{"redo here": lambda: redo_here(eng, side, db)}))
+    if got.rung is None:
+        # no reader keeps up: a tail started anyway would never catch up
+        raise SystemExit(f"{db}: no reader of the source's redo keeps up"
+                         f" here - {got.reason}")
+    return got
 
 
 def config(eng, side, db, listen, state):

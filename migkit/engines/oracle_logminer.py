@@ -1514,6 +1514,18 @@ def reader_rate(eng, side, db):
     return float(size) / took, name
 
 
+#: {(hop, side, db): (the source's busiest hour of redo, the rate the
+#: reader mined at)} in bytes a second, as `reader_check` last measured
+#: them: what the choice of reader ranks LogMiner by (`oracle_redo.choice`)
+_RATES = {}
+
+
+def measured(eng, side, db):
+    """(peak redo a second, mined a second) as last measured here, or
+    None where they were not: unmeasured is not a reason to refuse."""
+    return _RATES.get((id(eng.hop), side, db))
+
+
 def reader_check(eng, side, db):
     """(level, detail, measured) of the LogMiner reader against the redo
     the source writes: the one place this is measured and judged. `fail`
@@ -1536,6 +1548,7 @@ def reader_check(eng, side, db):
                         " reader's could be read"), False
     peak, avg = rate
     speed, _ = mined
+    _RATES[(id(eng.hop), side, db)] = (peak, speed)
     words = (f"the source archived {peak / 2 ** 20:.2f} MB of redo a second"
              f" at its busiest hour ({avg / 2 ** 20:.2f} on average); the"
              f" reader mined {speed / 2 ** 20:.2f} MB a second")
