@@ -538,8 +538,8 @@ def two_way_engines():
     from migkit import marks
     seen = []
     for r in marks.RUNGS:
-        if r.family not in seen:
-            seen.append(r.family)
+        if r.engine not in seen:
+            seen.append(r.engine)
     return seen
 
 
