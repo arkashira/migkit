@@ -1309,6 +1309,11 @@ KNOWN_UPWARD = {
      "which way in to take; the choice is handed in as a fact"): (
         "migkit/tunnel.py migkit.decide",
     ),
+    ("a brand's confidence is a rung (`decide.brand_confidence`) the "
+     "configuration reads once the server's signs are in; the rung moves "
+     "below configuration"): (
+        "migkit/variants.py migkit.decide",
+    ),
     ("a report reads `autonomous` for the state of the running "
      "workflow; the state moves below reporting"): (
         "migkit/telemetry.py migkit.autonomous",
