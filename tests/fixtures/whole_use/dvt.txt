@@ -1,0 +1,78 @@
+# The documented command line of the data-validation program, release 8.9.3,
+# written from its README and `--help` pages (the program is not installed
+# where these tests run). A `feature:` line is a command or a documented
+# call; any other line that starts with a dash is an option, its aliases
+# first. The test holds migkit's account of the program to this file.
+feature: validate column :: compare aggregates of columns between two tables
+  --count COLUMNS             count of non-null values of the columns
+  --sum COLUMNS               sum of the columns
+  --min COLUMNS               smallest value of the columns
+  --max COLUMNS               largest value of the columns
+  --avg COLUMNS               mean of the columns
+  --std COLUMNS               standard deviation of the columns
+  --bit_xor COLUMNS           bitwise xor over the columns
+  -gc, --grouped-columns COLS aggregate per distinct value of these columns
+  -ec, --exclude-columns      take every column except the ones listed
+  -th, --threshold FLOAT      percent of difference tolerated before a fail
+  -filters, --filters TEXT    a WHERE clause on source and target
+  -wis, --wildcard-include-string-len  include string columns when columns are wildcarded
+  -wit, --wildcard-include-timestamp   include timestamp columns when columns are wildcarded
+  -ctb, --cast-to-bigint      cast integer columns to bigint before a sum
+feature: validate row :: compare rows by hash or by the compared fields
+  --hash COLUMNS              compare a hash of the columns of each row
+  --concat COLUMNS            compare the concatenated columns of each row
+  -comp-fields, --comparison-fields COLS  columns whose values are compared
+  -pk, --primary-keys COLS    columns that line the rows up
+  -rr, --use-random-row       compare a random sample of rows
+  -rbs, --random-row-batch-size INT  how many rows the sample takes
+  -cim, --case-insensitive-match     ignore case when matching keys
+  -mcc, --max-concat-columns INT     most columns concatenated at once
+  -tsp, --trim-string-pks     trim whitespace from string keys
+  --trim-whitespace           trim whitespace from every string column
+feature: validate schema :: compare column names and types of two tables
+  -ec, --exclusion-columns COLS  columns left out of the schema comparison
+  -al, --allow-list TEXT         type mappings accepted as equal
+  -alf, --allow-list-file PATH   file of type mappings accepted as equal
+feature: validate custom-query column :: aggregates over the result of a query
+feature: validate custom-query row :: rows of the result of a query
+  -sq, --source-query TEXT       query run on the source
+  -tq, --target-query TEXT       query run on the target
+  -sqf, --source-query-file PATH query file run on the source
+  -tqf, --target-query-file PATH query file run on the target
+  -rh, --result-handler TEXT     where results are stored
+  -bqrh, --bq-result-handler TEXT  older name of the result handler
+  -sa, --service-account PATH    cloud account for the result handler
+  -l, --labels TEXT              labels attached to every result
+  -c, --config-file PATH         write the validation to a YAML file
+feature: configs run :: run validations stored in YAML files
+feature: configs list :: list the stored validations
+feature: configs get :: print one stored validation
+  -cj, --config-file-json PATH   stored validation in JSON
+  -cdir, --config-dir PATH       directory of stored validations
+  -cdj, --config-dir-json PATH   directory of stored JSON validations
+  -kc, --kube-completions        run indexed jobs for a directory of validations
+  -fmt, --format TEXT            how results are printed
+  -fs, --filter-status TEXT      keep only results of this status
+  --run-id TEXT                  identifier of the run
+  -dr, --dry-run                 print the validation instead of running it
+  -v, --verbose                  verbose logging
+  -ll, --log-level TEXT          log level
+feature: generate-table-partitions :: split a table into key ranges as stored validations
+  -pn, --partition-num INT       how many partitions
+  -ppf, --parts-per-file INT     partitions written to one file
+feature: find-tables :: pair the tables of two schemas by name
+  -as, --allowed-schemas TEXT    schemas searched
+  -iv, --include-views           pair views as well
+  --score-cutoff FLOAT  least name similarity accepted
+  -q, --query TEXT               the query
+  --conn TEXT           connection the query runs on
+  -sc, --source-conn TEXT        connection of the source
+  -tc, --target-conn TEXT        connection of the target
+  -tbls, --tables-list TEXT      tables compared, source=target pairs
+feature: connections add :: store a connection
+  -c, --connection-name TEXT     name the connection is stored under
+feature: connections list :: list stored connections
+feature: connections delete :: remove a stored connection
+feature: connections describe :: show one stored connection
+  -sm, --secret-manager-type TEXT        secret manager holding the credentials
+  -sp, --secret-manager-project-id TEXT  project of the secret manager

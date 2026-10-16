@@ -1,0 +1,46 @@
+# The documented command line of the PostgreSQL restore program, release 17,
+# written from its reference page (app-pgrestore).
+  -d, --dbname=NAME               database to connect to and restore into
+  -f, --file=FILENAME             output file for the script, or - for stdout
+  -F, --format=c|d|t              archive format
+  -l, --list                      print the table of contents of the archive
+  -v, --verbose                   verbose mode
+  -V, --version                   print the release
+  -a, --data-only                 restore only the data
+  -c, --clean                     drop objects before creating them
+  -C, --create                    create the database
+  -e, --exit-on-error             stop on the first error
+  -I, --index=NAME                restore the named index
+  -j, --jobs=NUM                  restore with this many parallel jobs
+  -L, --use-list=FILENAME         use the table of contents from a file
+  -n, --schema=NAME               restore only objects in the schema
+  -N, --exclude-schema=NAME       do not restore objects in the schema
+  -O, --no-owner                  skip restoration of object ownership
+  -P, --function=NAME(args)       restore the named function
+  -s, --schema-only               restore only the schema
+  -S, --superuser=NAME            superuser name for disabling triggers
+  -t, --table=NAME                restore the named relation
+  -T, --trigger=NAME              restore the named trigger
+  -x, --no-privileges             skip restoration of access privileges
+  -1, --single-transaction        restore in a single transaction
+  --disable-triggers              disable triggers during a data-only restore
+  --enable-row-security           restore with row security on
+  --if-exists                     use IF EXISTS when dropping objects
+  --no-comments                   do not restore comments
+  --no-data-for-failed-tables     skip data of tables that failed to create
+  --no-publications               do not restore publications
+  --no-security-labels            do not restore security labels
+  --no-subscriptions              do not restore subscriptions
+  --no-table-access-method        do not restore table access methods
+  --no-tablespaces                do not restore tablespace assignments
+  --section=SECTION               restore the named section
+  --strict-names                  require every name to match something
+  --transaction-size=N            commit after this many objects
+  --use-set-session-authorization set ownership with SET SESSION AUTHORIZATION
+  --filter=FILENAME               read include and exclude rules from a file
+  -h, --host=HOSTNAME             server host or socket directory
+  -p, --port=PORT                 server port
+  -U, --username=NAME             user name to connect as
+  -w, --no-password               never prompt for a password
+  -W, --password                  force a password prompt
+  --role=ROLENAME                 role set before the restore

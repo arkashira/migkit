@@ -119,7 +119,10 @@ _ACCOUNTS = {
             "--max-concat-columns": (
                 "the reader splits a wide table on its own, per engine; no"
                 " table has been measured to need another split"),
-            "--trim-string-pks": "deprecated and hidden in 8.9.3",
+            "--trim-string-pks": (
+                "hidden and deprecated in 8.9.3, and a key that differs by"
+                " padding is a difference migkit reports as it holds it,"
+                " not one it hides"),
             "--trim-whitespace": (
                 "not an option in 8.9.3: its row hash drops trailing blanks"
                 " always (read in its source), which every row finding"
@@ -165,8 +168,10 @@ _ACCOUNTS = {
                 "each run is its own process and batch file, kept in the"
                 " hop's report directory"),
             "--dry-run": "the batch file already says what was read",
-            "--verbose": "its log is not the operator's",
-            "--log-level": "its log is not the operator's",
+            "--verbose": (
+                "its log goes where no operator reads; migkit's own progress"
+                " lines and findings say what was read"),
+            "--log-level": "see --verbose",
             "generate-table-partitions": (
                 "not yet (R8): a differing table is narrowed by groups and a"
                 " table too large to read row by row a second time is said;"
@@ -271,8 +276,10 @@ _ACCOUNTS = {
                 " never writes"),
             "--min-age": "needs --update-column; see there",
             "--max-age": "needs --update-column; see there",
-            "--debug": "its diagnostics are not the operator's",
-            "--verbose": "its diagnostics are not the operator's",
+            "--debug": (
+                "its output goes to a log kept apart from the run's report,"
+                " whose findings say what was compared"),
+            "--verbose": "see --debug",
             "--interactive": "stops for a person at every query",
             "--case-sensitive": (
                 "column names come from the catalogue exactly as they are"),
@@ -380,7 +387,9 @@ _ACCOUNTS = {
             "build_report_data": "what report is built from; see there",
             "intersect_rows_match": (
                 "the explanation reads each column's own match column"),
-            "only_join_columns": "the frames hold more than the key",
+            "only_join_columns": (
+                "the frames carry the row's other columns too, so the answer"
+                " would always be no"),
             "hide_sensitive_columns": "see sensitive_columns",
             "reveal_sensitive_columns": "see sensitive_columns",
             "PolarsCompare": (
@@ -415,6 +424,214 @@ for _name, _spec in _ACCOUNTS.items():
                     for f, why in _spec["unused"].items()},
                  **{("", f): (TOPPED, how)
                     for f, how in _spec["topped_up"].items()}})
+
+
+# --- the dump and restore programs, option by option (backlog 0f-REST) -----
+#
+# The same account, for the two programs that carry a PostgreSQL schema or
+# a whole database as an archive. Their options are the documented list
+# (`tests/fixtures/whole_use/`); an option is used where its token is in the
+# code that builds their command lines, and every other is given what
+# migkit does instead.
+
+_DUMP_FILES = ("movers.py::pgdump_move", "movers.py::_pg_schema",
+               "movers.py::_pg_load_schema",
+               "engines/postgres.py::_dump_schema_native",
+               "engines/postgres.py::rehearse",
+               "engines/postgres.py::_client", "leftovers.py::pg_dump_args")
+
+_TEXT_FORM = ("migkit's data goes in the archive's copy form and its schema"
+              " in the archive, restored by the restore program; a text"
+              " replay is for another consumer and is slower")
+_TABLE_COPIER = ("what the archive cannot carry is moved by migkit's own"
+                 " table copier, which is proved row by row")
+_SESSION = ("the connection is made with the side's own settings by"
+            " migkit (`_client`), so the program has nothing left to set")
+_CATALOGUE = ("migkit takes the objects the hop names through its scope"
+              " (`Hop.excluded`), as a list of -t and -T patterns")
+
+_DUMPS = {
+    "pg_dump": {
+        "version": "17",
+        "features": {
+            "--dbname": "-d", "--host": "-h", "--port": "-p",
+            "--username": "-U", "--file": "-f", "--format": "-Fc",
+            "--jobs": "-j", "--verbose": "-v", "--data-only": "--data-only",
+            "--schema-only": "--schema-only", "--section": "--section=",
+            "--table": "-t", "--exclude-table": "-T",
+            "--exclude-schema": "--exclude-schema",
+            "--no-owner": "--no-owner", "--no-privileges": "--no-privileges",
+            "--no-security-labels": "--no-security-labels",
+            "--no-tablespaces": "--no-tablespaces",
+        },
+        "unused": {
+            "--version": "the release is read by migkit's own version probe",
+            "--compress": (
+                "the archive is read again at once on a fast link; whether"
+                " a compressed one is faster is not measured on this rung"),
+            "--lock-wait-timeout": (
+                "a dump held on a lock shows as a stalled step in the"
+                " running-step watch (`_sh`), which migkit reads, rather than"
+                " as a clock inside the program"),
+            "--no-sync": "the archive is read back at once, not kept",
+            "--large-objects": (
+                "large objects are carried explicitly, because the dump"
+                " skips them whenever a table list is given"),
+            "--no-large-objects": "see --large-objects",
+            "--blobs": "see --large-objects",
+            "--no-blobs": "see --large-objects",
+            "--clean": (
+                "migkit empties or creates the target itself, so a second"
+                " run does not depend on drop statements in the archive"),
+            "--create": "the target database is made by migkit, mapped",
+            "--extension": _CATALOGUE,
+            "--exclude-extension": _CATALOGUE,
+            "--encoding": ("the target database is made with its own"
+                           " encoding and the archive is read back by the"
+                           " restore program, not as text"),
+            "--schema": _CATALOGUE,
+            "--superuser": ("a dump of the data is restored with its"
+                            " triggers disabled by the restore, not here"),
+            "--binary-upgrade": (
+                "only for a major-version upgrade in place, which migkit's"
+                " upgrade path does with the server's own program"),
+            "--column-inserts": _TEXT_FORM,
+            "--attribute-inserts": "see --column-inserts",
+            "--inserts": "see --column-inserts",
+            "--rows-per-insert": "see --column-inserts",
+            "--on-conflict-do-nothing": (
+                "a load into an emptied target needs no conflict rule, and"
+                " a conflict would be a duplicate migkit must count"),
+            "--disable-dollar-quoting": _TEXT_FORM,
+            "--quote-all-identifiers": _TEXT_FORM,
+            "--extra-float-digits": (
+                "the archive's copy form carries a float exactly; the"
+                " setting changes only text output"),
+            "--disable-triggers": (
+                "given to the restore, where it acts on a data-only load"),
+            "--enable-row-security": (
+                "a role that reads every row is required of the source,"
+                " and a partial dump would not be a migration"),
+            "--exclude-table-data": _CATALOGUE,
+            "--include-foreign-data": (
+                "a foreign table's rows live on another server and are"
+                " moved from there, not through this one"),
+            "--if-exists": "see --clean",
+            "--load-via-partition-root": (
+                "a partitioned table is moved by migkit's partition"
+                " mapping, which keeps each row's own partition"),
+            "--no-comments": (
+                "comments are part of the schema migkit compares and"
+                " carries"),
+            "--no-publications": (
+                "publications are carried or left out by the hop's own"
+                " object scope"),
+            "--no-subscriptions": "see --no-publications",
+            "--no-table-access-method": (
+                "a table's access method is carried and compared as part"
+                " of its definition"),
+            "--no-toast-compression": (
+                "a column's compression is part of its definition and is"
+                " carried"),
+            "--no-unlogged-table-data": (
+                "an unlogged table's rows are data and are moved like any"),
+            "--serializable-deferrable": (
+                "a data dump here is proved afterwards by migkit's digest,"
+                " which tells a row still changing from a row lost"),
+            "--snapshot": "see --serializable-deferrable",
+            "--strict-names": (
+                "a pattern that matches nothing is no error here: a table"
+                " dropped while the move runs is then left out, as the hop"
+                " says"),
+            "--use-set-session-authorization": (
+                "ownership is not restored (--no-owner); the target's own"
+                " roles own what it makes"),
+            "--filter": _CATALOGUE,
+            "--sequence-data": (
+                "the data dump leaves sequences out by name (-T), and"
+                " their positions are moved apart from the rows"),
+            "--no-password": _SESSION,
+            "--password": _SESSION,
+            "--role": _SESSION,
+        },
+    },
+    "pg_restore": {
+        "version": "17",
+        "features": {
+            "--dbname": "-d", "--host": "-h", "--port": "-p",
+            "--username": "-U", "--file": "-f", "--list": "-l",
+            "--verbose": "-v", "--jobs": "-j", "--data-only": "--data-only",
+            "--section": "--section=", "--no-owner": "--no-owner",
+            "--no-privileges": "--no-privileges",
+            "--disable-triggers": "--disable-triggers",
+        },
+        "unused": {
+            "--format": (
+                "the archive's own header says its form, which the program"
+                " reads, so migkit has nothing to state"),
+            "--version": "the release is read by migkit's own version probe",
+            "--clean": ("migkit empties the target itself in a step of its own"
+                        " before the load, so the archive need carry no drop"
+                        " statements"),
+            "--create": "the target database is made by migkit, mapped",
+            "--exit-on-error": (
+                "migkit reads each error and decides whether it is"
+                " tolerable (`_restore`), one the target already holds is"
+                " not a failure"),
+            "--index": _CATALOGUE,
+            "--use-list": (
+                "the list is cut by migkit for a table the target is not"
+                " given, through the archive's own entries, and then"
+                " restored without it"),
+            "--schema": _CATALOGUE,
+            "--exclude-schema": _CATALOGUE,
+            "--function": _CATALOGUE,
+            "--table": _CATALOGUE,
+            "--trigger": _CATALOGUE,
+            "--schema-only": "the archive was made by section instead",
+            "--superuser": (
+                "migkit connects as a role that may disable triggers on the"
+                " target, and says so when it cannot"),
+            "--single-transaction": (
+                "the data runs on parallel jobs, which one transaction"
+                " cannot, and a failed table is retried alone"),
+            "--enable-row-security": (
+                "a policy that filtered the load's writes would drop rows"
+                " silently, which the row counts and digests compared after"
+                " the load show"),
+            "--if-exists": "see --clean",
+            "--no-comments": "comments are carried; see pg_dump's account",
+            "--no-data-for-failed-tables": (
+                "data without its table is never wanted: a failed table"
+                " fails the move naming it"),
+            "--no-publications": "see --no-comments",
+            "--no-security-labels": "see --no-comments",
+            "--no-subscriptions": "see --no-comments",
+            "--no-table-access-method": "see --no-comments",
+            "--no-tablespaces": "see --no-comments",
+            "--strict-names": "see --exit-on-error",
+            "--transaction-size": (
+                "parallel jobs set their own commit points, and a smaller"
+                " one is not measured to help on this rung"),
+            "--use-set-session-authorization": (
+                "ownership is not restored (--no-owner); the target's own"
+                " roles own what the load makes"),
+            "--filter": _CATALOGUE,
+            "--no-password": _SESSION,
+            "--password": _SESSION,
+            "--role": _SESSION,
+        },
+    },
+}
+
+for _name, _spec in _DUMPS.items():
+    tooluse.register(
+        _name, release=_spec["version"],
+        declared={"": frozenset({*_spec["features"], *_spec["unused"]})},
+        reads=(_DUMP_FILES, {("", f): token for f, token in
+                             _spec["features"].items()}),
+        options={("", f): (UNUSED, why)
+                 for f, why in _spec["unused"].items()})
 
 
 # --- the comparison program as a rung the decision engine can choose -------

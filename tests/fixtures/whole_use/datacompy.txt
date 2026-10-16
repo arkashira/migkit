@@ -1,0 +1,39 @@
+# The documented interface of the frame comparison library, release 1.0.4,
+# written from its API reference. A `feature:` line is a class, a keyword of
+# its constructor or a method or property of a comparison.
+feature: PandasCompare :: compare two pandas frames
+feature: join_columns :: columns the frames are joined on
+feature: df1_name :: label of the first frame in reports
+feature: df2_name :: label of the second frame in reports
+feature: report :: text report of the comparison
+feature: all_mismatch :: every row where a shared column differs
+feature: df1_unq_rows :: rows only in the first frame
+feature: df2_unq_rows :: rows only in the second frame
+feature: intersect_rows :: rows in both frames, with a match flag per column
+feature: column_stats :: per column count of matches and mismatches
+feature: matches :: whether the two frames agree
+feature: abs_tol :: absolute tolerance for numbers
+feature: rel_tol :: relative tolerance for numbers
+feature: ignore_spaces :: trim whitespace before comparing strings
+feature: ignore_case :: ignore case before comparing strings
+feature: cast_column_names_lower :: lower case the column names
+feature: sample_mismatch :: a random sample of rows that differ in a column
+feature: all_columns_match :: whether both frames hold the same columns
+feature: all_rows_overlap :: whether every row is in both frames
+feature: count_matching_rows :: rows equal in every column
+feature: intersect_columns :: columns in both frames
+feature: df1_unq_columns :: columns only in the first frame
+feature: df2_unq_columns :: columns only in the second frame
+feature: columns_with_mismatches :: columns with at least one difference
+feature: subset :: whether the second frame is a subset of the first
+feature: on_index :: join on the index of the frames
+feature: custom_comparators :: user functions deciding equality of a column
+feature: sensitive_columns :: columns hidden in reports
+feature: build_report_data :: the report as a structure
+feature: intersect_rows_match :: whether the rows in both frames agree
+feature: only_join_columns :: whether the frames hold nothing besides the join columns
+feature: hide_sensitive_columns :: hide the sensitive columns in a frame
+feature: reveal_sensitive_columns :: show the sensitive columns again
+feature: PolarsCompare :: compare two polars frames
+feature: SparkSQLCompare :: compare two Spark frames
+feature: SnowflakeCompare :: compare two Snowflake tables

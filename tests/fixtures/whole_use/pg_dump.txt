@@ -1,0 +1,66 @@
+# The documented command line of the PostgreSQL dump program, release 17,
+# written from its reference page (app-pgdump). Options of one release: a
+# newer one is added here when the manual gains it.
+  -f, --file=FILENAME             output file or directory name
+  -F, --format=c|d|t|p            output file format
+  -j, --jobs=NUM                  dump this many tables at once
+  -v, --verbose                   verbose mode
+  -V, --version                   print the release
+  -Z, --compress=METHOD           compression of the output
+  --lock-wait-timeout=TIMEOUT     fail after waiting this long for a table lock
+  --no-sync                       do not wait for the files to reach disk
+  -a, --data-only                 dump only the data, not the schema
+  -b, --large-objects             include large objects
+  -B, --no-large-objects          exclude large objects
+  --blobs                         older name of --large-objects
+  --no-blobs                      older name of --no-large-objects
+  -c, --clean                     emit commands that drop objects first
+  -C, --create                    emit commands that create the database
+  -e, --extension=PATTERN         dump only the matching extensions
+  -E, --encoding=ENCODING         dump in this encoding
+  -n, --schema=PATTERN            dump only the matching schemas
+  -N, --exclude-schema=PATTERN    do not dump the matching schemas
+  -O, --no-owner                  skip restoration of object ownership
+  -s, --schema-only               dump only the schema, not the data
+  -S, --superuser=NAME            superuser name for disabling triggers
+  -t, --table=PATTERN             dump only the matching tables
+  -T, --exclude-table=PATTERN     do not dump the matching tables
+  -x, --no-privileges             do not dump privileges
+  --binary-upgrade                for use by upgrade utilities only
+  --column-inserts                dump data as INSERT with column names
+  --attribute-inserts             older name of --column-inserts
+  --disable-dollar-quoting        quote bodies with standard string syntax
+  --disable-triggers              disable triggers during a data-only restore
+  --enable-row-security           dump content of tables with row security
+  --exclude-table-data=PATTERN    do not dump data of the matching tables
+  --extra-float-digits=NUM        override the digits of floating point output
+  --if-exists                     use IF EXISTS when dropping objects
+  --include-foreign-data=PATTERN  dump data of the matching foreign servers
+  --inserts                       dump data as INSERT commands
+  --load-via-partition-root       load partitions through the root table
+  --no-comments                   do not dump comments
+  --no-publications               do not dump publications
+  --no-security-labels            do not dump security labels
+  --no-subscriptions              do not dump subscriptions
+  --no-table-access-method        do not dump table access methods
+  --no-tablespaces                do not dump tablespace assignments
+  --no-toast-compression          do not dump TOAST compression methods
+  --no-unlogged-table-data        do not dump data of unlogged tables
+  --on-conflict-do-nothing        add ON CONFLICT DO NOTHING to inserts
+  --quote-all-identifiers         quote every identifier
+  --rows-per-insert=NROWS         rows in one INSERT command
+  --section=SECTION               dump the named section
+  --serializable-deferrable       wait for a moment with no anomalies
+  --snapshot=SNAPSHOT             use the given synchronized snapshot
+  --strict-names                  require every pattern to match something
+  --use-set-session-authorization set ownership with SET SESSION AUTHORIZATION
+  --filter=FILENAME               read include and exclude rules from a file
+  --exclude-extension=PATTERN     do not dump the matching extensions
+  --sequence-data                 dump sequence data even in schema-only mode
+  -d, --dbname=DBNAME             database to dump
+  -h, --host=HOSTNAME             server host or socket directory
+  -p, --port=PORT                 server port
+  -U, --username=NAME             user name to connect as
+  -w, --no-password               never prompt for a password
+  -W, --password                  force a password prompt
+  --role=ROLENAME                 role set before the dump

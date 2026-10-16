@@ -606,7 +606,7 @@ each offers:
 * `0f.pt-table-sync.chunk-size` (no account): sync in chunks by key range would strengthen repair of a differing key range (verify ladder).
 * `0f.z3.optimise` (no account): optimise a goal under the constraints would strengthen decision choice under constraints (decide ladder).
 * `0f.account.library`: 44 libraries are called with no tool-use account (each written option by option, as the others are): `airflow`, `bson`, `certifi`, `click`, `clickhouse_connect`, `confluent_kafka`, `croniter`, `cryptography`, `dagster`, `duckdb`, `ebcdic`, `fastavro`, `google_crc32c`, `grpc`, `hypothesis`, `ibm_db`, `ibm_db_dbi`, `kafka`, `keyring`, `lxml`, `lz4`, `mssql_py_core`, `mssql_python`, `numpy`, `opensearchpy`, `oracledb`, `packaging`, `pandas`, `pglast`, `psutil`, `psycopg`, `psycopg2`, `pyarrow`, `pymongo`, `pymssql`, `pymysql`, `pymysqlreplication`, `pyodbc`, `requests`, `results`, `rich`, `sqlglot`, `yaml`, `z3`.
-* `0f.account.program`: 7 programs are called with no tool-use account (each written option by option, as the others are): `atlas`, `liquibase`, `mysql`, `mysqldump`, `pt-table-sync`, `vacuumdb`, `vault`.
+* `0f.account.program`: 8 programs are called with no tool-use account (each written option by option, as the others are): `atlas`, `cbimport`, `liquibase`, `mysql`, `mysqldump`, `pt-table-sync`, `vacuumdb`, `vault`.
 
 <!-- whole-use:end -->
 

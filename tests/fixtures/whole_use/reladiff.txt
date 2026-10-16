@@ -1,0 +1,31 @@
+# The documented command line of the table-diffing program, release 0.6.0,
+# written from its README and `--help` page (the program is not installed
+# where these tests run).
+  -k, --key-columns TEXT         columns that identify a row
+  -t, --update-column TEXT       column that says when a row was last updated
+  -c, --columns TEXT             columns compared besides the key
+  -l, --limit INT                stop after this many differences
+  --bisection-factor INT         segments a range is cut into at each step
+  --bisection-threshold INT      rows under which a range is compared whole
+  -m, --materialize-to-table TEXT  write the differing rows to a table
+  --min-age TEXT                 only rows older than this
+  --max-age TEXT                 only rows newer than this
+  -s, --stats                    print totals of the comparison
+  -d, --debug                    debug logging
+  --json                         one JSON object per difference
+  -v, --verbose                  verbose logging
+  --version                      print the release
+  -i, --interactive              ask before each query
+  --case-sensitive               treat column names as case sensitive
+  --assume-unique-key            skip the check that the key is unique
+  --skip-sort-results            leave the differences unsorted
+  --sample-exclusive-rows        write a sample of rows found on one side only
+  --materialize-all-rows         write every row, not only the differing ones
+  --table-write-limit INT        most rows written to the materialized table
+  --allow-empty-tables           compare when one side has no rows
+  -j, --threads TEXT             connections used to read
+  -w, --where TEXT               condition limiting the rows on both sides
+  -a, --algorithm TEXT           hashdiff or joindiff
+  --conf PATH                    configuration file
+  --run TEXT                     run named in the configuration file
+feature: databases.connect :: open a connection from an address in code
