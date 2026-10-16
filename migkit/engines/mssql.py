@@ -2,6 +2,7 @@ import re
 import time
 
 from .. import canon, commercial, decide, diagnostics, pieces
+from .base import drill_file, drill_table
 from .base import Engine, RepairAction, Result, clauses, rows_counted
 from .dbapi import MARK, DbapiRows
 
@@ -675,7 +676,7 @@ class MSSQLEngine(DbapiRows, Engine):
         d = self.hop.report_dir(db)
         for kind, rows in (("missing", missing), ("extra", extra),
                            ("changed", changed)):
-            f = d / f"data-{t}.{kind}"
+            f = d / drill_file(t, kind)
             if rows:
                 f.write_text("\n".join(rows) + "\n")
             elif f.exists():
@@ -1096,7 +1097,7 @@ class MSSQLEngine(DbapiRows, Engine):
         d = self.hop.report_dir(db)
         for kind, rows in (("missing", missing), ("extra", extra),
                            ("changed", changed)):
-            f = d / f"data-{table}.{kind}"
+            f = d / drill_file(table, kind)
             if rows:
                 f.write_text("\n".join(rows) + "\n")
             elif f.exists():
@@ -2875,7 +2876,7 @@ class MSSQLEngine(DbapiRows, Engine):
         sc, _, _ = self._comparable_columns(db, self, t, self, t)
         out = {}
         for kind in ("missing", "changed", "extra"):
-            f = d / f"data-{t}.{kind}"
+            f = d / drill_file(t, kind)
             lines = [x for x in f.read_text().splitlines() if x] \
                 if f.exists() else []
             out[kind] = [list(k) for k in repairlog.canon_keys(
@@ -2887,7 +2888,7 @@ class MSSQLEngine(DbapiRows, Engine):
         through the neutral contract (`_apply_rows`) - the base's plan, over
         this engine's own drilldown files."""
         d = self.hop.report_dir(db)
-        tables = sorted({f.name[len("data-"):].rsplit(".", 1)[0]
+        tables = sorted({drill_table(f.name)[0]
                          for k in ("missing", "changed", "extra")
                          for f in d.glob(f"data-*.{k}")})
         # a drilldown of a table the hop has since left out is said, never
@@ -2895,9 +2896,9 @@ class MSSQLEngine(DbapiRows, Engine):
         tables, said = self._drills_in_scope(db, tables)
         out = [said] if said else []
         for t in tables:
-            n = {k: sum(1 for x in (d / f"data-{t}.{k}").read_text()
+            n = {k: sum(1 for x in (d / drill_file(t, k)).read_text()
                         .splitlines() if x)
-                 if (d / f"data-{t}.{k}").exists() else 0
+                 if (d / drill_file(t, k)).exists() else 0
                  for k in ("missing", "changed", "extra")}
             if not any(n.values()):
                 continue

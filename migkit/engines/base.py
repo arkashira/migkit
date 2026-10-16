@@ -104,6 +104,29 @@ def categorize(check, scope):
             or f"{check}.unclassified")
 
 
+
+def drill_file(name, kind):
+    """The drilldown's file for the table `name`: `data-<name>.<kind>`,
+    the name percent-quoted where it holds anything beside letters,
+    digits, `.`, `_`, `-` and `~` - a `/`, a newline, a `%` - so no
+    table's name reaches outside the hop's report directory or shares
+    another table's file, and the name reads back whole (`drill_table`)."""
+    from urllib.parse import quote
+    return f"data-{quote(str(name), safe='')}.{kind}"
+
+
+def drill_table(file_name):
+    """(table, kind) a drilldown's file name says (`drill_file`), or None
+    where it is not one."""
+    from urllib.parse import unquote
+    if not str(file_name).startswith("data-"):
+        return None
+    name, dot, kind = str(file_name)[len("data-"):].rpartition(".")
+    if not dot or not name:
+        return None
+    return unquote(name), kind
+
+
 @dataclass
 class Result:
     check: str
@@ -4140,7 +4163,7 @@ class Engine:
             after = last
 
     def _drill_path(self, db, name, kind):
-        return self.hop.report_dir(db) / f"data-{name}.{kind}"
+        return self.hop.report_dir(db) / drill_file(name, kind)
 
     def _write_drill(self, db, name, **kinds):
         """The rows behind the counts, one per line, in the estate's file
@@ -4618,7 +4641,7 @@ class Engine:
         except Exception:  # noqa: BLE001 - an explanation, not the finding
             return ""
         leaf = str(table).split(".")[-1]
-        path = self.hop.report_dir(db) / f"data-{leaf}.explained"
+        path = self.hop.report_dir(db) / drill_file(leaf, "explained")
         path.write_text("\n".join(lines) + "\n")
         said = [ln.split(" - ")[0] for ln in lines[1:]]
         return (f"; {table} column by column: " + "; ".join(said[:4])
@@ -4894,7 +4917,7 @@ class Engine:
                                                 src_cols, dst_cols, changed,
                                                 rows, there)
             if kept:
-                path = self.hop.report_dir(db) / f"data-{name}.kept-newer"
+                path = self.hop.report_dir(db) / drill_file(name, "kept-newer")
                 path.write_text("".join(json.dumps(list(k)) + "\n"
                                         for k in kept))
                 keep = {tuple(k) for k in kept}
@@ -5055,7 +5078,7 @@ class Engine:
     def _leaves_kept(self, db):
         """The tables the last check kept differing leaves for
         (`leaves.kept_leaves`)."""
-        return sorted(p.name[len("data-"):-len(".leaves")] for p in
+        return sorted(drill_table(p.name)[0] for p in
                       self.hop.report_dir(db).glob("data-*.leaves"))
 
     def repair_leaves(self, db, table):
@@ -5125,7 +5148,7 @@ class Engine:
         import json
         found = {}
         for path in sorted(self.hop.report_dir(db).glob("data-*.*")):
-            name, _, kind = path.name[len("data-"):].rpartition(".")
+            name, kind = drill_table(path.name) or ("", "")
             if kind not in ("missing", "changed", "extra") or not name:
                 continue
             keys = [tuple(json.loads(l)) for l in
@@ -5802,7 +5825,7 @@ class Engine:
         d = self._report(db)
         keys = set()
         for k in ("missing", "extra", "changed"):
-            f = d / f"data-{table}.{k}"
+            f = d / drill_file(table, k)
             if f.exists():
                 keys |= set(f.read_text().splitlines())
         keys.discard("")

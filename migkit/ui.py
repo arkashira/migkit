@@ -1141,17 +1141,23 @@ def role(hop, user):
           access:
             operator: [ann@example.com]
             viewer: ["*@example.com"]      # shell patterns
+
+    The patterns are read as the web view's roles read them
+    (`web.roles`): any case, `group:` never matching a name alone, and
+    an approver or admin there an operator here.
     """
-    from fnmatch import fnmatch
+    from .web import roles
+    from .web.identity import Principal
     if user is None:
         return "operator"
     access = (hop.options or {}).get("access")
     if not access:
         return "operator"
-    for name in ("operator", "viewer"):
-        if any(fnmatch(user, str(p)) for p in access.get(name) or []):
-            return name
-    return None
+    got = roles._best(Principal(id=str(user)), access)
+    if got is None:
+        return None
+    return "operator" if roles.RANK[got] >= roles.RANK["operator"] \
+        else "viewer"
 
 
 def _activity(hops):

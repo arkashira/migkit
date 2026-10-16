@@ -5,6 +5,7 @@ import time
 from .. import pieces
 from ..config import scoped
 from ..decide import Need, Rung
+from .base import drill_file
 from .base import (LEFT_OUT, Engine, RepairAction, Result, clauses,
                    rows_counted)
 
@@ -1560,7 +1561,7 @@ class RedisEngine(Engine):
             return out
         overwrite, kept = self._keep_the_newer(f"db{db}", changed, read)
         if kept:
-            (self.hop.report_dir(db) / f"data-db{db}.kept-newer").write_text(
+            (self.hop.report_dir(db) / drill_file(f"db{db}", "kept-newer")).write_text(
                 "".join(k + "\n" for k in kept))
         return overwrite
 

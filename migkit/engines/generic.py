@@ -5,6 +5,7 @@ import re
 import time
 
 from ..util import run, which
+from .base import drill_file
 from .base import Engine, RepairAction, Result, clauses
 
 
@@ -1714,7 +1715,7 @@ class GenericEngine(Engine):
                         and got[tuple(k)][at] is not None}
             changed, kept = self._keep_the_newer(name, changed, read)
             if kept:
-                (self.hop.report_dir(db) / f"data-{name}.kept-newer"
+                (self.hop.report_dir(db) / drill_file(name, "kept-newer")
                  ).write_text("".join(json.dumps(list(k)) + "\n"
                                       for k in kept))
                 keep = {tuple(k) for k in kept}

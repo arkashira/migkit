@@ -7480,3 +7480,63 @@ def cell_way(facts):
                       " piece"))),
         Rung("refused", "refused before anything of the row is written",
              because=said)), f)
+
+
+def sequence_headroom(facts):
+    """(head-room, `Choice`) above the highest id in use a counter is
+    reseeded to (audit AUD-Z, SEQUENCE_BUFFER): "asked" - the run's own
+    margin (a cutover's `keys: apart`, `SEQUENCE_MARGIN`); "measured" -
+    the rows the source inserts in the restart gap, its measured insert
+    rate times the gap's measured seconds, rounded up; else "none" - the
+    highest id in use, exact for a quiet source. `facts`: {"margin",
+    "rate": inserts a second, "gap": seconds}. A process-wide figure from
+    the environment stood here, which no measure ever moved."""
+    import math
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+
+    def measured(x):
+        return float(x.get("rate") or 0) > 0 and float(x.get("gap") or 0) > 0
+    got = climb("the head-room a counter is reseeded with", (
+        Rung("asked", "the run's own margin above the highest id",
+             because="the cutover keeps the two sides' ids apart by the"
+                     " margin it was given", needs=(
+                 Need("a margin the run was given",
+                      lambda x: x.get("margin") is not None,
+                      "the run was given no margin of its own"),)),
+        Rung("measured", "the rows the source inserts while the writers"
+             " restart, above the highest id", because="the source's"
+             " measured insert rate over the measured restart gap", needs=(
+                 Need("an insert rate and a restart gap measured", measured,
+                      "no insert rate or restart gap was measured"),)),
+        Rung("none", "the highest id in use, with no gap", because="nothing"
+             " measured says rows land after the counters were read; exact"
+             " for a quiet source, and the check after the switch says one"
+             " that was not")), f)
+    if got.path == "asked":
+        return max(0, int(f.get("margin"))), got
+    if got.path == "measured":
+        return math.ceil(float(f.get("rate")) * float(f.get("gap"))), got
+    return 0, got
+
+
+def system_principals(facts):
+    """The `Choice` for how the principals a server or its provider keeps
+    for itself are told (audit AUD-Z, GRANTS_IGNORE_ROLES):
+    "catalogue" - the server's own catalogue of the ones it made, read on
+    the server, with the providers' known names beside it; else "listed" -
+    the known names alone. `facts`: {"catalogue": the engine's query of
+    its own principals' names, or ""}."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    return climb("how a server's own principals are told", (
+        Rung("catalogue", "the server's catalogue of the principals it made,"
+             " and the providers' known names", because="the server says"
+             " which principals it made itself; a provider's are ordinary"
+             " ones to it, so their names stay beside", needs=(
+                 Need("a catalogue of the server's own principals",
+                      lambda x: bool(x.get("catalogue")),
+                      "this engine keeps no catalogue a query tells its own"
+                      " principals from the others by"),)),
+        Rung("listed", "the names each server and provider is known to make",
+             because="nothing on this server tells its own principals from"
+                     " the others; the list is what each server and"
+                     " provider is known to make (`users.SYSTEM`)")), f)

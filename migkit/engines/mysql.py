@@ -14,6 +14,7 @@ from ..config import scoped
 from ..decide import Need, Rung
 from ..tableway import DIRECT, Way
 from ..util import keepalive as _keepalive, run, which, with_retry, retryable
+from .base import drill_file, drill_table
 from .base import Engine, RepairAction, Result, rows_counted
 
 SKIP_DBS = {"mysql", "sys", "performance_schema", "information_schema"}
@@ -4931,7 +4932,7 @@ class MySQLEngine(Engine):
         d = self.hop.report_dir(db)
         for name, rows in (("missing", missing), ("extra", extra),
                            ("changed", changed)):
-            p = d / f"data-{t}.{name}"
+            p = d / drill_file(t, name)
             if rows:
                 p.write_text("\n".join(rows) + "\n")
             elif p.exists():
@@ -5005,7 +5006,7 @@ class MySQLEngine(Engine):
         except Exception as e:
             return self._fingerprint_failed(e)
         diff = [c for c, x, y in zip(cols, a, b) if x != y]
-        out = self.hop.report_dir(db) / f"data-{t}.columns"
+        out = self.hop.report_dir(db) / drill_file(t, "columns")
         if diff:
             out.write_text("columns differing between src and dst:\n"
                            + "\n".join(diff) + "\n")
@@ -5061,7 +5062,7 @@ class MySQLEngine(Engine):
         d = self.hop.report_dir(db)
         for kind, rows in (("missing", missing), ("extra", extra),
                            ("changed", changed)):
-            f = d / f"data-{t}.{kind}"
+            f = d / drill_file(t, kind)
             if rows:
                 f.write_text("\n".join(rows) + "\n")
             elif f.exists():
@@ -7589,11 +7590,10 @@ class MySQLEngine(Engine):
         to be able to see - the same trap the postgres side avoids by reading
         relacl rather than information_schema.
         """
-        import os
+        from .. import envkeys
         from ..users import MYSQL_SYS
         # same knob the postgres side reads, so one setting covers both engines
-        ign = MYSQL_SYS | {r.strip() for r in os.environ.get(
-            "GRANTS_IGNORE_ROLES", "").split(",") if r.strip()}
+        ign = MYSQL_SYS | set(envkeys.items("GRANTS_IGNORE_ROLES"))
         try:
             users = [(u, h) for u, h in self._q(
                 side, "select user, host from mysql.user")
@@ -7990,11 +7990,11 @@ class MySQLEngine(Engine):
                 actions.append(ev)
         if kind in ("rows", "all"):
             d = self.hop.report_dir(db)
-            tables = sorted({f.name.split(".")[0][len("data-"):]
+            tables = sorted({drill_table(f.name)[0]
                              for f in d.glob("data-*.missing")}
-                            | {f.name.split(".")[0][len("data-"):]
+                            | {drill_table(f.name)[0]
                                for f in d.glob("data-*.extra")}
-                            | {f.name.split(".")[0][len("data-"):]
+                            | {drill_table(f.name)[0]
                                for f in d.glob("data-*.changed")})
             # a drilldown of a table the hop has since left out is said,
             # never acted on: a check run before `exclude: [audit_log]`
@@ -8005,7 +8005,7 @@ class MySQLEngine(Engine):
             for t in tables:
                 counts, named = [], {}
                 for k in ("missing", "extra", "changed"):
-                    f = d / f"data-{t}.{k}"
+                    f = d / drill_file(t, k)
                     if f.exists():
                         # counted as keys, not as lines: a key holding a
                         # newline is one row to repair, and counting the
@@ -8298,7 +8298,7 @@ class MySQLEngine(Engine):
             three differences - a repair that reported success and did
             nothing at all.
             """
-            return self._drill_keys(d / f"data-{t}.{kind}")
+            return self._drill_keys(d / drill_file(t, kind))
 
         # a row the hop keeps by a change it does not carry is never
         # removed, added or overwritten here (`_repairable`)
@@ -8343,7 +8343,7 @@ class MySQLEngine(Engine):
                 return out
             changed, kept = self._keep_the_newer(t, changed, at)
             if kept:
-                log_kept = d / f"data-{t}.kept-newer"
+                log_kept = d / drill_file(t, "kept-newer")
                 log_kept.write_text("".join(f"{k}\n" for k in kept))
         to_delete = extra + changed
         to_copy = missing + changed
@@ -8442,7 +8442,7 @@ class MySQLEngine(Engine):
         d = self.hop.report_dir(db)
         return self._repairable(db, table, {
             kind: [list(k) for k in canon_of(
-                self._drill_keys(d / f"data-{table}.{kind}"))]
+                self._drill_keys(d / drill_file(table, kind)))]
             for kind in ("missing", "changed", "extra")})
 
     #: a span of a table replaced under one transaction (`repair_range`)
@@ -11286,7 +11286,7 @@ class MySQLEngine(Engine):
         from .. import rowtext
         out = []
         for kind in ("missing", "extra", "changed"):
-            p = self.hop.report_dir(db) / f"data-{t}.{kind}"
+            p = self.hop.report_dir(db) / drill_file(t, kind)
             if p.exists():
                 out += [tuple("" if v is None else str(v)
                               for v in rowtext.parse(k))
@@ -11303,7 +11303,7 @@ class MySQLEngine(Engine):
             said += f"; {note}"
         keys = []
         for kind in ("missing", "extra", "changed"):
-            p = self.hop.report_dir(db) / f"data-{t}.{kind}"
+            p = self.hop.report_dir(db) / drill_file(t, kind)
             if p.exists():
                 keys += [k for k in p.read_text().splitlines() if k]
         pks = self._pk_cols(db, t)

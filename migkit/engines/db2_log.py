@@ -33,6 +33,8 @@ import os
 import struct
 from decimal import Decimal
 
+from .. import envkeys
+
 #: the position is read off the log, never written to it
 CHANGE_POINT_READS_ONLY = True
 
@@ -54,7 +56,7 @@ class Refused(SystemExit):
 def library():
     """The client library's handle, or None where it is not installed:
     `MIGKIT_DB2_CLIENT_LIB` names the file where it is not on the path."""
-    path = os.environ.get("MIGKIT_DB2_CLIENT_LIB") or \
+    path = envkeys.text("MIGKIT_DB2_CLIENT_LIB") or \
         ctypes.util.find_library("db2")
     if not path:
         return None

@@ -14,6 +14,7 @@ from ..decide import Need, Rung
 from ..tableway import Way
 from ..util import (CommandFailed, quote_name, run, split_table,
                     tool_env, which)
+from .base import drill_file, drill_table
 from .base import Counted as _Counted
 from .base import Engine, Enough as _Enough, RepairAction, Result, clauses
 from .base import rows_counted
@@ -120,22 +121,17 @@ select 'extension|'||extname from pg_extension
 SEQUENCE_MARGIN = contextvars.ContextVar("sequence_margin", default=None)
 
 
-def _seq_buffer():
-    """Head-room to add above the highest known id: the run's own margin
-    (`SEQUENCE_MARGIN`), else SEQUENCE_BUFFER.
-
-    Zero (the default) reseeds to exactly the highest id in use, which is
-    correct when the source is quiet. Anything above zero trades a gap in the
-    id space for tolerance of rows that arrive a moment later.
-    """
-    own = SEQUENCE_MARGIN.get()
-    if own is not None:
-        return max(0, int(own))
-    try:
-        n = int(os.environ.get("SEQUENCE_BUFFER", "0") or 0)
-    except ValueError:
-        return 0
-    return max(0, n)
+def _seq_buffer(rate=None, gap=None):
+    """Head-room to add above the highest known id, decided
+    (`decide.sequence_headroom`): the run's own margin (`SEQUENCE_MARGIN`),
+    else the rows the source's measured insert `rate` lands in the
+    restart `gap`, else none - exactly the highest id in use, correct when
+    the source is quiet. Anything above zero trades a gap in the id space
+    for tolerance of rows that arrive a moment later."""
+    from .. import decide
+    n, _ = decide.sequence_headroom({"margin": SEQUENCE_MARGIN.get(),
+                                     "rate": rate, "gap": gap})
+    return n
 
 
 
@@ -10213,9 +10209,9 @@ select json_build_object(
         v = self._server_version(side, db) or 0
         routine = ("case p.prokind when 'p' then 'PROCEDURE' else"
                    " 'FUNCTION' end" if v >= 110000 else "'FUNCTION'")
+        from .. import envkeys
         from ..users import system_principals_sql
-        ignore = [r.strip() for r in os.environ.get(
-            "GRANTS_IGNORE_ROLES", "root,rdsadmin").split(",") if r.strip()]
+        ignore = envkeys.items("GRANTS_IGNORE_ROLES")
         # the roles a server or its provider keeps for itself, by the one
         # list `users` reads too (audit 2026-10-01, DU13)
         skip = f" and not {system_principals_sql('postgres', 'g.who')}" + (
@@ -10730,11 +10726,11 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
             tables = set()
             if rpt.exists():
                 for f in rpt.glob("data-*.missing"):
-                    tables.add(f.name[len("data-"):-len(".missing")])
+                    tables.add(drill_table(f.name)[0])
                 for f in rpt.glob("data-*.extra"):
-                    tables.add(f.name[len("data-"):-len(".extra")])
+                    tables.add(drill_table(f.name)[0])
                 for f in rpt.glob("data-*.changed"):
-                    tables.add(f.name[len("data-"):-len(".changed")])
+                    tables.add(drill_table(f.name)[0])
             # a drilldown of a table the hop has since left out is said,
             # never acted on
             taken, said = self._drills_in_scope(db, sorted(tables))
@@ -10745,7 +10741,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                     continue
                 counts, named = [], {}
                 for kind_ in ("missing", "extra", "changed"):
-                    f = rpt / f"data-{t}.{kind_}"
+                    f = rpt / drill_file(t, kind_)
                     n = sum(1 for _ in f.open()) if f.exists() else 0
                     named[kind_] = range(n)
                     if n:
@@ -11108,7 +11104,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                 # a row the hop keeps by a change it does not carry: never
                 # removed, added or overwritten here
                 return ""
-            f = d / f"data-{t}.{kind}"
+            f = d / drill_file(t, kind)
             text = f.read_text() if f.exists() else ""
             if only is None:
                 return text
@@ -11335,7 +11331,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                 conn.close()
         overwrite, kept = self._keep_the_newer(t, keys, at)
         if kept:
-            (d / f"data-{t}.kept-newer").write_text(
+            (d / drill_file(t, "kept-newer")).write_text(
                 "".join(k + "\n" for k in kept))
         return "".join(k + "\n" for k in overwrite)
 
@@ -12088,7 +12084,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         return missing, extra, changed
 
     def _drill_keys(self, db, table, kind):
-        f = self._report(db) / f"data-{table}.{kind}"
+        f = self._report(db) / drill_file(table, kind)
         try:
             return [k for k in f.read_text().splitlines() if k]
         except OSError:
@@ -12103,7 +12099,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         d.mkdir(parents=True, exist_ok=True)
         for kind, rows in (("missing", missing), ("extra", extra),
                            ("changed", changed)):
-            f = d / f"data-{table}.{kind}"
+            f = d / drill_file(table, kind)
             if rows:
                 _kept_whole(f, ("\n".join(rows) + "\n").encode())
             elif f.exists():
@@ -12822,7 +12818,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         except RuntimeError as e:
             return self._fingerprint_failed(e)
         diff = [c for c, x, y in zip(cols, a, b) if x != y]
-        out = self.hop.report_dir(db) / f"data-{table}.columns"
+        out = self.hop.report_dir(db) / drill_file(table, "columns")
         if diff:
             out.write_text("columns differing between src and dst:\n"
                            + "\n".join(diff) + "\n")

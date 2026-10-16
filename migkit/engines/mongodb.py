@@ -6,6 +6,7 @@ import time
 
 from .. import pieces
 from ..decide import Need, Rung
+from .base import drill_file, drill_table
 from .base import Engine, RepairAction, Result, clauses, rows_counted
 from ..verdict import difference_kind_from_counts
 
@@ -2696,7 +2697,7 @@ class MongoEngine(Engine):
         d = self.hop.report_dir(db)
         for bucket, keys in (("missing", missing), ("extra", extra),
                              ("changed", changed)):
-            p = d / f"data-{table}.{bucket}"
+            p = d / drill_file(table, bucket)
             if keys:
                 p.write_text("\n".join(keys) + "\n")
             elif p.exists():
@@ -3053,7 +3054,7 @@ class MongoEngine(Engine):
                           f"docs {checked:,} compared {how},"
                           f" {len(ranges)} ranges{resumed}")
         for bucket, ids in found.items():
-            p = d / f"data-{name}.{bucket}"
+            p = d / drill_file(name, bucket)
             if ids:
                 p.write_text("\n".join(dumps(i) for i in ids) + "\n")
             elif p.exists():
@@ -3850,7 +3851,7 @@ class MongoEngine(Engine):
             if bad:
                 d = self.hop.report_dir(db)
                 for kind, got in apart.items():
-                    p = d / f"data-{coll}.{kind}"
+                    p = d / drill_file(coll, kind)
                     if got:
                         p.write_text("\n".join(dumps(i) for i in got) + "\n")
                     elif p.exists():
@@ -3892,7 +3893,7 @@ class MongoEngine(Engine):
         if kind not in ("rows", "all"):
             return []
         d = self.hop.report_dir(db)
-        names = sorted({f.name.split(".")[0][len("data-"):]
+        names = sorted({drill_table(f.name)[0]
                         for k in ("missing", "extra", "changed")
                         for f in d.glob(f"data-*.{k}")})
         # a drilldown of a collection the hop has since left out is said,
@@ -3902,7 +3903,7 @@ class MongoEngine(Engine):
         for name in names:
             counts, named = [], {}
             for k in ("missing", "extra", "changed"):
-                f = d / f"data-{name}.{k}"
+                f = d / drill_file(name, k)
                 if f.exists():
                     named[k] = range(sum(1 for _ in f.open()))
                     counts.append(f"{k}={len(named[k])}")
@@ -3950,7 +3951,7 @@ class MongoEngine(Engine):
         def read(kind):
             # a document the hop keeps by a change it does not carry is
             # never removed, added or overwritten here
-            f = d / f"data-{name}.{kind}"
+            f = d / drill_file(name, kind)
             return [loads(l) for l in f.read_text().splitlines()] \
                 if f.exists() and kind not in kept else []
 
@@ -4020,7 +4021,7 @@ class MongoEngine(Engine):
             return out
         overwrite, kept = self._keep_the_newer(name, list(by), read)
         if kept:
-            (report / f"data-{name}.kept-newer").write_text(
+            (report / drill_file(name, "kept-newer")).write_text(
                 "".join(k + "\n" for k in kept))
         return [by[k] for k in overwrite]
 

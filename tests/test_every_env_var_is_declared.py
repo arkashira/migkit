@@ -44,6 +44,9 @@ def names_in(src, where="x.py"):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             for m in NAME.finditer(node.value):
                 out.append((m.group(0), node.lineno))
+            # a setting of migkit's own without the prefix, named whole
+            if not NAME.fullmatch(node.value) and node.value in envkeys.VARS:
+                out.append((node.value, node.lineno))
     return out
 
 
@@ -177,3 +180,142 @@ def test_secret_values_are_what_the_redactor_is_given():
     env = {"MIGKIT_AI_KEY": "sk-CHANGE_ME", "MIGKIT_AI_MODEL": "m",
            "MIGKIT_APP_TARGET_PASSWORD": "pw-CHANGE_ME", "OTHER": "x"}
     assert sorted(envkeys.secrets(env)) == ["pw-CHANGE_ME", "sk-CHANGE_ME"]
+
+
+# ---- read through the registry (AUD-Z) ----------------------------------------
+
+#: the ways a module reads a variable raw
+READS = ("os.environ.get", "os.getenv", "environ.get", "os.environ.setdefault",
+         "os.environ.pop")
+
+#: other programs' variables migkit reads to find them or what they were
+#: set to - never a setting of migkit's own, which is declared
+FOREIGN = {
+    'ALIBABA_CLOUD_CLI_PROFILE_DISABLED', 'ALIBABA_CLOUD_PROFILE',
+    'AWS_PROFILE', 'AZURE_CONFIG_DIR', 'AZURE_SUBSCRIPTION_ID',
+    'COMSPEC', 'GOOGLE_APPLICATION_CREDENTIALS',
+    'GOOGLE_CLOUD_PROJECT', 'HUAWEICLOUD_SDK_CREDENTIALS_FILE',
+    'IDENTITY_ENDPOINT', 'IDENTITY_HEADER', 'JAVA_HOME',
+    'OCI_CLI_CONFIG_FILE', 'OCI_CLI_PROFILE',
+    'OTEL_EXPORTER_OTLP_ENDPOINT',
+    'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT', 'OTEL_SDK_DISABLED',
+    'OTEL_SERVICE_NAME', 'REMOTE_ADDR', 'TCCLI_PROFILE',
+    'TENCENTCLOUD_REGION', 'TENCENTCLOUD_ROLE_ARN',
+    'TENCENTCLOUD_ROLE_SESSION_NAME', 'TENCENTCLOUD_SECRET_ID',
+    'TENCENTCLOUD_SECRET_KEY', 'TENCENTCLOUD_SESSION_TOKEN',
+    'TENCENTCLOUD_TOKEN', 'VAULT_ADDR', 'VAULT_CACERT',
+    'VAULT_NAMESPACE', 'VAULT_TOKEN', 'XDG_CACHE_HOME',
+    'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME',
+}
+
+#: declared variables still read raw beside the registry, by module: row
+#: 559 AUD-Z.env-raw moves each onto `envkeys`; one moved leaves this list,
+#: and no read may join it
+OWED_RAW = {
+    ('approvals.py', 'MIGKIT_ACTOR'),
+    ('approvals.py', 'MIGKIT_IDENTITY'),
+    ('assist.py', 'MIGKIT_AI'),
+    ('assist.py', 'MIGKIT_AI_KEY'),
+    ('assist.py', 'MIGKIT_AI_MODEL'),
+    ('assist.py', 'MIGKIT_AI_SHARE'),
+    ('assist.py', 'MIGKIT_AI_URL'),
+    ('audit.py', 'MIGKIT_ACTOR'),
+    ('bulkways.py', 'MIGKIT_MOVER'),
+    ('cli.py', 'MIGKIT_DIAGNOSE'),
+    ('cli.py', 'MIGKIT_SOURCE'),
+    ('cloudapi.py', 'MIGKIT_CLOUD_POLL'),
+    ('cloudapi.py', 'MIGKIT_CLOUD_WAIT'),
+    ('config.py', 'MIGKIT_SOURCE'),
+    ('config.py', 'MIGKIT_TARGET'),
+    ('costmodel.py', 'MIGKIT_KNOWLEDGE'),
+    ('crossmove.py', 'MIGKIT_TABLE_COPY'),
+    ('cutover.py', 'MIGKIT_CUTOVER'),
+    ('decide.py', 'MIGKIT_EXPLAIN'),
+    ('engines/base.py', 'MIGKIT_REPAIR_TEXT'),
+    ('engines/hetero.py', 'MIGKIT_TAIL_APPLY_ALL'),
+    ('engines/mysql.py', 'MIGKIT_READ_TIMEOUT'),
+    ('engines/oracle.py', 'MIGKIT_ORACLE_WRITE'),
+    ('engines/oracle_redo.py', 'MIGKIT_ORACLE_READER'),
+    ('estate.py', 'MIGKIT_SOURCE_PASSWORD'),
+    ('evidence.py', 'MIGKIT_IDENTITY'),
+    ('export.py', 'MIGKIT_EVIDENCE_KEY'),
+    ('failpoint.py', 'MIGKIT_FAILPOINT'),
+    ('lease.py', 'MIGKIT_LEASE_SECONDS'),
+    ('leaves.py', 'MIGKIT_GENERATIONS'),
+    ('machine.py', 'MIGKIT_CATALOG_REFRESH'),
+    ('machine.py', 'MIGKIT_INSTANCES'),
+    ('model.py', 'MIGKIT_PROBE_FROM'),
+    ('model.py', 'MIGKIT_PROBE_SECONDS'),
+    ('movers.py', 'MIGKIT_CDC'),
+    ('movers.py', 'MIGKIT_FOLLOW_TIMEOUT'),
+    ('movers.py', 'MIGKIT_MOVER'),
+    ('notify.py', 'MIGKIT_NOTIFY'),
+    ('physical.py', 'MIGKIT_SEED_START_WAIT'),
+    ('ready.py', 'MIGKIT_PREFLIGHT'),
+    ('second_reader.py', 'MIGKIT_SECOND_READER_PYTHON'),
+    ('servicecheck.py', 'MIGKIT_COMPARE_WITH'),
+    ('session.py', 'MIGKIT_RUN_ID'),
+    ('shared.py', 'MIGKIT_STATE_KEY'),
+    ('state.py', 'MIGKIT_STATE_KEY'),
+    ('tools.py', 'MIGKIT_ACCEPT_TERMS'),
+    ('tools.py', 'MIGKIT_DB2_CONNECT_LICENSE'),
+    ('tools.py', 'MIGKIT_TOOLS'),
+    ('util.py', 'MIGKIT_TOOLS'),
+}
+
+
+def raw_reads(src):
+    """[(name, line)] of every variable a module reads by a literal name
+    without the registry."""
+    out = []
+    for node in ast.walk(ast.parse(src)):
+        name = None
+        if isinstance(node, ast.Call) and ast.unparse(node.func) in READS \
+                and node.args and isinstance(node.args[0], ast.Constant):
+            name = node.args[0].value
+        elif isinstance(node, ast.Subscript) and isinstance(
+                node.ctx, ast.Load) and ast.unparse(node.value) in (
+                "os.environ", "environ") and isinstance(
+                node.slice, ast.Constant):
+            name = node.slice.value
+        if isinstance(name, str):
+            out.append((name, node.lineno))
+    return out
+
+
+def _raw_everywhere():
+    for path in sorted((ROOT / "migkit").rglob("*.py")):
+        if path.name != "envkeys.py":
+            rel = str(path.relative_to(ROOT / "migkit"))
+            for name, line in raw_reads(path.read_text()):
+                yield rel, name, line
+
+
+def test_a_setting_of_migkits_own_is_declared_whatever_its_name():
+    """A knob without the `MIGKIT_` prefix (`SEQUENCE_BUFFER`,
+    `MONGO_IGNORE_ROLES`) slipped past the name scan: every variable read
+    is declared or another program's."""
+    bad = [f"{w}:{ln} {n}" for w, n, ln in _raw_everywhere()
+           if envkeys.declared(n) is None and n not in FOREIGN]
+    assert not bad, "declare it in migkit/envkeys.py:\n" + "\n".join(bad)
+
+
+def test_a_declared_variable_is_read_through_the_registry():
+    got = {(w, n) for w, n, _ in _raw_everywhere()
+           if envkeys.declared(n) is not None}
+    new = sorted(got - OWED_RAW)
+    assert not new, "read it through migkit.envkeys: %s" % new
+    gone = sorted(OWED_RAW - got)
+    assert not gone, "read through envkeys now - take it off OWED_RAW: %s" \
+        % gone
+
+
+def test_the_raw_scan_would_notice_one():
+    planted = ('a = os.environ.get("SEQUENCE_BUFFER", "0")\n'
+               'b = os.environ["GRANTS_IGNORE_ROLES"]\n'
+               'c = envkeys.items("GRANTS_IGNORE_ROLES")\n')
+    assert raw_reads(planted) == [("SEQUENCE_BUFFER", 1),
+                                  ("GRANTS_IGNORE_ROLES", 2)]
+    assert envkeys.declared("SEQUENCE_BUFFER") is None
+    assert "SEQUENCE_BUFFER" not in FOREIGN
+    assert ("engines/postgres.py", "GRANTS_IGNORE_ROLES") not in OWED_RAW

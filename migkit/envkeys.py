@@ -116,6 +116,12 @@ VARS = {
     "GRANTS_IGNORE_ROLES": Var("accounts and roles the grant checks leave"
                                " out, beside the servers' and providers'"
                                " own", "list"),
+    "MONGO_IGNORE_ROLES": Var("MongoDB roles the account checks leave out,"
+                              " beside the providers' own", "list"),
+    "MONGO_IGNORE_USERS": Var("MongoDB accounts the account checks leave"
+                              " out, beside the providers' own", "list"),
+    "MIGKIT_DB2_CLIENT_LIB": Var("the Db2 client library's file, where it"
+                                 " is not on the library path", "text"),
     "MIGKIT_TAIL_APPLY_ALL": Var("apply every change, for measuring what"
                                  " the tail leaves out", "flag", False),
     "MIGKIT_ORACLE_READER": Var("one way of reading Oracle's changes"

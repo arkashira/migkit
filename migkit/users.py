@@ -22,6 +22,7 @@ import json
 import datetime
 import hashlib
 import os
+import re
 
 from . import userways
 from .config import get_hop
@@ -91,10 +92,28 @@ def system_principal(engine, name):
     return engine == "mssql" and n.upper().startswith(("NT ", "BUILTIN\\"))
 
 
+#: the server's own catalogue of the principals it made, as a query of
+#: their names: the roles PostgreSQL (and openGauss) make at initdb hold an
+#: oid below the first a user's object takes (FirstNormalObjectId)
+CATALOGUE = {
+    "postgres": "select rolname::text from pg_roles where oid < 16384",
+    "gaussdb": "select rolname::text from pg_roles where oid < 16384"}
+
+#: a column as `system_principals_sql` is given one: a name, or a
+#: correlation's name and the column's - never an expression of a caller's
+_COLUMN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?")
+
+
 def system_principals_sql(engine, column):
     """`system_principal` as a SQL condition on `column`, for a catalogue
-    query to leave them out where they are read: true for a system one."""
+    query to leave them out where they are read: true for a system one -
+    by the server's own catalogue where it keeps one, and the providers'
+    known names (`decide.system_principals`)."""
+    from . import decide
+    if not _COLUMN.fullmatch(str(column)):
+        raise ValueError(f"{column!r} is not a column reference")
     whole, prefixes = SYSTEM.get(engine, (frozenset(), ()))
+    way = decide.system_principals({"catalogue": CATALOGUE.get(engine, "")})
 
     def lit(text):
         return "'" + str(text).replace("'", "''") + "'"
@@ -104,6 +123,8 @@ def system_principals_sql(engine, column):
                    .replace("_", "\\_") + "%")
     parts = [f"{column} in ({', '.join(lit(n) for n in sorted(whole))})"]
     parts += [f"{column} like {like(p)}" for p in prefixes]
+    if way.path == "catalogue":
+        parts.insert(0, f"{column} in ({CATALOGUE[engine]})")
     return "(" + " or ".join(parts) + ")"
 
 
@@ -3276,9 +3297,8 @@ def _mongo_role_gap(src_roles, dst_roles):
     the rest; otherwise this chases a gap that can never close."""
     if any(r in MONGO_SUPER_ROLES for r, _ in dst_roles):
         return set()
-    ignore = MONGO_VENDOR_ROLES | {
-        x.strip() for x in os.environ.get("MONGO_IGNORE_ROLES", "").split(",")
-        if x.strip()}
+    from . import envkeys
+    ignore = MONGO_VENDOR_ROLES | set(envkeys.items("MONGO_IGNORE_ROLES"))
     return {(r, d) for r, d in set(src_roles) - set(dst_roles) if r not in ignore}
 
 
@@ -3286,8 +3306,8 @@ def _mongo_sysuser(name):
     n = str(name)
     if n in MONGO_SYS or n.startswith(("cmgo-", "dds-", "mongo-")):
         return True
-    extra = os.environ.get("MONGO_IGNORE_USERS", "")
-    return n in {x.strip() for x in extra.split(",") if x.strip()}
+    from . import envkeys
+    return n in set(envkeys.items("MONGO_IGNORE_USERS"))
 
 
 def _mongo_client(ep):
