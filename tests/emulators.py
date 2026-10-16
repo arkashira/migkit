@@ -21,7 +21,8 @@ DYNAMO = "amazon/dynamodb-local:latest"
 READY = 90
 PULL = 400
 
-#: kind -> (image, the command, the inner port)
+#: kind -> (image, the command, the inner port); each kind maps its port
+#: to its own private port of the lane (its place here), so two run at once
 KINDS = {
     "bigtable": (GOOGLE, ("gcloud", "beta", "emulators", "bigtable", "start",
                           "--host-port=0.0.0.0:8086"), 8086),
@@ -64,7 +65,8 @@ def emulator(kind, module, ready=None):
     answering, not only its port open). Removed when the block ends."""
     image, argv, inner = KINDS[kind]
     image_or_skip(image)
-    with servers.private(module, kind, image, *argv, ports=(inner,)) as (
+    with servers.private(module, kind, image, *argv, ports=(inner,),
+                         first=list(KINDS).index(kind)) as (
             container, mapped):
         address = f"{HOST}:{mapped[inner]}"
         stop = time.time() + READY

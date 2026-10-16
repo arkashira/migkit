@@ -51,6 +51,7 @@ import threading
 import time
 from decimal import Decimal
 
+from ..decide import Rung
 from .base import Engine, NeutralCopier, Result
 
 NAME = "__name__"
@@ -216,7 +217,14 @@ class _Documents(NeutralCopier, Engine):
         cols = document_columns(self, (side, db, table),
                                 lambda: self._bodies(side, db, table),
                                 kind=self.kind)
-        return [(self.KEY, "string")] + [c for c in cols if c[0] != self.KEY]
+        cols = [c for c in cols if c[0] != self.KEY]
+        if not cols:
+            # a collection holding no document has no fields to name: its
+            # identity alone would leave a move into it carrying nothing
+            # but the identity, as the copy keeps the fields both sides
+            # name (the collection is made by the write, with the source's)
+            return []
+        return [(self.KEY, "string")] + cols
 
     def neutral_key(self, side, db, table):
         got = self._described(side, db, table)
@@ -834,9 +842,24 @@ class FirestoreEngine(_Documents):
     def _parts(self, side, db, table):
         """The group's partitions as the service splits it, each read on
         its own."""
+        from google.api_core.exceptions import MethodNotImplemented
+
         group = self._client(side, db).collection_group(table)
-        return [self._scan(side, db, table, query=p.query())
-                for p in group.get_partitions(8)]
+
+        def run(choice):
+            if choice.path == "one":
+                return [self._scan(side, db, table)]
+            return [self._scan(side, db, table, query=p.query())
+                    for p in group.get_partitions(8)]
+        # a service that splits no group (an emulator answers the split
+        # unimplemented) is read whole, in the documents' order
+        return self._attempt(str(table), self.PART_WAYS, run, switch=lambda e:
+                             isinstance(e, MethodNotImplemented))[1]
+
+    PART_WAYS = (Rung("split", "the group read by the service's own"
+                               " partitions, side by side"),
+                 Rung("one", "the group read whole, in its documents'"
+                             " order"))
 
     def _get(self, side, db, table, idents):
         client = self._client(side, db)

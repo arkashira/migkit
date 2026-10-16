@@ -261,6 +261,10 @@ class SpannerEngine(DigestsInSQL, _Folded, NeutralCopier, Engine):
             return '"' + str(name).replace('"', '""') + '"'
         return "`" + str(name).replace("`", "\\`") + "`"
 
+    def _quote_ident_at(self, side, db, name):
+        # a GoogleSQL database reads a double-quoted name as a string
+        return self._qd(side, db, name)
+
     def _q(self, name):
         """GoogleSQL's quoting, which the proved digest is written in."""
         return "`" + str(name).replace("`", "\\`") + "`"
@@ -440,8 +444,9 @@ class SpannerEngine(DigestsInSQL, _Folded, NeutralCopier, Engine):
 
     def _columns_of(self, side, db, table):
         """[(name, the type as the catalogue writes it, generated)] in the
-        table's order."""
-        held = self.__dict__.setdefault("_columns_of", {})
+        table's order. Held under a name of its own: under the method's
+        name the first call's dict shadowed the method on the instance."""
+        held = self.__dict__.setdefault("_columns_cache", {})
         at = (side, self._d(side, db), str(table))
         if at not in held:
             sch, tbl = self._split(side, db, table)
@@ -463,7 +468,7 @@ class SpannerEngine(DigestsInSQL, _Folded, NeutralCopier, Engine):
                          .startswith("TOKENLIST")) for c in cols]
         return held[at]
 
-    SHAPE_CACHES = ("_column_rules_of", "_ordered_of", "_columns_of",
+    SHAPE_CACHES = ("_column_rules_of", "_ordered_of", "_columns_cache",
                     "_keys_of")
 
     def neutral_columns(self, side, db, table):

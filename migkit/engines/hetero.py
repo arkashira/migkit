@@ -1852,15 +1852,15 @@ class HeteroEngine(Engine):
         from .. import leaves
         way = self.digest_way(db, src_t, dst_t, sc, dc) if src_t else "md5"
 
-        def rng(eng, name, extra):
-            q = eng._quote_ident(name)
+        def rng(eng, side, name, extra):
+            q = eng._quote_ident_at(side, db, name)
             r = f"{q} >= {lo} and {q} <= {hi}"
             return f"({extra}) and {r}" if extra else r
 
         def theirs():
             got = leaves.digest_with(
                 self.dst_engine, "dst", db, dst_t, dc, way,
-                where=rng(self.dst_engine, dst_key[0], dst_where))
+                where=rng(self.dst_engine, "dst", dst_key[0], dst_where))
             return int(got[0]), str(got[1])
 
         def ours():
@@ -1870,7 +1870,7 @@ class HeteroEngine(Engine):
                     and not self._masks(db, src_t):
                 got = leaves.digest_with(
                     self.src_engine, "src", db, src_t, sc, way,
-                    where=rng(self.src_engine, key[0], src_where))
+                    where=rng(self.src_engine, "src", key[0], src_where))
                 return int(got[0]), str(got[1])
             n, total = canon.fold_rows([c for _, c in sc],
                                        ([r[i] for i in at] for r in rows),

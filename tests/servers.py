@@ -796,15 +796,17 @@ def fixture(key):
 
 @contextlib.contextmanager
 def private(module, role, image_name, *args, ports=(), env=None, options=(),
-            platform=""):
+            platform="", first=0):
     """A container of the module's own, for a test that must own its
     server (kills it, fails it over, slows its link): named for the module
     and this lane, its `ports` (inner ports) mapped to private ports of the
-    lane in order, removed when the block ends. Yields (container,
-    {inner: host port})."""
+    lane in order from the `first` (a module running several containers
+    at once gives each its own), removed when the block ends. Yields
+    (container, {inner: host port})."""
     container = name(f"{PREFIX}-{space_name(module)[2:]}-{role}".replace(
         "_", "-"))
-    mapped = {inner: private_port(k) for k, inner in enumerate(ports)}
+    mapped = {inner: private_port(first + k)
+              for k, inner in enumerate(ports)}
     argv = ["run", "-d", "--name", container, *labels(), *options,
             *(["--platform", platform] if platform else [])]
     for inner, host in mapped.items():

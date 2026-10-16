@@ -594,6 +594,11 @@ class Engine:
         the rule in both spellings, so only the character differs."""
         return '"' + str(name).replace('"', '""') + '"'
 
+    def _quote_ident_at(self, side, db, name):
+        """One identifier quoted as `side`'s database `db` reads it: the
+        engine's one spelling, unless its databases differ by dialect."""
+        return self._quote_ident(name)
+
     @staticmethod
     def _visible_text(s):
         """What a reader actually sees, so two renderings can be compared.

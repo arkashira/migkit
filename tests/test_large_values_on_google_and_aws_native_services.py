@@ -22,14 +22,20 @@ from migkit.config import Endpoint, Hop
 from tests import emulators
 from tests.conftest import needs_docker
 
-#: what this module proves, item by engine (`capabilities.proofs`): nothing
-#: yet - each emulator started and answered here, but no case below ran to
-#: its end (the reason is on each), and a cell is proved only where one did
-PROVES = []
+#: what this module proves, item by engine (`capabilities.proofs`): the
+#: cases below that ran to their end on their emulator. Bigtable's does not
+#: yet (its reason is on it), so its cell is not claimed
+PROVES = [("move.large-values", "firestore"),
+          ("move.large-values", "datastore"),
+          ("move.large-values", "spanner"),
+          ("move.large-values", "dynamodb")]
 
 pytestmark = needs_docker
 
 MB = 2 ** 20
+#: the id `servers._Dynamo` signs with: the local server takes letters and
+#: digits only, and refuses an id with an underscore
+LOCAL_ID = "migkittest"
 PROJECT = "migkit-test"
 #: the columns of the table every Google case writes: key, text, bytes
 COLS = [("id", "int"), ("t", "text"), ("b", "bytes")]
@@ -117,7 +123,7 @@ def _ep(address, project=PROJECT, **opts):
     return Endpoint(host=project, options={"emulator": address, **opts})
 
 
-@pytest.mark.skip(reason='the emulator refused the cells written to the source (3 failed mutation entries at 2 and 8 MiB): the sizes are to be found')
+@pytest.mark.skip(reason="the emulator refuses the source's own cells of 2 and 8 MiB as the seed writes them: the engine's large-value rung on a measured cell limit is not built, so nothing is claimed")
 def test_bigtable_holds_a_cell_of_many_megabytes_whole_and_lists_its_scope(
         tmp_path):
     from migkit.engines.bigtable import BigtableEngine
@@ -160,7 +166,6 @@ def _bigtable_ready(address):
     list(c.instance("probe").list_tables())
 
 
-@pytest.mark.skip(reason="the move wrote the target's documents empty on the emulator (fields not carried): to be found in the engine, not claimed")
 def test_firestore_holds_a_document_near_its_1_mib_whole_and_lists_its_scope(
         tmp_path):
     from migkit.engines.firestore import FirestoreEngine
@@ -196,7 +201,6 @@ def _firestore_ready(address):
     list(c.collections())
 
 
-@pytest.mark.skip(reason='the move read entities without the seeded properties on the emulator: to be found, not claimed')
 def test_datastore_holds_an_entity_near_its_1_mib_whole_and_lists_its_scope(
         tmp_path):
     from migkit.engines.firestore import DatastoreEngine
@@ -232,7 +236,6 @@ def _datastore_ready(address):
     list(c.query(kind="__kind__").fetch())
 
 
-@pytest.mark.skip(reason="the seed's database definition failed on the emulator ('dict' object is not callable): to be fixed in the case")
 def test_spanner_holds_a_bytes_column_of_many_megabytes_whole_and_lists_its_scope(
         tmp_path):
     from migkit.engines.spanner import SpannerEngine
@@ -259,8 +262,11 @@ def _spanner_seed(eng, tables):
 
 
 def _spanner_fetch(eng, name):
+    import base64
+
+    # the SDK hands a BYTES value back in base64, as it takes one in
     with eng._database("dst", "srcdb").snapshot() as snap:
-        return [list(r) for r in snap.execute_sql(
+        return [[i, t, base64.b64decode(b)] for i, t, b in snap.execute_sql(
             f"SELECT id, t, b FROM {name}")]
 
 
@@ -283,7 +289,6 @@ def _spanner_instance(address):
         inst.create().result(120)
 
 
-@pytest.mark.skip(reason='the local server answered the readiness call with UnrecognizedClientException for the test key: its credentials to be found')
 def test_dynamodb_holds_an_item_near_400_kb_whole_and_lists_its_scope(
         tmp_path, monkeypatch):
     import boto3
@@ -302,10 +307,16 @@ def test_dynamodb_holds_an_item_near_400_kb_whole_and_lists_its_scope(
                 TableName=t, BillingMode="PAY_PER_REQUEST",
                 AttributeDefinitions=[{"AttributeName": "id",
                                        "AttributeType": "N"}],
-                KeySchema=[{"AttributeName": "id", "KeyType": "HASH"}])
+                KeySchema=[{"AttributeName": "id", "KeyType": "HASH"}],
+                # the check brackets its read with the change log's
+                # position, which the stream is: on, as the engine asks
+                StreamSpecification={"StreamEnabled": True,
+                                     "StreamViewType": "NEW_AND_OLD_IMAGES"})
             ddb.put_item(TableName=t, Item={"id": {"N": "1"},
                                             "v": {"S": body}})
-        ep = Endpoint(host="", port=0, user="CHANGE_ME", password="CHANGE_ME",
+        # the key `servers._Dynamo` gives: the local server takes a key
+        # of letters and digits only, and refuses one with an underscore
+        ep = Endpoint(host="", port=0, user=LOCAL_ID, password=LOCAL_ID,
                       options={"region": "us-east-1", "endpoint_url": url})
         hop = Hop(name="ddb", engine="dynamodb", source=ep, target=ep,
                   databases=["shop"], db_map={"shop": "shopcopy"},
