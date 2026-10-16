@@ -2,6 +2,7 @@ import datetime
 import decimal
 import json
 import re
+import time
 
 from ..util import run, which
 from .base import Engine, RepairAction, Result, clauses
@@ -1328,7 +1329,26 @@ class GenericEngine(Engine):
             if stream:
                 stream(f"{t}: {got.status}")
             res.append(got)
+        try:
+            self._parity_costs().save()
+        except OSError:  # noqa: PERF203 - measured again next run
+            pass
         return res
+
+    def _parity_costs(self):
+        """The run's one `costmodel.CostModel` of the ways of proving a
+        table's rows alike (`decide.ROW_PARITY`): every table the check
+        reads is ranked by what the tables before it measured, scaled to
+        its own rows and bytes, so a shape already timed is not measured
+        again; kept with the hop at the end of the check."""
+        got = self.__dict__.get("_parity_model")
+        if got is None:
+            from .. import costmodel, decide
+            got = costmodel.CostModel(
+                "rows alike", decide.ROW_PARITY, pair="generic->generic",
+                hop=getattr(self, "hop", None))
+            self.__dict__["_parity_model"] = got
+        return got
 
     def _row_parity(self, db, scope, t, gate):
         """Table `t`'s data Result, by the way of proving its rows alike
@@ -1349,13 +1369,26 @@ class GenericEngine(Engine):
                "rows read here": lambda: way.path == "row-digests"
                or self._fits(facts)})
 
+        costs = self._parity_costs()
+        unit = {"rows": int(facts.get("rows") or 0),
+                "bytes": float(facts.get("bytes") or 0)}
+
         def run(choice):
+            began = time.monotonic()
             if choice.rung.name == "row text":
-                return self._digest_result(db, scope, t, facts, choice)
-            return self._ranged_result(db, scope, t, gate)
+                got = self._digest_result(db, scope, t, facts, choice)
+            else:
+                got = self._ranged_result(db, scope, t, gate)
+            if got.status != "error":
+                costs.saw(choice.rung.name, unit["rows"] or 1,
+                          time.monotonic() - began,
+                          unit=dict(costs.unit, **unit))
+            return got
+        if not costs.unit:
+            costs.unit = dict(unit)
         try:
             return decide.row_parity(f"{scope}: its rows alike", run,
-                                     parity)[1]
+                                     parity, costs=costs)[1]
         except decide.Exhausted as e:
             why = (str(e).splitlines() or [""])[-1] or way.reason
             return Result("data", scope, "error",

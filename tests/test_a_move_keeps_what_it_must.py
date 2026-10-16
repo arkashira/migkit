@@ -498,8 +498,8 @@ def test_the_copy_runs_one_table_at_a_time_where_its_ranges_are_refused():
                               said.append) == 4
     early = _Engine(RANGE_MARK="before durable")
     with pytest.raises(SystemExit, match="not started"):
-        cli._copy_admitted(None, _Engine(dst_engine=early), "db", jp, 4,
-                           True, said.append)
+        cli._copy_admitted(_Engine(name="shop"), _Engine(dst_engine=early),
+                           "db", jp, 4, True, said.append)
 
 
 def test_a_refused_plan_stops_the_move_with_what_to_do(monkeypatch):
@@ -519,8 +519,9 @@ def test_a_refused_plan_stops_the_move_with_what_to_do(monkeypatch):
                   foreign_keys_in_load=lambda d: "during")
     said = []
     with pytest.raises(SystemExit) as stop:
-        cli._joint_for_move(None, eng, _Engine(measured=True), "db",
-                            ["a", "b"], 4, said.append)
+        cli._joint_for_move(_Engine(name="shop"), eng,
+                            _Engine(measured=True), "db", ["a", "b"], 4,
+                            said.append)
     assert "not started" in str(stop.value)
     assert "point at each other" in str(stop.value)
     assert "take the keys off for the load" in str(stop.value)
@@ -788,8 +789,19 @@ def test_tied_tables_copied_side_by_side_only_under_a_shared_snapshot():
         jointplan.Plan(placed={}, makespan=1.0, order=("orders", "lines")),
         jointplan.Tied(tied), "after")
     assert jp.as_evidence()["snapshot"] == "each range as of its own mark"
-    assert Engine.shared_snapshot(_Engine(), "db") == ""
-    assert Engine.shared_snapshot(_Engine(SHARED_SNAPSHOT=True), "db")
+    class _Source(_Engine):
+        export_moment = Engine.export_moment
+
+    class _Exports(_Source):
+        def export_moment(self, db):
+            return "00000003-1", lambda: None
+    assert Engine.shared_snapshot(_Source(), "db") == ""
+    assert Engine.shared_snapshot(_Source(SHARED_SNAPSHOT=True), "db")
+    # a source that exports a snapshot for other sessions says it shares
+    # one between its readers: PostgreSQL does (`PostgresEngine`)
+    assert Engine.shared_snapshot(_Exports(), "db")
+    from migkit.engines.postgres import PostgresEngine
+    assert PostgresEngine.export_moment is not Engine.export_moment
 
 
 def test_the_cross_engine_tail_says_why_its_lanes_were_refused():

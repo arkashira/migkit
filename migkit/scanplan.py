@@ -542,7 +542,67 @@ class RowText:
         return self.first is None and len(set(self.rows.values())) <= 1
 
 
-def row_text(rows, preds=("",), key_width=1, most=1, sides=("src", "dst")):
+class RangeTexts:
+    """The key ranges of each table a row text check has proved, kept in
+    one file (`durable`) as each range is proved, so a check stopped half
+    way goes on from the ranges it owes and never falls back to one read
+    of the whole table. A range is kept for the check it was read in (the
+    table and what it is read under, `scope`): a table whose every range
+    is proved has its ranges forgotten, so the next check reads them all
+    again rather than standing on rows read before it began."""
+
+    def __init__(self, path):
+        self.path = path
+        self._lock = threading.Lock()
+        try:
+            self.kept = json.loads(path.read_text()) if path else {}
+        except (OSError, ValueError):
+            self.kept = {}
+
+    def of(self, table, scope=""):
+        """{range predicate: (counts, digests, first)} of `table` proved by
+        the check stopped earlier under the same `scope`."""
+        got = self.kept.get(table) or {}
+        if got.get("scope") != (scope or ""):
+            return {}
+        out = {}
+        for pred, r in (got.get("ranges") or {}).items():
+            first = r.get("first")
+            out[pred] = (dict(r["rows"]), dict(r["digest"]),
+                         (tuple(first[0]), dict(first[1])) if first
+                         else None)
+        return out
+
+    def proved(self, table, scope, pred, result):
+        """Range `pred` of `table` proved: kept on the disk before the
+        next range is owed."""
+        count, digest, first = result
+        with self._lock:
+            got = self.kept.get(table) or {}
+            if got.get("scope") != (scope or ""):
+                got = {"scope": scope or "", "ranges": {}}
+            got["ranges"][pred] = {
+                "rows": count, "digest": digest,
+                "first": [list(first[0]), first[1]] if first else None}
+            self.kept[table] = got
+            self._save()
+
+    def finished(self, table):
+        """Every range of `table` proved: nothing of it is kept for the
+        next check."""
+        with self._lock:
+            if self.kept.pop(table, None) is not None:
+                self._save()
+
+    def _save(self):
+        if not self.path:
+            return
+        from . import durable
+        durable.write_atomic(self.path, json.dumps(self.kept))
+
+
+def row_text(rows, preds=("",), key_width=1, most=1, sides=("src", "dst"),
+             eng=None, table="", scope="", kept=None):
     """Every row of both `sides` brought here as canonical text and
     compared, a key range at a time (`preds`, from `bounded`), as many
     ranges side by side as `most` and the run's slots allow (`together`).
@@ -550,12 +610,35 @@ def row_text(rows, preds=("",), key_width=1, most=1, sides=("src", "dst")):
     key's `key_width` values first (0: the whole row is its own key, read
     in its own order). Each range is hashed a side and its rows walked
     together, so the first key the two hold apart is named - not just
-    that the table differs."""
+    that the table differs.
+
+    Where `table` is named, each range is a unit of `eng`'s ledger (one
+    `attempts.work_unit` a range, its parent the table) and, with `kept`
+    (`RangeTexts`), each range proved is kept as it is: a check run again
+    after a stop reads only the ranges not proved, in their own units, and
+    folds the kept ones in their place."""
     import hashlib
     import itertools
+    from . import attempts
     preds = list(preds) or [""]
+    done = kept.of(table, scope) if kept is not None and table else {}
+    at = {p: i for i, p in enumerate(preds)}
 
     def one(pred):
+        if pred in done:
+            return done[pred]
+        if not table:
+            return read(pred)
+        with attempts.work_unit(eng, "deep",
+                                f"{table} {at[pred] + 1}/{len(preds)}",
+                                level="range", parent=table,
+                                parts=len(preds)):
+            got = read(pred)
+        if kept is not None:
+            kept.proved(table, scope, pred, got)
+        return got
+
+    def read(pred):
         digest = {s: hashlib.blake2b(digest_size=16) for s in sides}
         count = dict.fromkeys(sides, 0)
         first = None
@@ -585,6 +668,8 @@ def row_text(rows, preds=("",), key_width=1, most=1, sides=("src", "dst")):
         got.digests.append(digest)
         if got.first is None and first is not None:
             got.first = (preds[i] or "whole table",) + first
+    if kept is not None and table:
+        kept.finished(table)
     return got
 
 
