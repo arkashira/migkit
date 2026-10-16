@@ -10,6 +10,23 @@ import pytest
 from migkit import decide, sizing, tools
 from migkit.engines.cassandra import CassandraEngine
 from migkit.engines.keyspaces import KeyspacesEngine
+from tests.rung_branches import HOLDS, REFUSES, branch, watched
+
+PROVES_RUNGS = [
+    ("request_width", "measured", "holds"),
+    ("request_width", "measured", "refuses"),
+    ("request_width", "the cluster's pools", "holds"),
+    ("request_width", "the cluster's pools", "refuses"),
+    ("request_width", "the service's rate", "holds"),
+    ("request_width", "the service's rate", "refuses"),
+    ("request_width", "one a node", "holds"),
+    ("request_width", "one a node", "refuses"),
+    ("request_width", "one at a time", "holds"),
+    ("fetch_width", "the machine's cores", "holds"),
+    ("fetch_width", "the machine's cores", "refuses"),
+    ("fetch_width", "one at a time", "holds"),
+]
+
 
 
 def test_nothing_measured_is_one_request_and_says_so():
@@ -179,3 +196,33 @@ def test_the_installer_fetches_are_held_to_the_free_memory():
     n, choice = decide.fetch_width({"jobs": 6, "builds": 0, "cpus": 8,
                                     "free": 2 * sizing.WORKER_MEMORY})
     assert n == 2 and choice.path == "the machine's cores"
+
+
+def test_every_width_rung_is_held_and_refused_on_the_facts_it_names():
+    with watched() as seen:
+        decide.request_width({"last": 8, "base": 0.010, "latency": 0.011})
+    assert branch(seen, "measured") == [HOLDS]
+    with watched() as seen:
+        decide.request_width({"nodes": 3, "per_node": 32, "side": "dst"})
+    assert branch(seen, "measured") == [REFUSES]
+    assert branch(seen, "the cluster's pools") == [HOLDS]
+    with watched() as seen:
+        decide.request_width({"rate": 3000 * 9, "latency": 0.002,
+                              "nodes": 9})
+    assert branch(seen, "the cluster's pools") == [REFUSES]
+    assert branch(seen, "the service's rate") == [HOLDS]
+    with watched() as seen:
+        decide.request_width({"nodes": 3})
+    assert branch(seen, "the service's rate") == [REFUSES]
+    assert branch(seen, "one a node") == [HOLDS]
+    with watched() as seen:
+        decide.request_width({})
+    assert branch(seen, "one a node") == [REFUSES]
+    assert branch(seen, "one at a time") == [HOLDS]
+    with watched() as seen:
+        decide.fetch_width({"jobs": 6, "builds": 0, "cpus": 8})
+    assert branch(seen, "the machine's cores") == [HOLDS]
+    with watched() as seen:
+        decide.fetch_width({"jobs": 6, "builds": 0, "cpus": None})
+    assert branch(seen, "the machine's cores") == [REFUSES]
+    assert branch(seen, "one at a time") == [HOLDS]
