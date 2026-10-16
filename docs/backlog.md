@@ -5670,6 +5670,7 @@ Still open: bulk paths (container copy jobs), point-in-time snapshots.
   additive DDL without a resync.
   Not done (W12B): AWS's integration is made and waited for; Azure's MI link and Google's AlloyDB stream are registered and refused as not yet run; `decide.warehouse_feed` is not yet asked by the flow.
   Not done (W12B): the landing sizes the tail and late rows are dropped by `hop.versions`, but each warehouse still lands through its own device rather than switching way by the choice; the zero-ETL lag is documented, not yet read from the target; capabilities declare neither rung (owned elsewhere); none of it has run on a real account.
+  Not done (W13C): each warehouse now lands through the way `decide.warehouse_landing` chose (an untimed way probed at two sizes, bounded; a switch at a batch boundary only past the tie); the tail's first read asks `decide.warehouse_feed`, the provider's lag measured by a marker's round trip once its integration runs; Azure's MI link and Google's AlloyDB stream are made, watched and refused by the grant or API they lack. Left: the provider's win stops the tail and asks for `migkit check` rather than running it; the marker needs a source drainmark writes (postgres, mysql, mongodb); the rungs are not in `capabilities`; nothing has run on a real account.
 
 ## Where migkit would still lose with every item above done (2026-09-28)
 

@@ -557,6 +557,8 @@ class ZeroEtl:
     why_not: str = ""
     #: what it does not carry, which the promise of every row then lacks
     gaps: tuple = ()
+    #: the adapter's call reading the integration's state back
+    status: str = ""
 
 
 ZERO_ETL = {
@@ -566,21 +568,19 @@ ZERO_ETL = {
                         ("rds", "aurora-postgresql"), ("rds", "postgres")),
                 "redshift", ("every row", "deletes", "the source's order"),
                 documented_lag=15.0, runs="run_zero_etl",
+                status="zero_etl_state",
                 gaps=("a table with no primary key",)),),
     "azure": (
         ZeroEtl("azure-mi-link", "Azure's Managed Instance link", "azure",
                 (("sqlmi", ""), ("sql", "sqlserver")), "sqlmi",
                 ("every row", "deletes", "the source's order"),
-                documented_lag=5.0,
-                why_not=NOT_RUN.format(who="Azure",
-                                       what="a Managed Instance link")),),
+                documented_lag=5.0, runs="run_mi_link",
+                status="mi_link_state"),),
     "gcp": (
         ZeroEtl("gcp-alloydb-bigquery", "Google's AlloyDB stream into"
                 " BigQuery", "gcp", (("alloydb", ""),), "bigquery",
                 ("every row", "deletes"), documented_lag=60.0,
-                why_not=NOT_RUN.format(who="Google",
-                                       what="an AlloyDB stream into"
-                                            " BigQuery"),
+                runs="run_alloydb_bigquery", status="alloydb_stream_state",
                 gaps=("a table with no primary key",)),),
 }
 
@@ -626,6 +626,74 @@ def feed_facts(source, target, adapter=None, gaps=(), measured_lag=None):
                              else z.documented_lag),
             "provider_gaps": tuple(lacking), "runs": runs,
             "why_not": z.why_not or None}
+
+
+#: the states an integration's API reports once rows flow through it
+FEED_RUNNING = ("active", "running", "catchup", "seeding", "healthy",
+                "catch_up", "synchronizing")
+
+
+def _feed_call(adapter, call, names):
+    """`call` of `adapter` with its arguments taken from `names` (the hop
+    side's options and the instances' ids) by their parameters' names - a
+    missing one refused by the option to name."""
+    import inspect
+    fn = getattr(adapter, call, None)
+    if fn is None:
+        raise SystemExit(NOT_RUN.format(who=adapter.WHO, what=call))
+    args, missing = {}, []
+    for p in inspect.signature(fn).parameters.values():
+        if p.name == "log":
+            continue
+        if names.get(p.name) not in (None, ""):
+            args[p.name] = names[p.name]
+        elif p.default is inspect.Parameter.empty:
+            missing.append(p.name)
+    if missing:
+        raise SystemExit(f"{adapter.WHO}'s zero-ETL integration needs "
+                         + ", ".join(missing) + " named in the target's"
+                         " options")
+    return fn, args
+
+
+def run_feed(adapter, z, names, log):
+    """The provider's zero-ETL integration `z` made and watched through
+    `adapter` until it carries rows: {"status", ...} as the provider's
+    API reads it back. Never taken as verified: migkit's own check runs on
+    the warehouse after it."""
+    fn, args = _feed_call(adapter, z.runs, names)
+    return fn(log=log, **args)
+
+
+def feed_state(adapter, z, names):
+    """{"status", "errors"} of integration `z` as the provider's API reads
+    it, or None where there is none by its name."""
+    fn, args = _feed_call(adapter, z.status, names)
+    return fn(**args)
+
+
+def zero_etl_lag(state, put, seen, log, most=None):
+    """Seconds a marker row written on the source took to be read on the
+    warehouse through the provider's integration - its lag measured here,
+    not the documented one - or None where `state()` does not say the
+    integration is running. Where the marker is not seen within `most`
+    (`until`'s own bound otherwise) the seconds waited are the lag: it
+    is at least that."""
+    import uuid
+    got = state()
+    if not got or str(got.get("status") or "").lower() not in FEED_RUNNING:
+        return None
+    token = f"migkit-zetl-{uuid.uuid4().hex[:12]}"
+    began = time.monotonic()
+    put(token)
+    try:
+        until(lambda: True if seen(token) else None,
+              "the marker through the provider's integration", log,
+              most=most)
+    except SystemExit:
+        log("the marker had not come through the provider's integration;"
+            " its lag is at least the time waited")
+    return time.monotonic() - began
 
 
 AWS_WHERE = {
@@ -1535,6 +1603,9 @@ class Aws(Adapter):
                            for e in x.get("Errors") or ()],
                 "arn": x.get("IntegrationArn") or ""}
 
+    def zero_etl_state(self, name):
+        return self.integration(name)
+
     def run_zero_etl(self, source_arn, target_arn, name, log):
         """The zero-ETL integration `name` from `source_arn` into
         `target_arn` made where it is not there yet, and waited for until
@@ -1724,6 +1795,105 @@ class Gcp(Adapter):
 
     def _where(self):
         return f"projects/{self._project()}/locations/{self.region}"
+
+    def _streams(self):
+        """The change-stream API's streams resource, in this project."""
+        from googleapiclient import discovery
+        if self.__dict__.get("_stream_api") is None:
+            self._stream_api = discovery.build(
+                "datastream", "v1", credentials=self.credentials()[0],
+                cache_discovery=False)
+        return self._stream_api.projects().locations().streams()
+
+    def _stream_refused(self, e, what):
+        """SystemExit naming the API to enable or the permission lacked,
+        or None for another error."""
+        status = getattr(getattr(e, "resp", None), "status", None)
+        text = str(getattr(e, "content", b"") or e)
+        if status == 403 and ("SERVICE_DISABLED" in text
+                              or "accessNotConfigured" in text):
+            return SystemExit(
+                f"{what}: the project {self._project()} has not enabled"
+                " datastream.googleapis.com - enable it, then run again")
+        if status == 403:
+            return SystemExit(
+                f"{what}: the identity signed in lacks"
+                " datastream.streams.create, .get and .update in the project"
+                f" {self._project()} - grant them (roles/datastream.admin"
+                " holds all three), then run again")
+        return None
+
+    def alloydb_stream_state(self, name):
+        """{"status", "errors"} of the stream `name`, or None where the
+        project holds none by that name."""
+        from googleapiclient.errors import HttpError
+        try:
+            got = self._streams().get(
+                name=f"{self._where()}/streams/{name}").execute()
+        except HttpError as e:
+            if getattr(e.resp, "status", None) == 404:
+                return None
+            refused = self._stream_refused(e, f"the stream {name}")
+            if refused is not None:
+                raise refused from None
+            raise
+        return {"status": str(got.get("state") or "").lower(),
+                "errors": [str(x.get("message") or x.get("reason"))
+                           for x in got.get("errors") or ()]}
+
+    def run_alloydb_bigquery(self, source_profile, bigquery_profile, name,
+                             log, dataset_location=""):
+        """The stream `name` from the AlloyDB instance behind connection
+        profile `source_profile` into BigQuery behind `bigquery_profile`
+        made where it is not there yet, started, and waited for until
+        running: {"status"}. A stream already there is started, never made
+        twice; one that failed says the provider's errors."""
+        from googleapiclient.errors import HttpError
+        what = f"the stream {name}"
+        full = f"{self._where()}/streams/{name}"
+        try:
+            had = self.alloydb_stream_state(name)
+            if had is None:
+                log(f"making {what}")
+                dest = {"singleTargetDataset": {"datasetTemplate": {
+                    "location": dataset_location or self.region}}}
+                self._streams().create(
+                    parent=self._where(), streamId=name, body={
+                        "displayName": name,
+                        "sourceConfig": {
+                            "sourceConnectionProfile":
+                                f"{self._where()}/connectionProfiles/"
+                                f"{source_profile}",
+                            "postgresqlSourceConfig": {}},
+                        "destinationConfig": {
+                            "destinationConnectionProfile":
+                                f"{self._where()}/connectionProfiles/"
+                                f"{bigquery_profile}",
+                            "bigqueryDestinationConfig": {
+                                "sourceHierarchyDatasets": dest,
+                                "merge": {}}},
+                        "backfillAll": {}}).execute()
+                had = until(lambda: self.alloydb_stream_state(name),
+                            f"{what} made", log)
+            if had and had["status"] not in FEED_RUNNING:
+                self._streams().patch(name=full, updateMask="state",
+                                      body={"state": "RUNNING"}).execute()
+        except HttpError as e:
+            refused = self._stream_refused(e, what)
+            if refused is not None:
+                raise refused from None
+            raise SystemExit(f"{what}: {e}") from None
+
+        def ask():
+            got = self.alloydb_stream_state(name)
+            if got is None:
+                return None
+            if got["status"] in ("failed", "failed_permanently"):
+                raise SystemExit(f"{what} is {got['status']}"
+                                 + (f": {'; '.join(got['errors'])}"
+                                    if got["errors"] else ""))
+            return got if got["status"] in FEED_RUNNING else None
+        return until(ask, what, log)
 
     def _named(self, kind, ident=None):
         return f"{self._where()}/{kind}/{ident or self.id}"
@@ -2391,6 +2561,89 @@ class Azure(Adapter):
         import importlib
         return importlib.import_module(self.CLIENTS[self.product][0]
                                        + ".models")
+
+    def _mi_refused(self, e, what):
+        """SystemExit naming the grant or registration an MI link call
+        lacked, or None for another error."""
+        code = str(getattr(getattr(e, "error", None), "code", "") or "")
+        status = getattr(e, "status_code", None)
+        if status == 403 or code == "AuthorizationFailed":
+            return SystemExit(
+                f"{what}: the identity signed in lacks"
+                " Microsoft.Sql/managedInstances/distributedAvailabilityGroups"
+                "/write and /read on the Managed Instance - grant it (the"
+                " SQL Managed Instance Contributor role holds both), then run"
+                " again")
+        if code in ("MissingSubscriptionRegistration",
+                    "SubscriptionNotRegistered"):
+            return SystemExit(
+                f"{what}: the subscription has not registered the"
+                " Microsoft.Sql resource provider - register it, then run"
+                " again")
+        return None
+
+    def mi_link_state(self, managed_instance, name):
+        """{"status", "errors"} of the Managed Instance link `name`, or
+        None where the instance holds none by that name."""
+        from azure.core.exceptions import (HttpResponseError,
+                                           ResourceNotFoundError)
+        try:
+            got = self._op("distributed_availability_groups.get", self._rg(),
+                           managed_instance, name)
+        except ResourceNotFoundError:
+            return None
+        except HttpResponseError as e:
+            refused = self._mi_refused(e, f"the Managed Instance link {name}")
+            if refused is not None:
+                raise refused from None
+            raise
+        props = got.as_dict() if hasattr(got, "as_dict") else dict(got)
+        props = props.get("properties", props)
+        state = (props.get("link_state") or props.get("replica_state")
+                 or props.get("provisioning_state") or "")
+        return {"status": str(state).lower().replace(" ", "_"),
+                "errors": [str(props.get("last_error") or "")]
+                if props.get("last_error") else []}
+
+    def run_mi_link(self, managed_instance, partner_endpoint, partner_ag,
+                    instance_ag, name, log):
+        """The Managed Instance link `name` from the SQL Server's
+        availability group `partner_ag` at `partner_endpoint` into
+        `managed_instance` made where it is not there yet, and waited for
+        until its replica is seeded and synchronizing: {"status"}. The SQL
+        Server side's group and endpoint certificate are the source's to
+        hold; the provider refuses the link without them and that refusal
+        is said as it is."""
+        from azure.core.exceptions import HttpResponseError
+        what = f"the Managed Instance link {name}"
+        if self.mi_link_state(managed_instance, name) is None:
+            log(f"making {what}")
+            body = {"partner_availability_group_name": partner_ag,
+                    "partner_endpoint": partner_endpoint,
+                    "instance_availability_group_name": instance_ag,
+                    "instance_link_role": "Secondary",
+                    "replication_mode": "Async",
+                    "seeding_mode": "Automatic"}
+            try:
+                self._poller(self._op(
+                    "distributed_availability_groups.begin_create_or_update",
+                    self._rg(), managed_instance, name, body), what, log)
+            except HttpResponseError as e:
+                refused = self._mi_refused(e, what)
+                if refused is not None:
+                    raise refused from None
+                raise SystemExit(f"{what}: {e.message}") from None
+
+        def ask():
+            got = self.mi_link_state(managed_instance, name)
+            if got is None:
+                return None
+            if got["status"] in ("failed", "not_healthy", "canceled"):
+                raise SystemExit(f"{what} is {got['status']}"
+                                 + (f": {'; '.join(got['errors'])}"
+                                    if got["errors"] else ""))
+            return got if got["status"] in FEED_RUNNING else None
+        return until(ask, what, log)
 
     def _poller(self, poller, what, log):
         """A long-running operation waited for until done: its result, or

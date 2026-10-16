@@ -413,15 +413,36 @@ class _Warehouse(warehouse_sql.DigestsInSQL, DbapiRows, Engine):
 
     # ---- a continuous hop: batches sized from what was measured -------------
 
-    #: the landing this warehouse's own batch apply uses (`_apply_batch`),
-    #: by `decide.warehouse_landing`'s names; `_landing_way` refines it
+    #: the landing a batch goes through before any was timed, by
+    #: `decide.warehouse_landing`'s names; `_landing_first` refines it
     LANDING = "merge"
+    #: whether its batch apply can land the journal by statements
+    MERGES = True
     #: the (rows, seconds) samples a landing's start and cost a row are fit
     #: from: the most recent, so a warehouse that slows is seen to
     LANDING_SAMPLES = 32
+    #: batches a landing not yet timed at two sizes is tried with before it
+    #: is left unmeasured - a bound on probing, never on the choice
+    LANDING_PROBES = 4
 
     def _landing_way(self, side):
+        """The landing the next batch goes through: the one `tail_limit`
+        last settled on where this warehouse offers it, else its first."""
+        now = self.__dict__.get("_landing_now")
+        if now is not None and now in self._landings_offered(side):
+            return now
+        return self._landing_first(side)
+
+    def _landing_first(self, side):
         return self.LANDING
+
+    def _landings_offered(self, side):
+        """The landings this warehouse offers here: streaming where its
+        device keeps the offset, staged files where it has a stage, merge
+        statements where its apply lands the journal by statement."""
+        return tuple(way for way, ok in (
+            ("stream", self._stream_offsets(side)),
+            ("files", self._has_stage(side)), ("merge", self.MERGES)) if ok)
 
     def _has_stage(self, side):
         return False
@@ -467,36 +488,183 @@ class _Warehouse(warehouse_sql.DigestsInSQL, DbapiRows, Engine):
         """The facts `decide.warehouse_landing` climbs on: the tail's rate,
         each landing's measured start and cost a row, what the warehouse
         offers."""
+        offered = self._landings_offered(side)
         facts = {"rate": rate, "ledger": True,
-                 "stream_offsets": self._stream_offsets(side),
-                 "stage": self._has_stage(side)}
+                 "stream_offsets": "stream" in offered,
+                 "stage": "files" in offered}
         for way, samples in self.__dict__.get("_landings", {}).items():
-            fit = self.landing_fit(samples)
+            fit = self.landing_fit(samples) if way in offered else None
             if fit is not None:
                 facts[f"{way}_startup"], facts[f"{way}_per_row"] = fit
         return facts
 
     def tail_limit(self, side, db, got, asked, limit, log=None):
-        """How many changes the tail's next read takes: the batch that keeps
-        the lag lowest while the landing keeps up (`decide.warehouse_landing`)
-        once the landing was timed at two sizes; the tail's own size until
-        then, and where no landing keeps up - the tail is then behind and
-        its own sizing reads more a batch."""
+        """How many changes the tail's next read takes, and the landing the
+        batch goes through. The first read of a database asks how it is fed
+        (`feed_choice`). Then: a landing this warehouse offers that was not
+        timed at two sizes yet is tried for a batch at a time (at most
+        `LANDING_PROBES`, every landing holding the same exactly-once
+        promise); once timed, `decide.warehouse_landing` chooses, and the
+        landing changes at this batch boundary only where the one in use
+        no longer keeps up or the chosen's lag is lower by more than the
+        decision's tie - so noise does not flap it. The batch is the one
+        that keeps the lag lowest; the tail's own size until a landing was
+        timed, and where none keeps up (its own sizing then reads more)."""
+        fed = self.__dict__.setdefault("_fed", {})
+        if db not in fed:
+            fed[db] = self.feed_choice(side, db, log)
         rate = self._rate(got, asked)
         if rate is None:
             return limit
-        choice, sized = decide.warehouse_landing(
-            self.landing_facts(side, rate))
+        facts = self.landing_facts(side, rate)
+        now = self._landing_way(side)
+        probe = self._landing_probe(side, facts, now, limit)
+        if probe is not None:
+            return probe
+        choice, sized = decide.warehouse_landing(facts)
+        held = decide.batch_for(rate, facts.get(f"{now}_startup"),
+                                facts.get(f"{now}_per_row"))
+        way = now
+        if sized is not None and choice.path != now and (
+                held is None or (held[2] - sized[2]
+                                 > decide._tie() * held[2])):
+            way = choice.path
+        elif held is not None:
+            sized = held
         if sized is None:
             return limit
         rows, interval, lag = sized
-        if choice.path != self.__dict__.get("_landing_said"):
-            self._landing_said = choice.path
+        self._landing_now = way
+        if way != self.__dict__.get("_landing_said"):
+            self._landing_said = way
+            was = ("" if held is None or way == now
+                   else f", against {held[2]:.1f}s through the one before")
             decide.record(self.hop, choice, log, work=f"the feed of {db}",
-                          way=choice.said,
+                          way=(choice.said if way == choice.path else
+                               f"the landing in use ({way}) kept"),
                           reason=f"{rows:,} rows a batch, a batch every"
-                                 f" {interval or 0:.1f}s, {lag:.1f}s lag")
+                                 f" {interval or 0:.1f}s, {lag:.1f}s lag"
+                                 + was)
         return max(1, rows)
+
+    def _landing_probe(self, side, facts, now, limit):
+        """The read size of a batch trying an offered landing not timed at
+        two sizes yet - this size, then half of it - or None where every
+        offered landing is timed or was tried `LANDING_PROBES` times. Only
+        once one landing is timed, so there is one to come back to."""
+        if not any(k.endswith("_startup") for k in facts):
+            return None
+        tried = self.__dict__.setdefault("_landing_tried", {})
+        for way in self._landings_offered(side):
+            if f"{way}_startup" in facts or tried.get(way, 0) >= \
+                    self.LANDING_PROBES:
+                continue
+            tried[way] = tried.get(way, 0) + 1
+            self._landing_now = way
+            return max(1, limit if tried[way] % 2 else limit // 2)
+        return None
+
+    # ---- the feed: the provider's zero-ETL integration or the hop's tail -----
+
+    def feed_choice(self, side, db, log=None):
+        """The `Choice` between the provider's zero-ETL integration and this
+        hop's own tail (`decide.warehouse_feed`), asked as the tail into
+        database `db` starts. The provider's side is what its API says of
+        the two instances (`cloudapi.feed_facts`) with its lag measured by
+        a marker's round trip where the integration is running
+        (`cloudapi.zero_etl_lag`), the documented one otherwise and said
+        so; the tail's side is the lag its landing was measured at. Where
+        the provider's integration wins, it is made and watched through
+        its API and the tail stops: two writers into the warehouse would
+        break the ledger's exactly-once, and migkit's own check verifies
+        the integration's rows."""
+        from .. import cloudapi
+        facts = {"tail": True, **self._provider_feed(side, db, log)}
+        own = self.__dict__.get("_landing_said")
+        rate = self.__dict__.get("_tail_rate")
+        if own and rate:
+            got = decide.batch_for(rate, *(self.landing_facts(side, rate)
+                                           .get(f"{own}_{k}")
+                                           for k in ("startup", "per_row")))
+            if got is not None:
+                facts["own_lag"] = got[2]
+        choice = decide.warehouse_feed(facts)
+        lag = facts.get("provider_lag")
+        decide.record(self.hop, choice, log, work=f"the feed of {db}",
+                      way=choice.said,
+                      reason=("" if lag is None else
+                              f"the provider's lag {lag:.1f}s"
+                              + ("" if facts.get("provider_measured")
+                                 else " as documented, not measured")))
+        if choice.path == "provider":
+            got = cloudapi.run_feed(facts["adapter"], facts["zero_etl"],
+                                    facts["names"], log or (lambda m: None))
+            raise SystemExit(
+                f"{db}: the provider's zero-ETL integration carries the feed"
+                f" ({got.get('status')}), so this tail stops here - run"
+                " `migkit check` on the hop to verify the warehouse's rows")
+        return choice
+
+    def _provider_feed(self, side, db, log):
+        """`cloudapi.feed_facts` for the hop's two sides, or why the
+        provider's way is not offered (a side that is no instance of the
+        provider's API is not)."""
+        from .. import cloudapi, managed
+        try:
+            for which in ("src", "dst"):
+                api, conf = managed.api_conf(self.hop, self, which)
+                if api is None or not conf.get("id"):
+                    return {"offered": False, "not_offered": f"the {which}:"
+                            f" {conf if api is None else 'its instance is not named (managed id)'}"}
+            src = managed.adapter(self.hop, self, "src", find=False)
+            dst = managed.adapter(self.hop, self, "dst", find=False)
+            s, d = src.instance(), dst.instance()
+        except SystemExit as e:
+            return {"offered": False, "not_offered": str(e)}
+        except Exception:  # noqa: BLE001 - a side no provider's API reads
+            return {"offered": False, "not_offered": "the two sides are no"
+                    " instances the provider's API reads"}
+        z = cloudapi.zero_etl(s, d)
+        names = {**(self._endpoint(side).options or {}),
+                 "source": s.id, "target": d.id,
+                 "name": f"migkit-{self._leaf(self.hop.name)}"}
+        lag = None
+        if z is not None and z.status:
+            put, seen = self._marker(db)
+            if put is not None:
+                lag = cloudapi.zero_etl_lag(
+                    lambda: cloudapi.feed_state(src, z, names), put, seen,
+                    log or (lambda m: None))
+        facts = cloudapi.feed_facts(s, d, src, measured_lag=lag)
+        if facts.get("offered"):
+            facts.update(adapter=src, zero_etl=z, names=names,
+                         provider_measured=lag is not None)
+        return facts
+
+    def _marker(self, db):
+        """(put(token), seen(token)) of a marker row written on the source
+        and read on this warehouse, or (None, None) where the source takes
+        no marker of migkit's."""
+        from .. import drainmark
+        try:
+            if drainmark.able(self.hop, self):
+                return None, None
+            drainmark.make(self.hop, self, db)
+        except Exception:  # noqa: BLE001 - no marker: the lag is documented
+            return None, None
+
+        def put(token):
+            drainmark.put(self.hop, self, db, token)
+
+        def seen(token):
+            try:
+                got = self._rows("dst", db, "select count(*) from"
+                                            f" {self._qualified('dst', db, drainmark.TABLE)}"
+                                            f" where token = {MARK}", (token,))
+            except Exception:  # noqa: BLE001 - not replicated there yet
+                return False
+            return bool(got and int(got[0][0]))
+        return put, seen
 
     # ---- late and out-of-order rows: merged by key and version ------------
 
@@ -505,7 +673,11 @@ class _Warehouse(warehouse_sql.DigestsInSQL, DbapiRows, Engine):
         down by what feeds this target from more than one place
         (`hop.versions`); a single tail's batches are in the source's own
         order, and the ledger refuses one applied twice."""
-        return dict(getattr(self.hop, "versions", None) or {})
+        from .. import hopkeys
+        got = None
+        if "versions" in hopkeys.HOP_OPTIONS and hasattr(self.hop, "options"):
+            got = hopkeys.opt(self.hop, "versions")
+        return dict(got or getattr(self.hop, "versions", None) or {})
 
     def _in_version_order(self, changes):
         """`changes`, each versioned table's in its version order, the rest
@@ -1376,7 +1548,7 @@ class RedshiftEngine(_CatalogWarehouse):
 
     # ---- the stage --------------------------------------------------------
 
-    def _landing_way(self, side):
+    def _landing_first(self, side):
         return "files" if self._stage(side) else "merge"
 
     def _has_stage(self, side):
@@ -1655,9 +1827,11 @@ class RedshiftEngine(_CatalogWarehouse):
         """One transaction: each table's changes in a temporary table a
         shape, the deleted keys taken out, the rest merged in, and the
         ledger's line for the hop written - so the batch and the line
-        saying it was applied are there together or not at all."""
-        import time
+        saying it was applied are there together or not at all. The rows
+        reach their temporary table by the landing chosen (`_landing_way`):
+        the stage's files copied, or insert statements."""
         n = seen["batch"] if seen else None
+        landing = self._landing_way(side)
         conn = self._connect(side, db)
         files = []
         try:
@@ -1674,16 +1848,14 @@ class RedshiftEngine(_CatalogWarehouse):
                 for i, (shape, names) in enumerate(
                         self._shapes(journal).items()):
                     part = [r for r, s in journal if s == shape]
-                    way, timed = self._stage_way(side, db, table, len(part))
-                    began = time.monotonic()
+                    way = ("copy" if landing == "files"
+                           and not self._copy_unusable(side, db, table)
+                           else "insert")
                     stage, url = self._staged(
                         side, db, cur, table, names,
                         [[r.get(c) for c in names] + [r["_migkit_op"]]
                          for r in part], f"{fp}_{i}", way,
                         extra=(("_migkit_op", "varchar(8)"),))
-                    if timed is not None:
-                        self._took(timed, way, time.monotonic() - began,
-                                   len(part))
                     if url:
                         files.append(url)
                     on = " and ".join(f"{target}.{self._q(k)} ="
@@ -1792,21 +1964,6 @@ class SnowflakeEngine(FoldsToCapitals, _CatalogWarehouse):
     #: only exactly-once ingest Snowflake has), a staged file named for the
     #: batch - which Snowflake's load history copies once - where it does
     #: not
-    LAND_WAYS = (
-        decide.Rung("channel", "a streaming channel whose offset token is"
-                               " the batch's",
-                    needs=(decide.Need(
-                        "key-pair sign-in", lambda f: f["key pair"],
-                        "{rung} signs in by key pair alone, and the target"
-                        " signs in by password"),),
-                    because="the channel's committed token says whether the"
-                            " batch landed"),
-        decide.Rung("staged file", "a staged file named for the batch,"
-                                   " copied once",
-                    # the file in the journal's stage until it is copied
-                    footprint=1),
-    )
-
     def side_database(self, side, db):
         """The account, the database the connections go to, and the hop's
         schema in it."""
@@ -2222,7 +2379,7 @@ class SnowflakeEngine(FoldsToCapitals, _CatalogWarehouse):
                     f" {self._q('_migkit_cols')} varchar)")
         return name, dict(cols)
 
-    def _landing_way(self, side):
+    def _landing_first(self, side):
         return "stream" if self._stream_offsets(side) else "files"
 
     def _has_stage(self, side):
@@ -2252,17 +2409,27 @@ class SnowflakeEngine(FoldsToCapitals, _CatalogWarehouse):
         return props
 
     def _land(self, cur, side, db, table, journal, records, n, fp):
-        """The batch's journal rows landed once. Through a streaming
-        channel named for the hop and table where the endpoint signs in by
-        key pair: the channel's last committed offset token is `n:fp`
-        when this attempt landed already, and is not appended again. As a
-        staged file named for the batch otherwise, which Snowflake's load
-        history copies once."""
+        """The batch's journal rows landed once, by the landing chosen
+        (`_landing_way`). Through a streaming channel named for the hop and
+        table (offered only where the endpoint signs in by key pair): the
+        channel's last committed offset token is `n:fp` when this attempt
+        landed already, and is not appended again. As a staged file named
+        for the batch, which Snowflake's load history copies once. Or by
+        insert statements: rows an earlier attempt left are passed over by
+        the merge, which takes each of this attempt's sequence numbers
+        once."""
         props = self._channel_props(side)
         token = f"{n}:{fp}"
-        way = decide.climb("land a batch's changes", self.LAND_WAYS,
-                           decide.Facts({"key pair": props is not None}))
-        if way.path == "staged file":
+        way = self._landing_way(side)
+        if way == "merge":
+            cols = list(records[0])
+            cur.executemany(
+                f"insert into {self._qualified(side, db, journal)}"
+                f" ({', '.join(self._q(c) for c in cols)}) values"
+                f" ({', '.join(['%s'] * len(cols))})",
+                [[r[c] for c in cols] for r in records])
+            return
+        if way == "files" or props is None:
             columns = [(c, None) for c in records[0]]
             name = f"migkit-{self._leaf(table)}-{n}-{fp}.parquet"
             declared = dict(self.neutral_columns(side, db, journal))
@@ -2708,9 +2875,13 @@ class BigQueryEngine(BigQueryChanges, BigQueryChecks, _Warehouse):
         return pa.Table.from_arrays(arrays, names=list(names))
 
     LANDING = "stream"
+    MERGES = False
 
     def _has_stage(self, side):
-        return True
+        """Load jobs into the journal, while the project's daily quota has
+        any left (unknown where its history cannot be read)."""
+        left = self._loads_left(side)
+        return left is None or left > 0
 
     def _stream_offsets(self, side):
         return True
@@ -3046,14 +3217,36 @@ class BigQueryEngine(BigQueryChanges, BigQueryChecks, _Warehouse):
             except (exceptions.NotFound, exceptions.OutOfRange,
                     exceptions.FailedPrecondition):
                 continue
-            if not held or self._landed(client, side, db, journal, n,
-                                        fp) >= len(records):
+            if not held or self._journal_count(client, side, db, journal,
+                                               n, fp) >= len(records):
                 streams[table] = [have[0], have[1] + len(records)]
                 return
         raise SystemExit(f"{table}: the batch's changes could not be written"
                          " to its journal")
 
-    def _landed(self, client, side, db, journal, n, fp):
+    def _load_journal(self, side, db, journal, schema, records):
+        """The batch's journal rows appended by one load job from Parquet.
+        A load run twice leaves the rows twice, and the merge takes each
+        of this attempt's sequence numbers once, so the batch lands once."""
+        import io
+
+        import pyarrow.parquet as pq
+        from google.cloud import bigquery
+        names = [f.name for f in schema]
+        body = io.BytesIO()
+        pq.write_table(self._arrow(schema, names, [[r.get(c) for c in names]
+                                                   for r in records]), body)
+        body.seek(0)
+        self._client(side).load_table_from_file(
+            body, self._ref(side, db, journal),
+            job_config=bigquery.LoadJobConfig(
+                source_format=bigquery.SourceFormat.PARQUET,
+                write_disposition="WRITE_APPEND", schema=list(schema))).result()
+        seen = self.__dict__.get("_loads_seen")
+        if seen is not None:
+            seen[2] += 1
+
+    def _journal_count(self, client, side, db, journal, n, fp):
         got = list(client.query(
             f"select count(distinct _migkit_seq) from"
             f" {self._qualified(side, db, journal)} where _migkit_batch"
@@ -3082,8 +3275,12 @@ class BigQueryEngine(BigQueryChanges, BigQueryChecks, _Warehouse):
             journal, schema = self._journal(side, db, table)
             fp = self._fingerprint(table, [], rows, str(n))
             recs = self._journal_rows(table, rows, n, fp)
-            self._land(side, db, table, journal, schema,
-                       [r for r, _ in recs], n, fp, streams)
+            if self._landing_way(side) == "files":
+                self._load_journal(side, db, journal, schema,
+                                   [r for r, _ in recs])
+            else:
+                self._land(side, db, table, journal, schema,
+                           [r for r, _ in recs], n, fp, streams)
             done.append((journal, fp))
             for shape, names in self._shapes(recs).items():
                 part = f"_migkit_s{len(script)}"

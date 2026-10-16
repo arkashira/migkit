@@ -190,7 +190,8 @@ def test_the_provider_integration_is_found_for_its_pairs_only():
     assert cloudapi.zero_etl(_inst("aws", "rds", "postgres"),
                              _inst("gcp", "bigquery")) is None
     assert cloudapi.zero_etl(_inst("gcp", "alloydb"),
-                             _inst("gcp", "bigquery")).runs == ""
+                             _inst("gcp", "bigquery")).runs \
+        == "run_alloydb_bigquery"
 
 
 def test_a_gap_on_the_source_takes_every_row_from_the_provider():
@@ -217,7 +218,8 @@ def test_the_lower_lag_wins_where_both_keep_every_promise():
 
 def test_an_integration_migkit_does_not_run_is_never_chosen():
     s, d = _inst("gcp", "alloydb"), _inst("gcp", "bigquery")
-    facts = cloudapi.feed_facts(s, d)
+    facts = cloudapi.feed_facts(s, d, adapter=types.SimpleNamespace(
+        runner=lambda z: None))
     f = decide.warehouse_feed({**facts, "tail": True,
                                "promises": ("deletes",), "own_lag": 99.0})
     assert f.path == "own"

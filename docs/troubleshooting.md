@@ -1241,6 +1241,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: a counter's change adds to the value where it stands, which only a two-way hop does
 
+* <...>: the provider's zero-ETL integration carries the feed (<...>), so this tail stops here - run `migkit check` on the hop to verify the warehouse's rows
+
 * <...>: <...> on the target and in the change are not of one kind, so which version is newer cannot be told; give the column one type on both sides
 
 * <...> has no key on the target, and a change is applied by its key
@@ -1831,6 +1833,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...> is <...>
 
+* <...>'s zero-ETL integration needs <...> named in the target's options
+
 * migkit asks no API of <...>; it asks <...>
 
 * <...>'s API is asked here for <...>; <...> is not one of them
@@ -1860,6 +1864,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * no Google Cloud project: name it (project) or set gcloud's default project
 
 * <...> failed: <...>
+
+* <...>: <...>
+
+* <...> is <...>: <...> | <...>
 
 * <...> has no primary instance
 
@@ -1982,8 +1990,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * the tail keeps <...>, which the machines' store cannot hold; keep the hop's run state in a bucket or a directory every machine sees
 
 * the machines' store kept changing under migkit while it wrote <...>; too many machines write one record at once
-
-* <...>: <...>
 
 * <...>: another machine kept raising the target's number past this one's; stop the other runs
 
