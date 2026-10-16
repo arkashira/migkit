@@ -1223,6 +1223,10 @@ def _run(hop, eng, dbs, go, leg, say, approve):
         say(line)
     failed = [w for lvl, w in rows if lvl == "fail"]
     if not go:
+        if not conf:
+            for d in dbs:
+                _one_way(hop, eng, d, False, say,
+                         "the stream is torn down")
         if not conf and leg.manual is not None:
             leg.manual(False)
         say("\ndry-run, add --go to cut over"
@@ -1298,6 +1302,8 @@ def _manual(hop, eng, dbs, leg, say, approvers, failed, unproven):
     proof says, and records what the proofs said."""
     from . import audit
     unproven = list(failed) if unproven else None
+    for d in dbs:
+        _one_way(hop, eng, d, True, say, "the stream is torn down")
     for d in dbs:
         got = pos = None
         if leg.fence is not None:
@@ -1409,6 +1415,7 @@ def _phased(hop, eng, dbs, leg, conf, say, approvers, drain=None,
                           "seconds": round(rec["phases"][name]["ended"]
                                            - rec["phases"][name]["began"],
                                            3), **said})
+        _sheet_ended(hop, dbs, name, rec["phases"][name])
         if left() < 0:
             raise _Undo(f"the {budget:g}s budget ran out after {name}")
 
@@ -1475,6 +1482,7 @@ def _phased(hop, eng, dbs, leg, conf, say, approvers, drain=None,
         done("freeze", how=how)
         phase("drain")
         at = {}
+        drained_from = time.monotonic()
         for i, d in enumerate(dbs):
             if drain == "mark":
                 at[d] = _drain_by_mark(hop, eng, d, i, leg, rec, left, say)
@@ -1495,6 +1503,7 @@ def _phased(hop, eng, dbs, leg, conf, say, approvers, drain=None,
                                 + _drain_left(leg.fence, d, pos))
                 say(f"  {d}: the stream passed {pos}, taken after the"
                     " freeze")
+                _seam(hop, leg, d, pos, time.monotonic() - drained_from, say)
             if leg.settle is not None:
                 got = _bounded(leg.settle, left(), d, max(0.1, left()))
                 if not got:
@@ -1577,6 +1586,7 @@ def _phased(hop, eng, dbs, leg, conf, say, approvers, drain=None,
         rec["phases"]["flip"]["ended"] = time.time()
         rec["state"] = "flipped"
         _save(hop, rec)
+        _sheet_ended(hop, dbs, "flip", rec["phases"]["flip"])
     except _Undo as e:
         return _undone(hop, eng, rec, leg, conf, say, e.why)
     except KeyboardInterrupt:
@@ -1765,6 +1775,10 @@ def no_return(hop, eng, dbs, go, leg, say, approve, rec=None,
         + "; its point of no return:")
     for line in _no_return_plan(hop, dbs, leg, flipped, back):
         say(f"  {line}")
+    if rec is None:
+        for d in dbs:
+            _one_way(hop, eng, d, go, say, "the stream back is dropped and"
+                     " the old source given back")
     if not go:
         say("\ndry-run, add --go to take the cutover past its point of no"
             " return")
@@ -1941,6 +1955,57 @@ def _no_return_back(hop, eng, dbs, rec, way, say, why):
     raise SystemExit(f"the point of no return was undone ({why}): the old"
                      " source is frozen as the cutover left it, and going"
                      " back is still possible")
+
+
+def _one_way(hop, eng, db, go, say, what):
+    """A drop of the cutover - the stream torn down, the old source given
+    back - goes through the one guard of every one-way action
+    (`interlock.before_one_way`): shown in a plan against this target,
+    then taken with `go` against that target only."""
+    from . import interlock
+    return interlock.before_one_way(hop, eng, db, "drop", go,
+                                    lambda m: say(f"  {db}: {m} ({what})"))
+
+
+#: the change-sheet phase each cutover phase that ends is written back to
+SHEET_PHASE = {"drain": "catch-up", "flip": "cutover"}
+
+
+def _sheet_ended(hop, dbs, name, at):
+    """A cutover phase that has a step in the hop's change sheet wrote
+    its evidence back as it ended (`report.step_ended`). A sheet that
+    cannot be written never stops the cutover: it is said in the run's
+    audit instead."""
+    phase = SHEET_PHASE.get(name)
+    if phase is None:
+        return
+    from . import report
+    took = (at.get("ended") or time.time()) - (at.get("began") or 0)
+    for d in dbs:
+        try:
+            report.step_ended(hop, d, phase, "done", took,
+                              f"the cutover's {name} ended")
+        except (OSError, SystemExit, ValueError) as e:
+            _audit(hop, {"id": "sheet", "dbs": list(dbs)},
+                   {"step": name, "event": "sheet-not-written",
+                    "why": str(e).strip()[:200]})
+
+
+def _seam(hop, leg, db, pos, took, say):
+    """Where the drain of the cutover really stopped, written beside the
+    operator's drains (`drainmark.seam`): the position passed, what the
+    stream had applied, whether a batch in flight went past it."""
+    from . import drainmark
+    try:
+        got = drainmark.seam(hop, leg.fence, db, pos, took)
+    except Exception as e:  # noqa: BLE001 - the drain itself has passed
+        say(f"  {db}: the seam could not be read back: "
+            f"{str(e).strip()[:120]}")
+        return None
+    if got["past"] and got["past"] > 0:
+        say(f"  {db}: the batch in flight went past {pos}; the fenced"
+            " check that follows reads the seam as it is")
+    return got
 
 
 def _drain_left(fence, db, pos):

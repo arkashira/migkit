@@ -209,7 +209,10 @@ class _Checkpoint(dict):
                 time.sleep(0.001)
         raise SystemExit(f"the move's checkpoint {self.path} kept changing"
                          " while it was written; nothing past the last save"
-                         " is lost, and the next run goes on from it")
+                         " is lost. Check which machines still own this move"
+                         " and reconcile their state; the checkpoint is"
+                         " kept, and once the contention is resolved the"
+                         " original move command goes on from it")
 
     def discard(self):
         from . import checkpoint
@@ -243,7 +246,10 @@ class _Checkpoint(dict):
                     dict.__setitem__(self, key, value)
             return
         raise SystemExit("the move's checkpoint kept changing under migkit"
-                         " while it saved it")
+                         " while it saved it. Check which machines still own"
+                         " this move and reconcile their state before"
+                         " retrying; once the contention is resolved, rerun"
+                         " the original move command")
 
     def reload(self, key=None):
         """What every machine sharing the move has saved by now. `key` is
@@ -1406,6 +1412,46 @@ def _link_line(got, name):
     return ("link: " + ", ".join(parts)) if parts else ""
 
 
+@main.command()
+@click.argument("hop_name")
+@click.option("--db", default="", help="one database of the hop")
+@click.option("--to", "at", required=True,
+              help="the position to drain the change tail to, written the"
+              " way the engine writes it, or `now`")
+@click.option("--wait", type=float, default=300.0, show_default=True,
+              help="seconds the tail may take to reach it")
+@click.option("--go", is_flag=True,
+              help="drain and hold the tail there; default shows the plan")
+def drain(hop_name, db, at, wait, go):
+    """Drain the running change tail to a position and hold it there: it
+    cannot be taken back, so it is shown first and taken with --go against
+    the target the plan named. Says where the tail really stopped."""
+    from . import drainmark
+    from .engines import ALIASES
+    from .verdict import Usage
+    hop = get_hop(hop_name)
+    _require_configured(hop)
+    eng = get_engine(hop)
+    dbs = [db] if db else (hop.databases or eng.databases())
+    if len(dbs) != 1 and at.strip().lower() != drainmark.NOW:
+        raise Usage("a position belongs to one database: name it with"
+                    f" --db ({', '.join(dbs[:5])})")
+    leg = _stream_leg(hop, eng, db, dbs, ALIASES.get(hop.engine, hop.engine))
+    if leg.fence is None:
+        raise SystemExit(f"{hop_name}: no stream of this hop reads a"
+                         " position, so there is nothing to drain to."
+                         " Its cutover proves the drain by a mark")
+    for d in dbs:
+        got = drainmark.to_position(hop, eng, d, hop.report_dir(d), at, wait,
+                                    go, lambda m: console.print(_esc(m)),
+                                    fence=leg.fence)
+        if go and got["verified"] is None:
+            console.print(f"  {_esc(d)}: the source goes on, so the target"
+                          " is not checked against it at the seam; freeze"
+                          f" the source and run `migkit check {hop_name}"
+                          f" --db {_esc(d)}`")
+
+
 @main.command("change-sheet")
 @click.argument("hop_name")
 @click.option("--db", default="", help="one database of the hop's scope;"
@@ -1718,7 +1764,12 @@ def _drill(hop_name, db, table, limit):
                 f" where i.indrelid = '\"{sch}\".\"{tbl}\"'::regclass"
                 " and i.indisprimary").splitlines() if c]
     if not keys:
-        raise SystemExit(f"{table} has no primary key for joining")
+        raise SystemExit(f"{table} has no primary key for row joining, so"
+                         " this drilldown cannot run. Run `migkit check"
+                         f" {hop_name} --db {db} --only data` to request the"
+                         " engine's complete data comparison; if that is"
+                         " unsupported, keep the table unproved and review a"
+                         " schema/key plan with the database owner")
     # compared as shown: a masked column's values are tokens, equal where
     # the values are, so the rows still line up and still differ. In
     # migkit's words: the comparison's own report opens with its name
@@ -2515,8 +2566,10 @@ def _make_room_for_rows(hop, eng, db, actions):
                 eng.resume_writer(db, back)
             raise SystemExit(
                 f"{db}: {what} did not pause within {window}s (hop option"
-                " repair_window), so nothing was applied. It has been told"
-                " to carry on.")
+                " repair_window); no repair was applied and it was asked to"
+                " resume. Confirm its current state, inspect why the pause"
+                " failed and resolve the coordination, then rerun the"
+                " repair plan")
         paused.append(what)
     return paused
 
@@ -3204,7 +3257,7 @@ def _record_run(hop, eng, d, via, rows, began, spent, narrowed=()):
     (`_source_rows`); where a row filter narrows tables of it (`narrowed`)
     they are only the most it carried, and no rate is kept from them: a
     rate kept too high is read by every later plan, other hops' too."""
-    from . import machine, movers, planner, rehearsal, sizing
+    from . import machine, movers, planner, rehearsal, report, sizing
     # the programs this machine runs for the way, not the static table: a
     # local build of the streaming copy was taken for its image, and its
     # CPU seconds were lost
@@ -3222,6 +3275,13 @@ def _record_run(hop, eng, d, via, rows, began, spent, narrowed=()):
     # the copy held to the forecast it started with, where it kept one
     for line in rehearsal.held_to(hop, d, "copy", took):
         console.print(f"  {line}")
+    # and the change sheet's copy steps written back as the phase ends
+    try:
+        report.step_ended(hop, d, "copy", "done", took,
+                          "the copy ended; the check proves it", rows=rows)
+    except (OSError, SystemExit, ValueError) as e:
+        console.print(f"  the change sheet was not written back: "
+                      f"{_esc(_clean(e, raw=True))}")
 
 
 
@@ -5262,10 +5322,13 @@ def _programs_ready(hop, d, v):
     from . import movers
     left = movers._still_running(hop.report_dir(d) / "running-programs.json")
     if left:
-        raise SystemExit(f"a program an earlier move of {d} started is"
-                         f" still running (process {left[0][0]}) and"
-                         " writing; a move beside it would empty the"
-                         " tables under it")
+        raise SystemExit(f"an earlier move is still writing to {d}"
+                         f" (process {left[0][0]}); a move beside it would"
+                         " empty the tables under it. Do not start another"
+                         " move. Inspect the saved run log and have the"
+                         " owner finish or safely stop that process, confirm"
+                         " it has stopped, then rerun the original move"
+                         " command")
     if movers.options_missing(hop, d, v):
         raise SystemExit("the programs installed here do not take options"
                          " the move passes them - migkit doctor --install"
@@ -5522,7 +5585,12 @@ def _stream_leg(hop, eng, db, dbs, engine):
         while tailctl.alive(where) and time.monotonic() < end:
             time.sleep(tailctl.POLL)
         if tailctl.alive(where):
-            raise SystemExit(f"{d}: the change tail did not end")
+            raise SystemExit(
+                f"{d}: cutover stopped because the change tail did not end."
+                " Do not advance the cutover or release an existing write"
+                " freeze. Inspect this hop's tail status and its saved run"
+                " log, resolve the stop failure, then rerun the cutover plan"
+                " before approving another attempt")
         say(f"{d}: the change tail ended")
 
     def ours(d):
@@ -5546,7 +5614,11 @@ def _stream_leg(hop, eng, db, dbs, engine):
 
     def tail_down(d):
         if not tailctl.pause(hop.report_dir(d), 60):
-            raise SystemExit(f"{d}: the change tail did not pause")
+            raise SystemExit(
+                f"{d}: cutover stopped because the change tail did not"
+                " pause. Keep the cutover blocked. Inspect the tail's"
+                " progress and its saved run log, resolve the pause failure,"
+                " then rerun the cutover plan")
         return []
 
     def tail_up(d):

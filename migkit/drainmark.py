@@ -260,7 +260,6 @@ def to_position(hop, eng, db, where, at, timeout, go, log, fence=None,
     from . import interlock, tailctl
     fence = fence or eng
     pos = named(hop, fence, db, at)
-    kind = side_engine(hop, fence, "src")[0]
     if not tailctl.alive(where):
         raise SystemExit(f"{db}: no change tail runs for this database, so"
                          " nothing applies the changes up to a position."
@@ -290,6 +289,20 @@ def to_position(hop, eng, db, where, at, timeout, go, log, fence=None,
             + ". Nothing was stopped; the tail goes on. Give it longer"
               " (a larger wait), or name an earlier position")
     held = tailctl.pause(where, max(5.0, timeout))
+    return seam(hop, fence, db, pos, took, held=held, verify=verify, log=log)
+
+
+def seam(hop, fence, db, pos, took, held=None, verify=None, log=None):
+    """Where the apply really stopped for the position `pos`, read back
+    from what the tail saved: whether it went past it (a batch in flight
+    does), and whether the target checks the same there. `held` is None
+    where nothing paused the tail (a cutover's drain, which goes on to
+    its own checks). One owner of the seam for the operator's drain and
+    the cutover's: both write the same record to the changelog.
+    Returns {"position", "reached", "held", "applied", "past", "verified",
+    "said"}."""
+    from . import audit, tailctl
+    kind = side_engine(hop, fence, "src")[0]
     saved = tailctl.saved(tailctl.token_path(hop, db))
     applied = None if saved is None else (
         saved if isinstance(saved, str) else json.dumps(saved, default=str,
@@ -300,19 +313,21 @@ def to_position(hop, eng, db, where, at, timeout, go, log, fence=None,
     if verify is not None:
         verified, seen = verify(db)
     said = (f"{db}: drained to {pos} in {took:.1f}s; "
-            + ("the tail is held" if held else "the tail did not hold")
+            + ("" if held is None else
+               "the tail is held" if held else "the tail did not hold")
             + (f" at {applied}" if applied else "")
             + (" (the batch in flight went past the position)"
                if past and past > 0 else "")
             + ("" if verified is None else
                "; the target checked at the seam: "
                + ("same" if verified else f"NOT the same - {seen}")))
-    log(said)
-    from . import audit
+    if log is not None:
+        log(said)
     audit.append(hop.report_dir() / "changelog.jsonl",
                  {"op": "drained", "db": db, "position": pos,
-                  "applied": applied, "held": bool(held),
-                  "verified": verified})
-    return {"position": pos, "reached": True, "held": bool(held),
+                  "applied": applied, "held": None if held is None
+                  else bool(held), "verified": verified})
+    return {"position": pos, "reached": True,
+            "held": None if held is None else bool(held),
             "applied": applied, "past": past, "verified": verified,
             "said": said}

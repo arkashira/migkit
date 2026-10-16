@@ -559,6 +559,29 @@ def write_back(hop, sid, status, seconds, proof, rows=None, unit=None):
     return step
 
 
+def step_ended(hop, db, phase, status, seconds, proof, rows=None):
+    """A run's phase of `db` ended at its boundary: every step of the
+    hop's change sheet that is that phase (`copy`, `index`, `catch-up`,
+    `check`, `cutover`) gets the evidence written back (`write_back`).
+    A step with a table takes no seconds of its own - the phase's time
+    is not split by guess - and says so in its proof. Nothing where the
+    hop keeps no sheet or the sheet has no such step; a step already
+    done is left as it is. Returns the ids written."""
+    out = []
+    for s in read_change_sheet(hop):
+        if s.get("db") != db or s.get("phase") != phase \
+                or s.get("status") == "done":
+            continue
+        alone = not s.get("table")
+        write_back(hop, s["id"], status, seconds if alone else None,
+                   str(proof) if alone else
+                   f"{proof} (the phase's {seconds:.1f}s is not split by"
+                   " table)" if seconds is not None else str(proof),
+                   rows=rows if alone else None)
+        out.append(s["id"])
+    return out
+
+
 #: what a way's `leaves` words name on a server, and which side it is on
 #: ("" is the side(s) the way loads)
 SERVER_OBJECTS = (

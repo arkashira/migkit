@@ -304,11 +304,27 @@ def approvals(hop, principal):
             "asked_by": req.get("asked_by"),
             "expires": req.get("expires"),
             "lets": gate.LETS.get(req.get("step"), ""),
+            "readiness": _readiness(hop, req),
             "detail": _lines_of(hop, req.get("detail")),
             "need": need, "have": sorted(have),
             "given_in_view": [g for g in given if g],
             "may": not why, "why_not": why})
     return out
+
+
+def _readiness(hop, req):
+    """Whether the cutover approval asked for is worth giving now
+    (`approvals.readiness`): what stands in the way, and what to do. None
+    for a step that is not the cutover's, and where it cannot be read."""
+    from .. import approvals as gate
+    if req.get("step") not in ("cutover", "point-of-no-return"):
+        return None
+    try:
+        got = gate.readiness(hop, req.get("db") or "")
+    except Exception:  # noqa: BLE001 - the view shows the request without it
+        return None
+    return {"ready": got["ready"], "blocks": got["blocks"],
+            "next": got["next"], "lag": got["lag"], "bound": got["bound"]}
 
 
 def request_path(hop, request_id, db=""):

@@ -107,6 +107,7 @@
     <h4>{{ a.step }}{% if a.db %} on {{ a.db }}{% endif %} <span class="pill">{{ a.have|length }} of {{ a.need }}</span></h4>
     <p>Asked by <b>{{ a.asked_by }}</b>, standing until {{ a.expires|when }}.</p>
     {% if a.lets %}<p><b>Approving lets this happen:</b> {{ a.lets }}.</p>{% endif %}
+    {% if a.readiness %}{% if a.readiness.ready %}<p><b>Ready:</b> nothing measured stands in the way{% if a.readiness.lag is not none %} (the tail is {{ "%.1f"|format(a.readiness.lag) }}s behind, bound {{ a.readiness.bound }}s){% endif %}.</p>{% else %}<p><b>Not ready:</b> {{ a.readiness.blocks|join("; ") }}.{% if a.readiness.next %} Next: {{ a.readiness.next }}.{% endif %}</p>{% endif %}{% endif %}
     {% if a.detail %}<pre class="detail">{{ a.detail|join("\n") }}</pre>{% endif %}
     {% if a.have %}<p class="muted">Approved by {{ a.have|join(", ") }}.</p>{% endif %}
     {% if a.may %}

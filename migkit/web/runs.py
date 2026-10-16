@@ -39,6 +39,9 @@ from dataclasses import dataclass, field
 DIR = "view-runs"
 #: a name as the options take it: a database, a table, a state's tag
 NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.$@:-]{0,127}$")
+#: a position as `drain --to` takes it: a WAL location, a set of
+#: transaction ids, an offset, or now - never an option of its own
+POSITION = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.:/,+=-]{0,299}$")
 #: the checks `check --only` names
 ONLY = re.compile(r"^[a-z_]+(,[a-z_]+)*$")
 #: the most of a run's output one read returns
@@ -100,6 +103,12 @@ class Action:
                 if not isinstance(v, str) or not ONLY.match(v):
                     raise Refused(f"{o.name} is a list of checks: counts,data")
                 got[o.name] = v
+            elif o.kind == "position":
+                if not isinstance(v, str) or not POSITION.match(v):
+                    raise Refused(f"{o.name}: {v!r} is not a position (a"
+                                  " WAL location such as 0/16B3748, ids such"
+                                  " as uuid:1-500, an offset, or now)")
+                got[o.name] = v
             else:
                 if not isinstance(v, str) or not NAME.match(v):
                     raise Refused(f"{o.name}: {v!r} is not a name this option"
@@ -138,6 +147,8 @@ BUILD = {
     "cutover": lambda h, g: (["move", h, "--mode", "cdc", "--drop"]
                              + _opt("--db", g.get("db"))
                              + (["--go"] if g.get("go") else [])),
+    "drain": lambda h, g: (["drain", h, "--db", g["db"], "--to", g["to"]]
+                           + (["--go"] if g.get("go") else [])),
     "rollback": lambda h, g: (["rollback", h, "--db", g["db"]]
                               + _opt("--state", g.get("state"))
                               + (["--apply"] if g.get("apply") else [])),
@@ -150,6 +161,7 @@ WRITES = {
     "move": lambda g: True,
     "sync": lambda g: bool(g.get("go") or g.get("apply")),
     "cutover": lambda g: bool(g.get("go")),
+    "drain": lambda g: bool(g.get("go")),
     "rollback": lambda g: bool(g.get("apply")),
 }
 
@@ -187,6 +199,13 @@ ACTIONS = {a.name: a for a in (
                       " application moved - the hop's approvals first; a"
                       " dry run without go",
            (_DB, Option("go", "flag", what="run it, not only show it"))),
+    Action("drain", "the running change tail drained to a position and held"
+                    " there - it cannot be taken back, so it is shown first;"
+                    " a dry run without go",
+           (Option("db", what="the database", required=True),
+            Option("to", "position", what="the position, or now",
+                   required=True),
+            Option("go", "flag", what="drain and hold it"))),
     Action("rollback", "a saved state restored on the target - a dry run"
                        " without apply",
            (Option("db", what="the database", required=True),

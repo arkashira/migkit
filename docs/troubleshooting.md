@@ -167,6 +167,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...> already exists (use --force to overwrite)
 
+* a position belongs to one database: name it with --db (<...>)
+
+* <...>: no stream of this hop reads a position, so there is nothing to drain to. Its cutover proves the drain by a mark
+
 * --convert is for hetero hops, same-engine hops use migkit schema HOP
 
 * <...> could not be created on the target; nothing else was either - the schema is created in one transaction, whole or not at all | <...>: <...>
@@ -181,7 +185,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * --drill supports postgres and mysql hops
 
-* <...> has no primary key for joining
+* <...> has no primary key for row joining, so this drilldown cannot run. Run `migkit check <...> --db <...> --only data` to request the engine's complete data comparison; if that is unsupported, keep the table unproved and review a schema/key plan with the database owner
 
 * the row-by-row drilldown needs a component that is not installed here: migkit doctor --install puts it in place
 
@@ -195,7 +199,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: <...> is writing to this target, and a row repair beside it would race it - the row that survives is whichever lands last. Nothing was applied. Stop it, repair, and start it again, or let it catch up and check again.
 
-* <...>: <...> did not pause within <...>s (hop option repair_window), so nothing was applied. It has been told to carry on.
+* <...>: <...> did not pause within <...>s (hop option repair_window); no repair was applied and it was asked to resume. Confirm its current state, inspect why the pause failed and resolve the coordination, then rerun the repair plan
 
 * --kind picks what a repair of the last check's differences puts right; --mode <...> runs a whole flow and repairs whatever it finds
 
@@ -251,7 +255,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * moving and then following a <...> source is not set up on this machine; migkit doctor says what is missing
 
-* a program an earlier move of <...> started is still running (process <...>) and writing; a move beside it would empty the tables under it
+* an earlier move is still writing to <...> (process <...>); a move beside it would empty the tables under it. Do not start another move. Inspect the saved run log and have the owner finish or safely stop that process, confirm it has stopped, then rerun the original move command
 
 * the programs installed here do not take options the move passes them - migkit doctor --install puts builds that do in place
 
@@ -261,9 +265,9 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: the follow of a group runs one database a process - --db one of <...>
 
-* <...>: the change tail did not end
+* <...>: cutover stopped because the change tail did not end. Do not advance the cutover or release an existing write freeze. Inspect this hop's tail status and its saved run log, resolve the stop failure, then rerun the cutover plan before approving another attempt
 
-* <...>: the change tail did not pause
+* <...>: cutover stopped because the change tail did not pause. Keep the cutover blocked. Inspect the tail's progress and its saved run log, resolve the pause failure, then rerun the cutover plan
 
 * --only names the checks --verify runs each cycle
 
@@ -281,9 +285,9 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * state <...> not retrievable from <...>
 
-* the move's checkpoint <...> kept changing while it was written; nothing past the last save is lost, and the next run goes on from it
+* the move's checkpoint <...> kept changing while it was written; nothing past the last save is lost. Check which machines still own this move and reconcile their state; the checkpoint is kept, and once the contention is resolved the original move command goes on from it
 
-* the move's checkpoint kept changing under migkit while it saved it
+* the move's checkpoint kept changing under migkit while it saved it. Check which machines still own this move and reconcile their state before retrying; once the contention is resolved, rerun the original move command
 
 ## Planning: the ways, the machine and the limits
 
