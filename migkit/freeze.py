@@ -47,6 +47,7 @@ guard. Its rules are at the end of this file.
 """
 import dataclasses
 import json
+import os
 import time
 
 WRITES = ("INSERT", "UPDATE", "DELETE", "TRUNCATE")
@@ -75,6 +76,9 @@ def state(hop, db, side="dst"):
 
 def _save(hop, db, record, side="dst"):
     from . import durable
+    # who wrote it last: a hold whose process is gone is found as left
+    # behind (`leftovers.holds`)
+    record["pid"] = os.getpid()
     durable.write_json(_state_path(hop, db, side), record, indent=1)
 
 
@@ -583,6 +587,7 @@ def server_state(hop, side="src"):
 
 def _server_save(hop, record, side="src"):
     from . import durable
+    record["pid"] = os.getpid()
     durable.write_json(_server_path(hop, side), record, indent=1)
 
 

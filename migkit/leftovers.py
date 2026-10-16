@@ -235,3 +235,68 @@ def artifact_origin(name, schema=None):
         if origin:
             return origin
     return whose(name) or bookkeeping(name)
+
+
+# --- writes held and not given back -------------------------------------------
+
+def _gone(pid):
+    """True where the process that last wrote a hold's record no longer
+    runs, False where it does, None where the record names none."""
+    import os
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    if pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def holds(hop, dbs=None):
+    """[{side, db, way, since, pid, gone}] of every hold of writes migkit
+    recorded on a side of the hop and has not given back: the cutover's
+    freeze of the source, a target kept from the application. `gone` is
+    whether the process that wrote the record has died - a hold it left
+    behind - or None where the record names no process. A target whose
+    writes are only named (`freeze.UNNAMED`, `freeze.NAMED`) holds
+    nothing and is not listed."""
+    from . import freeze
+    named = freeze.NAMED + (freeze.UNNAMED,)
+    out = []
+    for side in ("src", "dst"):
+        rec = freeze.server_state(hop, side)
+        if rec and rec.get("way") not in named:
+            out.append({"side": side, "db": "", "way": rec.get("way"),
+                        "since": rec.get("since"), "pid": rec.get("pid"),
+                        "gone": _gone(rec.get("pid"))})
+        for d in (dbs if dbs is not None else hop.databases or []):
+            rec = freeze.state(hop, d, side)
+            if rec and rec.get("way") not in named:
+                out.append({"side": side, "db": d, "way": rec.get("way"),
+                            "since": rec.get("since"),
+                            "pid": rec.get("pid"), "gone": _gone(
+                                rec.get("pid"))})
+    return out
+
+
+def lift(hop, eng, say, dbs=None, force=False):
+    """Every hold `holds` finds left behind given back, exactly as its
+    record took it (`freeze.thaw_source`, `freeze.thaw`). A hold whose
+    process still runs, or whose record names none, is left as it is
+    unless `force`: it may be a cutover in progress. Returns the holds
+    lifted and those left, each as `holds` lists them."""
+    from . import freeze
+    found = holds(hop, dbs)
+    lifted = [h for h in found if h["gone"] or force]
+    left = [h for h in found if not (h["gone"] or force)]
+    src = [h["db"] for h in lifted if h["side"] == "src" and h["db"]]
+    if any(h["side"] == "src" for h in lifted):
+        freeze.thaw_source(hop, eng, src, say)
+    for h in lifted:
+        if h["side"] == "dst" and h["db"]:
+            freeze.thaw(hop, eng, h["db"], say, side="dst")
+    return lifted, left

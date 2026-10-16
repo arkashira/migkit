@@ -11313,7 +11313,7 @@ What is still unproved per P0 item, taken from the PARTLY and OPEN rows of `docs
 - `P0-MINIMAL-INPUT.acceptance` (row 466): Not done: no live timing - the sandbox was stopped - so minimal effort and the guarantees are not yet proved together on a server; the 2026-10-15 claim of tests passing 100% is not backed by a run since the review
 - `P0-AUTO-RESOURCES.proof` (row 476): Missing: the end-to-end run the row names - a move that sizes itself, forecasts and nests leases against a real server, with the forecast checked against the time it took
 - `P0-DECISION-ALL.engines` (row 477): OPEN
-- `P0-SAFETY-INTEGRITY` (row 479): PARTLY 2026-10-16 (guarantees.Semantics read from catalogue + engine facts with explicit gaps; decide.admit / KEEPS_SEMANTICS admits schedules; joint plan barriered by foreign keys, admitted, and a refusal stops the move; keys-held read from the mover; target catalogue read; tail lanes, copy ranges and their marks ask decide.admit; all faults in PROVES; W15C 2026-10-16: the safety tests run on the sandbox - every fake case passes (admission, barriers, refusal stops the move, a source exporting a snapshot says it shares one, PostgreSQL does), the 10 server cases fail on the resumed run where the external PostgreSQL copier sends a setting PostgreSQL 16 rejects (movers, W15E); left: one snapshot shared by two tables' ranges recorded in the plan evidence (each table still exports its own), hetero admit on a server
+- `P0-SAFETY-INTEGRITY` (row 479): PARTLY 2026-10-16 (guarantees.Semantics read from catalogue + engine facts with explicit gaps; decide.admit / KEEPS_SEMANTICS admits schedules; joint plan barriered by foreign keys, admitted, and a refusal stops the move; keys-held read from the mover; target catalogue read; tail lanes, copy ranges and their marks ask decide.admit; all faults in PROVES, tests written, not run
 - `P0-RESILIENCE-ALL` (row 480): not yet wired, replan/isolate workflow and real-server compound runs unproved
 - `P0-AUTONOMOUS-MIGRATION` (row 481): open
 - `P0-PRODUCT-TELEMETRY` (row 483): not yet run; no destination, no transmission
@@ -11324,11 +11324,14 @@ What is still unproved per P0 item, taken from the PARTLY and OPEN rows of `docs
 - `P0-VERIFY-EXECUTION` (row 505): still their own
 ### W10C (2026-10-16) row parity on every engine, units on restart
 Done: MySQL and generic row parity through `decide.row_parity`; SQL Server row text a key range at a time (`scan_cuts`); `attempts.reconcile_units` closes units an earlier run left open before the move or check replays; same-engine pairs keep a ledger file a side (`side_mark`).
-Not done: a same-engine pair's inner engines must say their side (`pair_side`), the hop's options cannot; range-level units of a move live in the engines' range copiers (not cli) and are not opened there yet; MySQL/generic row parity keep no measured costs between tables yet. W15C 2026-10-16: row text a key range at a time keeps a unit a range and each range proved (`scanplan.RangeTexts`) - a stopped check replays only the ranges it owes, never the whole table, and names the first key apart (fake ledger); generic row parity ranks every table by one run cost model (`GenericEngine._parity_costs`), kept with the hop. Left: the PostgreSQL/MySQL/SQL Server deep checks pass `kept` to `row_text` (their engines' owners) and the 50k-row server proof; MySQL row parity's run cost model; `pair_side` set by the pair (hetero).
-* **Not done (w11c, BAR-3 / P0-DE.2 / R25.3)** - the engines' apply paths do
-  not yet call `freeze.name_write` per batch (they belong to other owners):
-  migkit's writes into a target nothing keeps are named today by the change
-  sheet's written-back steps (`report.write_back`). `doctor` says each side's
+Not done: a same-engine pair's inner engines must say their side (`pair_side`), the hop's options cannot; range-level units of a move live in the engines' range copiers (not cli) and are not opened there yet; MySQL/generic row parity keep no measured costs between tables yet.
+* **Not done (w11c, BAR-3 / P0-DE.2 / R25.3)** - the tail's batches are
+  named per table as `Engine.neutral_apply` applies them
+  (`freeze.name_write`, proved on PostgreSQL and MySQL targets by
+  `test_every_batch_into_a_kept_target_is_named`); the repair rows of
+  `Engine._apply_rows` and the engines' own bulk copy ways are still named
+  only by the change sheet's written-back steps (`report.write_back`).
+  `doctor` says each side's
   hold rung, the rungs refused above it and the rung's `loads`/`leaves`, not
   connections, memory or spool as numbers. No `migkit` command exports the
   change sheet or writes a run's evidence back yet.
@@ -11401,3 +11404,7 @@ Not done: the move's copy-way choice itself (`physical.choose`, unowned this wav
 * Read, no change needed on the read: `docs/cutover.md` (its claims were not each checked against the code).
 * Not read in this pass: `docs/problems-and-what-ends-them.md`, `docs/case-study-what-a-consistent-report-does-not-cover.md`, `docs/research-other-tools.md`, `docs/behavior-critical-params.md`, `docs/threat-model.md`, `docs/web.md`, `docs/goals-and-modes.md` prose, `docs/what-a-migration-actually-costs.md`, `docs/scale.md`, and the rows of `docs/backlog.md` (owned by the backlog).
 * Unverified: Debezium `table.include.list` and `pg_dump -t/-T` in the box page's item 3.
+
+### W15G (2026-10-16) writes held proved on servers, batches named, holds left behind lifted
+Done: `leftovers.holds` / `leftovers.lift` find a hold of writes (source freeze or target kept) whose process died and give it back from its record (`freeze._save` now stamps the writer's process); `tests/holdkit.py` proves it once (holder killed with -9, `doctor` names the rung, the second session's write accepted again) and `test_writes_are_held_on_redis` (accounts refuse, pause waits) and `test_writes_are_held_on_opensearch` (indices and cluster refuse) run it on servers of the test lanes; `test_every_batch_into_a_kept_target_is_named` proves three tail batches into a PostgreSQL and a MySQL target are named per table and one write by another session is the single finding.
+Not done (F2.freeze stays PARTLY): the same module for ClickHouse (needs a server profile whose default user may create users), Oracle, SQL Server, Cassandra, Kafka, MongoDB and DynamoDB (the source holds of SQL Server, Cassandra and Kafka are proved by their own `..._is_held_and_given_back` tests, without the killed-holder and `leftovers` step); Db2, ASE, Teradata, Redshift, Snowflake, Couchbase, BigQuery, Lindorm, TiDB and CockroachDB have no server here (test owed); Qdrant and Neo4j have no hold. BAR-3: `Engine._apply_rows` (repair) and the bulk copy ways do not name their batches (base.py is another owner's).
