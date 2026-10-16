@@ -1077,3 +1077,8 @@ def engines_with_own_compare():
         except Exception:  # noqa: BLE001 - an engine that cannot load here
             continue
     return sorted(out)
+
+
+from .engines import hooks  # noqa: E402
+
+hooks.fill("verifiers", globals())

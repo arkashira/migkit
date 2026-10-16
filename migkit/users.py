@@ -4518,3 +4518,8 @@ def run(hop_name, mode, apply=False, pw_file="", say=print):
             else:
                 say("VERIFY: gap found")
                 raise SystemExit(VERDICTS["different"].exit)
+
+
+from .engines import hooks  # noqa: E402
+
+hooks.fill("users", globals())

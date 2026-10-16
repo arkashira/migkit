@@ -34,6 +34,7 @@ The hop's source says where TiCDC publishes:
 import re
 from collections import Counter
 
+from . import hooks
 from .base import Engine, NotHere, Result
 from .mysql import MySQLEngine
 
@@ -311,7 +312,7 @@ class TiDBEngine(MySQLEngine):
         return dict(spec) if isinstance(spec, dict) else None
 
     def _follower(self, db):
-        from .. import changetopic
+        changetopic = hooks.workflow("changetopic")
         held = self.__dict__.setdefault("_followers", {})
         if db not in held:
             spec = self._changes_spec()
@@ -371,7 +372,7 @@ class TiDBEngine(MySQLEngine):
 
     @staticmethod
     def position_reached(have, want):
-        from ..changetopic import Follower
+        Follower = hooks.ask("changetopic", "Follower")
         return Follower.reached(have, want)
 
     def neutral_changes(self, side, db, token=None, limit=1000):
@@ -408,7 +409,8 @@ class TiDBEngine(MySQLEngine):
         TiDB as it stood at `version`, or as it is now where the garbage
         collector has passed that - and at `version`, held to what the
         feed said of it."""
-        from .. import canon, changetopic
+        from .. import canon
+        changetopic = hooks.workflow("changetopic")
         declared = dict(self.neutral_columns("src", db, table))
         key = self.neutral_key("src", db, table)
         classes = {n: canon.type_class("tidb", t) for n, t in declared.items()}
@@ -526,7 +528,7 @@ class TiDBEngine(MySQLEngine):
         """The pair's comparison of every table's columns, and the objects
         beside them - tables, views and indexes by name - held to the
         hop's `objects` (`check_objects`)."""
-        from .. import verifiers
+        verifiers = hooks.workflow("verifiers")
         return verifiers.compare_schema(self._as_pair(), db) + [
             self.check_objects(db)]
 
@@ -814,7 +816,7 @@ class TiDBEngine(MySQLEngine):
 
     def reach_items(self, side):
         """How deep migkit reaches a TiDB side, for `assess`."""
-        from .. import changetopic
+        changetopic = hooks.workflow("changetopic")
         items = [{"level": "pass", "scope": "reach",
                   "item": "copied and verified",
                   "detail": "tables made by TiDB's own definition, copied"

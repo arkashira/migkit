@@ -2,6 +2,7 @@ import hashlib
 import time
 
 from .. import pieces
+from . import hooks
 from .base import (Engine, NeutralCopier, RepairAction, Result, clauses,
                    rows_counted)
 
@@ -103,7 +104,7 @@ class SQLiteEngine(NeutralCopier, Engine):
         conn.create_aggregate("migkit_digest", 1, _Digest)
         # a row's hash as the leaves take it, for the buckets a table with
         # no key is copied and resumed by (`leaves.bucket_where`)
-        from ..leaves import text_hash
+        text_hash = hooks.ask("leaves", "text_hash")
         conn.create_function("migkit_hash60", 1,
                              lambda text: None if text is None
                              else text_hash("", text), deterministic=True)
@@ -712,7 +713,7 @@ class SQLiteEngine(NeutralCopier, Engine):
         return cat
 
     def check_schema(self, db):
-        from .. import verifiers
+        verifiers = hooks.workflow("verifiers")
         return verifiers.compare_schema(self._as_pair(), db)
 
     def settle_target(self, db, from_source=True):

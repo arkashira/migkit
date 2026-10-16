@@ -11,6 +11,7 @@ Written 2026-09-25 without a server to run it against: IBM's Db2 image
 runs on x86 only, and this machine is arm64.
 """
 from .. import pieces
+from . import hooks
 from .base import Engine, Result
 from .dbapi import MARK, DbapiRows, FoldsToCapitals
 from .sqlcatalog import CatalogChecks
@@ -398,7 +399,7 @@ class Db2Engine(CatalogChecks, FoldsToCapitals, DbapiRows, Engine):
         return out
 
     def check_schema(self, db):
-        from .. import verifiers
+        verifiers = hooks.workflow("verifiers")
         return verifiers.compare_schema(self._as_pair(), db)
 
     def check_counts(self, db):

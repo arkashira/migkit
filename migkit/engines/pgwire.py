@@ -27,6 +27,7 @@ does not keep (Aurora DSQL has no `pg_proc`, `pg_trigger`, `pg_matviews`,
 `pg_policies`, `pg_sequence` or `pg_database`) is never read for it; what
 only one of them keeps is asked in that engine's own `_deep_extra`.
 """
+from . import hooks
 from .base import Engine, Result
 from .dbapi import MARK, DbapiRows
 
@@ -108,7 +109,7 @@ class PgWireEngine(DbapiRows, Engine):
         return ""
 
     def neutral_tables(self, side, db):
-        from .. import drift
+        drift = hooks.workflow("drift")
         system = ", ".join(self._quote_literal(s) for s in self.SYSTEM_SCHEMAS)
         got = [f"{s}.{t}" for s, t in self._rows(
             side, db, "select table_schema, table_name from"
@@ -252,7 +253,7 @@ class PgWireEngine(DbapiRows, Engine):
     def check_schema(self, db):
         """The columns the pair compares, and the whole structure - columns,
         keys, indexes and views - held to the target's in one answer."""
-        from .. import verifiers
+        verifiers = hooks.workflow("verifiers")
         found = verifiers.compare_schema(self._as_pair(), db)
         try:
             found.append(self._structural(db))
@@ -364,7 +365,7 @@ class PgWireEngine(DbapiRows, Engine):
 
     @staticmethod
     def position_reached(have, want):
-        from ..changetopic import Follower
+        Follower = hooks.ask("changetopic", "Follower")
         return Follower.reached(have, want)
 
     def release_changes(self):
@@ -421,7 +422,8 @@ class PgWireEngine(DbapiRows, Engine):
         columns read, each key's values cast by `cast` (`%s::<type>`)
         where the feed gave them as text; as the table stood at `fence`
         where the engine reads the past (`_as_of`)."""
-        from .. import canon, changetopic
+        from .. import canon
+        changetopic = hooks.workflow("changetopic")
         declared = dict(self.neutral_columns(side, db, table))
         classes = {n: canon.type_class(self.CANON_ENGINE, t)
                    for n, t in declared.items()}
@@ -1540,7 +1542,7 @@ class PgWireEngine(DbapiRows, Engine):
 
     def own_name(self, side, db):
         """`migkit_origin`'s name in the database of `db` on `side`."""
-        from .. import twoway
+        twoway = hooks.workflow("twoway")
         return f"public.{twoway.TABLE}"
 
     def _origin_table(self, side, db):
@@ -1548,7 +1550,7 @@ class PgWireEngine(DbapiRows, Engine):
         is not there."""
         import threading
 
-        from .. import twoway
+        twoway = hooks.workflow("twoway")
         lock = self.__dict__.setdefault("_origin_lock", threading.Lock())
         made = self.__dict__.setdefault("_origin_made", set())
         with lock:

@@ -25,6 +25,7 @@ Every catalogue here was written from its vendor's documentation and is
 held by stand-in tests of the SQL each engine asks and the rows it reads
 back: no Db2, ASE, Teradata or warehouse runs on this machine.
 """
+from . import hooks
 from .base import Result
 
 #: the questions an engine's `CATALOGUE` answers, and the row each answer
@@ -1263,7 +1264,7 @@ class CatalogChecks:
         target as on the source - for the grantees the target has: an
         account missing altogether is the users check's to say. Not
         compared where the hop does not carry accounts."""
-        from ..users import NOT_CARRIED, carried, system_principal
+        NOT_CARRIED, carried, system_principal = hooks.ask("users", "NOT_CARRIED", "carried", "system_principal")
         if not carried(self.hop):
             return [Result("deep", f"{db} grants", "skip", NOT_CARRIED),
                     Result("deep", f"{db} seq-grants", "skip", NOT_CARRIED)]

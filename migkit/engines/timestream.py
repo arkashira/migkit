@@ -26,6 +26,7 @@ InfluxDB, not this side.
 """
 import time
 
+from . import hooks
 from .base import Engine, NeutralCopier, Result
 
 #: records one WriteRecords call takes, the service's most
@@ -389,7 +390,7 @@ class TimestreamEngine(NeutralCopier, Engine):
     # ---- the checks ----------------------------------------------------------
 
     def check_schema(self, db):
-        from .. import verifiers
+        verifiers = hooks.workflow("verifiers")
         pair = self._as_pair()
         return verifiers.compare_schema(
             pair, db, takes=lambda t: pair.hop.takes_table(db, t))

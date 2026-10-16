@@ -82,6 +82,7 @@ import json
 import re
 from decimal import Decimal
 
+from . import hooks
 from .base import Engine
 
 #: where Gateway publishes its services
@@ -854,7 +855,7 @@ class SapOdpEngine(Engine):
     # ---- as a hop's engine: two SAP systems compared -------------------------
 
     def check_schema(self, db):
-        from .. import verifiers
+        verifiers = hooks.workflow("verifiers")
         pair = self._as_pair()
         return verifiers.compare_schema(
             pair, db, takes=lambda t: pair.hop.takes_table(db, t))

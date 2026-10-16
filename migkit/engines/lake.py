@@ -38,6 +38,7 @@ import os
 import posixpath
 
 from .. import pieces
+from . import hooks
 from .base import Engine, NeutralCopier
 from .warehouse import arrow_array
 
@@ -229,7 +230,7 @@ class _Lake(NeutralCopier, Engine):
         return ok
 
     def check_schema(self, db):
-        from .. import verifiers
+        verifiers = hooks.workflow("verifiers")
         pair = self._as_pair()
         return verifiers.compare_schema(
             pair, db, takes=lambda t: pair.hop.takes_table(db, t))
@@ -301,7 +302,8 @@ class _Lake(NeutralCopier, Engine):
         already and is passed over; the tail replays a batch after a stop,
         and a table may have committed it before the stop and another
         not."""
-        from .. import canon, twoway
+        from .. import canon
+        twoway = hooks.workflow("twoway")
         self._target_only(side, "apply changes")
         seen = twoway.seen_of(twoway.batch_seen(self))
         by_table = {}

@@ -2441,3 +2441,8 @@ def by_groups(pair, db, a, b, digests, rows, group):
     pair.__dict__.setdefault("_narrowed", {})[(db, str(a.table))] = (
         got, got.said())
     return out, None
+
+
+from .engines import hooks  # noqa: E402
+
+hooks.fill("leaves", globals())

@@ -18,6 +18,7 @@ refused record goes again before it.
 """
 import time
 
+from . import hooks
 from .base import Engine
 
 #: records per request, and bytes in one, as the service allows
@@ -76,7 +77,7 @@ class KinesisEngine(Engine):
 
     def neutral_apply(self, side, db, changes):
         """Every change as a record, in the order the source made them."""
-        from .. import streamout
+        streamout = hooks.workflow("streamout")
         self._target_only(side, "write a change stream")
         # a record's data is at most a megabyte
         sent, skipped = streamout.encoded(self.hop, db, changes,

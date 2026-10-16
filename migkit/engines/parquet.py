@@ -23,6 +23,7 @@ import os
 import posixpath
 
 from .. import pieces
+from . import hooks
 from .base import Engine, NeutralCopier, Result
 
 #: the description of a table, beside its part files
@@ -482,7 +483,7 @@ class ParquetEngine(NeutralCopier, Engine):
     # ---- the checks, through the pair every engine compares by --------
 
     def check_schema(self, db):
-        from .. import verifiers
+        verifiers = hooks.workflow("verifiers")
         pair = self._as_pair()
         return verifiers.compare_schema(
             pair, db, takes=lambda t: pair.hop.takes_table(db, t))

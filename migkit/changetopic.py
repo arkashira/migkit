@@ -1125,3 +1125,8 @@ class NeptuneChanges(Envelope):
 
 ENVELOPES.update({e.name: e for e in (SpannerChanges, BigtableChanges,
                                       KeyspacesChanges, NeptuneChanges)})
+
+
+from .engines import hooks  # noqa: E402
+
+hooks.fill("changetopic", globals())

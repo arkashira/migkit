@@ -25,6 +25,7 @@ engine (`cassandra`), with what Keyspaces does differently.
 import datetime
 import time
 
+from . import hooks
 from .cassandra import CassandraEngine
 
 #: seconds the stream is taken to trail a write
@@ -249,7 +250,7 @@ class KeyspacesEngine(CassandraEngine):
         return out
 
     def _follower(self, db):
-        from .. import changetopic
+        changetopic = hooks.workflow("changetopic")
         from .bigtable import _Tables
         held = self.__dict__.setdefault("_followers", {})
         if db not in held:
@@ -338,7 +339,7 @@ class KeyspacesEngine(CassandraEngine):
                   "detail": "rows read by token and written at LOCAL_QUORUM,"
                             " compared row by row"}]
         if side == "src":
-            from ..changetopic import KeyspacesChanges
+            KeyspacesChanges = hooks.ask("changetopic", "KeyspacesChanges")
             items.append({"level": "pass", "scope": "reach",
                           "item": "changes followed through its CDC stream",
                           "detail": f"shard by shard; it loses"

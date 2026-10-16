@@ -21,6 +21,7 @@ migkit makes neither, since what reads them is not migkit's to decide.
 """
 import time
 
+from . import hooks
 from .base import Engine
 
 #: bytes in one message, as the service allows
@@ -102,7 +103,7 @@ class PubSubEngine(Engine):
         """Every change as a message, in the order the source made them."""
         import hashlib
 
-        from .. import streamout
+        streamout = hooks.workflow("streamout")
         self._target_only(side, "write a change stream")
         sent, skipped = streamout.encoded(
             self.hop, db, changes, int(time.time() * 1000),

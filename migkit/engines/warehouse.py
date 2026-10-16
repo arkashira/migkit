@@ -56,6 +56,7 @@ import hashlib
 import json
 
 from .. import decide, nanotime, pieces
+from . import hooks
 from . import warehouse_sql
 from .base import Engine, Result
 from .bigquery_changes import BigQueryChanges
@@ -344,7 +345,8 @@ class _Warehouse(warehouse_sql.DigestsInSQL, DbapiRows, Engine):
 
         A counter's change (`canon.Added`) is not taken: a warehouse is
         never one side of a two-way hop."""
-        from .. import canon, twoway
+        from .. import canon
+        twoway = hooks.workflow("twoway")
         self._target_only(side, "apply changes")
         seen = twoway.seen_of(twoway.batch_seen(self))
         by_table = {}
@@ -674,7 +676,7 @@ class _Warehouse(warehouse_sql.DigestsInSQL, DbapiRows, Engine):
         """(put(token), seen(token)) of a marker row written on the source
         and read on this warehouse, or (None, None) where the source takes
         no marker of migkit's."""
-        from .. import drainmark
+        drainmark = hooks.workflow("drainmark")
         try:
             if drainmark.able(self.hop, self):
                 return None, None

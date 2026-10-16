@@ -39,6 +39,7 @@ import struct
 from decimal import Decimal
 
 from .. import pieces
+from . import hooks
 from .base import Engine, NeutralCopier, Result
 
 #: documents written by one `upsert_multi`
@@ -236,7 +237,7 @@ class CouchbaseEngine(NeutralCopier, Engine):
 
     def _key_of_id(self, doc_id, key, classes):
         """A row's key back from its document key (`_doc_id`)."""
-        from .. import changetopic
+        changetopic = hooks.workflow("changetopic")
         texts = [doc_id] if len(key) == 1 else json.loads(doc_id)
         return {k: changetopic.from_text(classes.get(k) or "text", t,
                                          "base64")
@@ -264,7 +265,7 @@ class CouchbaseEngine(NeutralCopier, Engine):
 
     @staticmethod
     def _from_json(cls, value):
-        from .. import changetopic
+        changetopic = hooks.workflow("changetopic")
         if value is None:
             return None
         if cls in ("decimal", "bytes", "date", "timestamp", "time") and \
@@ -468,7 +469,7 @@ class CouchbaseEngine(NeutralCopier, Engine):
     # ---- the checks, through the pair ------------------------------------
 
     def check_schema(self, db):
-        from .. import verifiers
+        verifiers = hooks.workflow("verifiers")
         pair = self._as_pair()
         return verifiers.compare_schema(
             pair, db, takes=lambda t: pair.hop.takes_table(db, t))
@@ -523,7 +524,7 @@ class CouchbaseEngine(NeutralCopier, Engine):
         return dict(spec) if isinstance(spec, dict) else None
 
     def _follower(self, db):
-        from .. import changetopic
+        changetopic = hooks.workflow("changetopic")
         held = self.__dict__.setdefault("_followers", {})
         if db not in held:
             spec = self._changes_spec()
@@ -612,7 +613,7 @@ class CouchbaseEngine(NeutralCopier, Engine):
 
     @staticmethod
     def position_reached(have, want):
-        from ..changetopic import Follower
+        Follower = hooks.ask("changetopic", "Follower")
         return Follower.reached(have, want)
 
     def neutral_changes(self, side, db, token=None, limit=1000):
@@ -676,7 +677,7 @@ class CouchbaseEngine(NeutralCopier, Engine):
                 "changes": str(spec.get("topic") or spec.get("topics"))}
 
     def reach_items(self, side):
-        from ..changetopic import CouchbaseDcp
+        CouchbaseDcp = hooks.ask("changetopic", "CouchbaseDcp")
         items = [{"level": "pass", "scope": "reach",
                   "item": "copied and verified",
                   "detail": "collections read by the key-value range scan,"

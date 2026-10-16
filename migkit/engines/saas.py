@@ -67,6 +67,7 @@ import threading
 from dataclasses import dataclass, field
 from decimal import Decimal
 
+from . import hooks
 from .base import Engine
 
 KINDS = ("dlt", "singer", "airbyte", "salesforce")
@@ -1320,7 +1321,7 @@ class SaasEngine(Engine):
     # ---- as a hop's engine: two applications compared -----------------------
 
     def check_schema(self, db):
-        from .. import verifiers
+        verifiers = hooks.workflow("verifiers")
         pair = self._as_pair()
         return verifiers.compare_schema(
             pair, db, takes=lambda t: pair.hop.takes_table(db, t))

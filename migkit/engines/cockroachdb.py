@@ -28,6 +28,7 @@ import re
 import time
 
 from .. import pieces
+from . import hooks
 from .base import Result
 from .dbapi import MARK
 from .pgwire import PgWireEngine
@@ -75,7 +76,7 @@ class SinklessFeed:
             host=ep.host, port=ep.port or self.eng.DEFAULT_PORT,
             user=ep.user, password=ep.password, dbname=self.db,
             connect_timeout=15, autocommit=True, **ep.libpq_tls())
-        from ..changetopic import hlc_text
+        hlc_text = hooks.ask("changetopic", "hlc_text")
         names = ", ".join(f"{self.eng._q(self.db)}."
                           f"{self.eng._qualified('src', self.db, t)}"
                           for t in tables)
@@ -116,7 +117,7 @@ class SinklessFeed:
             table, key, value = row[0], row[1], row[2]
             out.append((self.LANE, mark, key, value, table))
             if table is None:
-                from ..changetopic import hlc
+                hlc = hooks.ask("changetopic", "hlc")
                 body = json.loads(value)
                 if "resolved" in body:
                     mark = hlc(body["resolved"])
@@ -293,12 +294,12 @@ class CockroachEngine(PgWireEngine):
     def _now(self, side, db):
         """The cluster's clock now, as the ordering integer `hlc` makes of
         CockroachDB's timestamps."""
-        from ..changetopic import hlc
+        hlc = hooks.ask("changetopic", "hlc")
         got = self._rows(side, db, "select cluster_logical_timestamp()")
         return hlc(str(got[0][0]))
 
     def _follower(self, db):
-        from .. import changetopic
+        changetopic = hooks.workflow("changetopic")
         held = self.__dict__.setdefault("_followers", {})
         if db not in held:
             spec = self._changes_spec()
@@ -357,7 +358,7 @@ class CockroachEngine(PgWireEngine):
         return txn <= int(mark)
 
     def _as_of(self, fence):
-        from ..changetopic import hlc_text
+        hlc_text = hooks.ask("changetopic", "hlc_text")
         if fence is None:
             return ""
         return f" as of system time '{hlc_text(int(fence))}'"
@@ -412,7 +413,7 @@ class CockroachEngine(PgWireEngine):
     def _typed_keys(self, db, key, declared, keys, classes):
         """[(key text, {column: value})]: each key as the cluster reads
         the feed's text of it, cast to the column's type."""
-        from .. import changetopic
+        changetopic = hooks.workflow("changetopic")
         out = []
         conn = self._connect("src", db)
         try:
@@ -560,7 +561,7 @@ class CockroachEngine(PgWireEngine):
         return out
 
     def reach_items(self, side):
-        from ..changetopic import CrdbChangefeed
+        CrdbChangefeed = hooks.ask("changetopic", "CrdbChangefeed")
         items = [{"level": "pass", "scope": "reach",
                   "item": "copied and verified",
                   "detail": "tables copied by key, written by UPSERT, and"

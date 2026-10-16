@@ -43,7 +43,9 @@ case $? in
     "$docs" tools/gen_codemap.py >/dev/null
     echo
     echo "commit stopped: the code map was behind the code and is written"
-    echo "again. Add it (git add docs/agents/CODEMAP.md) and commit again."
+    echo "again, with the state, the inventory and the layers beside it. Add"
+    echo "them (git add docs/agents/CODEMAP.md docs/agents/STATE.md"
+    echo "docs/agents/INVENTORY.md docs/agents/LAYERS.md) and commit again."
     exit 1 ;;
   *) echo "the code map could not be checked here; the commit goes on." ;;
 esac

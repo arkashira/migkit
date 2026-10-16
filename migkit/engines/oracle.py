@@ -37,6 +37,7 @@ import time
 
 from .. import pieces
 from ..decide import Need, Rung
+from . import hooks
 from .base import Engine, RepairAction, Result
 from .dbapi import MARK, DbapiRows, FoldsToCapitals
 from .oracle_catalog import OracleCatalog
@@ -1654,7 +1655,7 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
     # ---- the checks, through the pair every engine compares by --------
 
     def check_schema(self, db):
-        from .. import verifiers
+        verifiers = hooks.workflow("verifiers")
         return verifiers.compare_schema(self._as_pair(), db)
 
     def check_counts(self, db):

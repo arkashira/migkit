@@ -51,6 +51,7 @@ import threading
 import time
 from decimal import Decimal
 
+from . import hooks
 from .base import Engine, NeutralCopier, Result
 from .warehouse_sql import DigestsInSQL
 
@@ -1000,7 +1001,7 @@ class SpannerEngine(DigestsInSQL, _Folded, NeutralCopier, Engine):
     # ---- the checks ----------------------------------------------------------
 
     def check_schema(self, db):
-        from .. import verifiers
+        verifiers = hooks.workflow("verifiers")
         pair = self._as_pair()
         return verifiers.compare_schema(
             pair, db, takes=lambda t: pair.hop.takes_table(db, t))
@@ -1404,7 +1405,7 @@ class SpannerEngine(DigestsInSQL, _Folded, NeutralCopier, Engine):
         return 86400.0
 
     def _follower(self, db):
-        from .. import changetopic
+        changetopic = hooks.workflow("changetopic")
         held = self.__dict__.setdefault("_followers", {})
         if db not in held:
             stream = self._stream(db)
@@ -1433,7 +1434,7 @@ class SpannerEngine(DigestsInSQL, _Folded, NeutralCopier, Engine):
 
     @staticmethod
     def position_reached(have, want):
-        from ..changetopic import Follower
+        Follower = hooks.ask("changetopic", "Follower")
         return Follower.reached(have, want)
 
     def neutral_changes(self, side, db, token=None, limit=1000):
@@ -1472,7 +1473,8 @@ class SpannerEngine(DigestsInSQL, _Folded, NeutralCopier, Engine):
         the stream said of it."""
         from google.api_core.exceptions import FailedPrecondition
 
-        from .. import canon, changetopic
+        from .. import canon
+        changetopic = hooks.workflow("changetopic")
         declared = dict(self.neutral_columns("src", db, table))
         key = self.neutral_key("src", db, table)
         classes = {n: canon.type_class("spanner", t)
@@ -1559,7 +1561,7 @@ class SpannerEngine(DigestsInSQL, _Folded, NeutralCopier, Engine):
                           "item": "changes are not followed",
                           "detail": str(e)})
             return items
-        from ..changetopic import SpannerChanges
+        SpannerChanges = hooks.ask("changetopic", "SpannerChanges")
         items.append({"level": "pass", "scope": "reach",
                       "item": "changes followed through its change stream",
                       "detail": f"{stream}, partition by partition in"

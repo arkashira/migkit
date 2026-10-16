@@ -195,6 +195,28 @@ def _backlog():
     return rows
 
 
+def _pair_gaps(lacking):
+    """The line that says what the pairs still lack: a pair lacks what its
+    two engines lack (`autonomous.gaps`), so the count of lacks by kind is
+    summed per pair from `decide.still_lacking()`, and the line names the
+    pair with the fewest and the most."""
+    kinds = ("shape", "capability", "depth")
+    per = {e: {k: sum(1 for t, *_ in rows if t == k) for k in kinds}
+           for e, rows in lacking.items()}
+    pairs = sorted(((sum(per[a].values()) + sum(per[b].values()), a, b)
+                    for a in per for b in per if a != b))
+    if not pairs:
+        return "Gaps per pair (`autonomous.gaps`): none."
+    low, high = pairs[0], pairs[-1]
+    total = {k: sum(v[k] for v in per.values()) for k in kinds}
+    return (f"Gaps per pair (`autonomous.gaps`: a pair lacks what its two"
+            f" engines lack): {len(pairs)} ordered pairs of {len(per)}"
+            " engines; "
+            + ", ".join(f"{total[k]} {k} lacks" for k in kinds)
+            + f" in all; fewest {low[1]} -> {low[2]} ({low[0]}), most"
+              f" {high[1]} -> {high[2]} ({high[0]}).")
+
+
 def state():
     """What migkit can do and what is left, from the code and the
     backlog: the capability table and the decision engine's coverage for
@@ -243,6 +265,7 @@ def state():
               " (`docs/agents/LAYERS.md`; the list only shrinks);"
               f" {sum(1 for f in _files() if package_of(f) is None)} files"
               " no package claims (`docs/agents/INVENTORY.md`)."]
+    lines += ["", _pair_gaps(lacking)]
     rows = _backlog()
     by = {s: 0 for s in STATUSES}
     areas = {}
@@ -1518,32 +1541,17 @@ KNOWN_UPWARD = {
     ),
     ("an engine calls `changetopic` for a step it cannot do itself; "
      "the engine split gives that step a contract below the engines"): (
-        "migkit/engines/bigtable.py migkit.changetopic",
-        "migkit/engines/cockroachdb.py migkit.changetopic",
-        "migkit/engines/cosmosdb.py migkit.changetopic",
-        "migkit/engines/couchbase.py migkit.changetopic",
-        "migkit/engines/dsql.py migkit.changetopic",
         "migkit/engines/firestore.py migkit.changetopic",
-        "migkit/engines/keyspaces.py migkit.changetopic",
-        "migkit/engines/neptune.py migkit.changetopic",
-        "migkit/engines/pgwire.py migkit.changetopic",
-        "migkit/engines/spanner.py migkit.changetopic",
-        "migkit/engines/tidb.py migkit.changetopic",
     ),
     ("an engine calls `crossmove` for a step it cannot do itself; the "
      "engine split gives that step a contract below the engines"): (
         "migkit/engines/hetero.py migkit.crossmove",
-    ),
-    ("an engine calls `drainmark` for a step it cannot do itself; the "
-     "engine split gives that step a contract below the engines"): (
-        "migkit/engines/warehouse.py migkit.drainmark",
     ),
     ("an engine calls `drift` for a step it cannot do itself; the "
      "engine split gives that step a contract below the engines"): (
         "migkit/engines/hetero.py migkit.drift",
         "migkit/engines/mssql.py migkit.drift",
         "migkit/engines/mysql.py migkit.drift",
-        "migkit/engines/pgwire.py migkit.drift",
         "migkit/engines/postgres.py migkit.drift",
     ),
     ("an engine calls `indexes` for a step it cannot do itself; the "
@@ -1555,7 +1563,6 @@ KNOWN_UPWARD = {
         "migkit/engines/base.py migkit.leaves",
         "migkit/engines/hetero.py migkit.leaves",
         "migkit/engines/mongodb.py migkit.leaves",
-        "migkit/engines/sqlite.py migkit.leaves",
     ),
     ("an engine calls `marks` for a step it cannot do itself; the "
      "engine split gives that step a contract below the engines"): (
@@ -1567,7 +1574,6 @@ KNOWN_UPWARD = {
      "engine split gives that step a contract below the engines"): (
         "migkit/engines/base.py migkit.movers",
         "migkit/engines/cassandra.py migkit.movers",
-        "migkit/engines/clickhouse.py migkit.movers",
         "migkit/engines/generic.py migkit.movers",
         "migkit/engines/hetero.py migkit.movers",
         "migkit/engines/mongodb.py migkit.movers",
@@ -1597,13 +1603,10 @@ KNOWN_UPWARD = {
     ("an engine calls `streamout` for a step it cannot do itself; the "
      "engine split gives that step a contract below the engines"): (
         "migkit/engines/kafka.py migkit.streamout",
-        "migkit/engines/kinesis.py migkit.streamout",
-        "migkit/engines/pubsub.py migkit.streamout",
     ),
     ("an engine calls `tableengine` for a step it cannot do itself; "
      "the engine split gives that step a contract below the engines"): (
         "migkit/engines/base.py migkit.tableengine",
-        "migkit/engines/clickhouse.py migkit.tableengine",
         "migkit/engines/mysql.py migkit.tableengine",
         "migkit/engines/postgres.py migkit.tableengine",
     ),
@@ -1611,14 +1614,12 @@ KNOWN_UPWARD = {
      "engine split gives that step a contract below the engines"): (
         "migkit/engines/base.py migkit.tailctl",
         "migkit/engines/cassandra.py migkit.tailctl",
-        "migkit/engines/clickhouse.py migkit.tailctl",
         "migkit/engines/generic.py migkit.tailctl",
         "migkit/engines/hetero.py migkit.tailctl",
         "migkit/engines/kafka.py migkit.tailctl",
         "migkit/engines/mongodb.py migkit.tailctl",
         "migkit/engines/mysql.py migkit.tailctl",
         "migkit/engines/neo4j.py migkit.tailctl",
-        "migkit/engines/opensearch.py migkit.tailctl",
         "migkit/engines/postgres.py migkit.tailctl",
         "migkit/engines/redis.py migkit.tailctl",
     ),
@@ -1636,12 +1637,8 @@ KNOWN_UPWARD = {
      "engine split gives that step a contract below the engines"): (
         "migkit/engines/base.py migkit.twoway",
         "migkit/engines/hetero.py migkit.twoway",
-        "migkit/engines/lake.py migkit.twoway",
         "migkit/engines/mysql.py migkit.twoway",
-        "migkit/engines/pgwire.py migkit.twoway",
         "migkit/engines/postgres.py migkit.twoway",
-        "migkit/engines/teradata.py migkit.twoway",
-        "migkit/engines/warehouse.py migkit.twoway",
     ),
     ("an engine calls `unchanged` for a step it cannot do itself; the "
      "engine split gives that step a contract below the engines"): (
@@ -1657,49 +1654,24 @@ KNOWN_UPWARD = {
     ("an engine calls `users` for a step it cannot do itself; the "
      "engine split gives that step a contract below the engines"): (
         "migkit/engines/cassandra.py migkit.users",
-        "migkit/engines/clickhouse.py migkit.users",
         "migkit/engines/kafka.py migkit.users",
         "migkit/engines/mongodb.py migkit.users",
         "migkit/engines/mssql.py migkit.users",
         "migkit/engines/mysql.py migkit.users",
-        "migkit/engines/opensearch.py migkit.users",
-        "migkit/engines/oracle_deep.py migkit.users",
         "migkit/engines/postgres.py migkit.users",
         "migkit/engines/redis.py migkit.users",
-        "migkit/engines/sqlcatalog.py migkit.users",
     ),
     ("an engine calls `verifiers` for a step it cannot do itself; the "
      "engine split gives that step a contract below the engines"): (
-        "migkit/engines/ase.py migkit.verifiers",
-        "migkit/engines/bigtable.py migkit.verifiers",
         "migkit/engines/cassandra.py migkit.verifiers",
-        "migkit/engines/clickhouse.py migkit.verifiers",
-        "migkit/engines/cosmosdb.py migkit.verifiers",
-        "migkit/engines/couchbase.py migkit.verifiers",
-        "migkit/engines/db2.py migkit.verifiers",
         "migkit/engines/distmysql.py migkit.verifiers",
-        "migkit/engines/duckdb.py migkit.verifiers",
         "migkit/engines/dynamodb.py migkit.verifiers",
         "migkit/engines/firestore.py migkit.verifiers",
         "migkit/engines/generic.py migkit.verifiers",
         "migkit/engines/hetero.py migkit.verifiers",
         "migkit/engines/kafka.py migkit.verifiers",
-        "migkit/engines/lake.py migkit.verifiers",
-        "migkit/engines/lindorm.py migkit.verifiers",
         "migkit/engines/mysql.py migkit.verifiers",
-        "migkit/engines/neptune.py migkit.verifiers",
         "migkit/engines/oceanbase.py migkit.verifiers",
-        "migkit/engines/opensearch.py migkit.verifiers",
-        "migkit/engines/oracle.py migkit.verifiers",
-        "migkit/engines/parquet.py migkit.verifiers",
-        "migkit/engines/pgwire.py migkit.verifiers",
-        "migkit/engines/saas.py migkit.verifiers",
-        "migkit/engines/sapodp.py migkit.verifiers",
-        "migkit/engines/spanner.py migkit.verifiers",
-        "migkit/engines/sqlite.py migkit.verifiers",
-        "migkit/engines/teradata.py migkit.verifiers",
-        "migkit/engines/tidb.py migkit.verifiers",
-        "migkit/engines/timestream.py migkit.verifiers",
     ),
     ("an executor asks the decision engine (`decide`) how many or how "
      "fast; the call becomes a fact handed down"): (

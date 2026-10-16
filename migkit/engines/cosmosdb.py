@@ -43,6 +43,7 @@ import concurrent.futures
 import hashlib
 import json
 
+from . import hooks
 from .base import Engine, NeutralCopier, Result, clauses
 
 #: operations in one transactional batch, as the service allows
@@ -288,7 +289,7 @@ class CosmosEngine(NeutralCopier, Engine):
         return None
 
     def _items(self, side, db, table, rng=None):
-        from ..changetopic import COSMOS_SYSTEM
+        COSMOS_SYSTEM = hooks.ask("changetopic", "COSMOS_SYSTEM")
         kw = {"feed_range": rng} if rng is not None else {
             "enable_cross_partition_query": True}
         prio = self._priority(side)
@@ -353,7 +354,7 @@ class CosmosEngine(NeutralCopier, Engine):
         """A row's key back from its item's id (`_item_id`), and from
         `fields` - the item, or a delete's partition key - for the rest
         of a key that holds `id`."""
-        from .. import changetopic
+        changetopic = hooks.workflow("changetopic")
 
         def typed(k, t):
             return changetopic.from_text(classes.get(k) or "text", t,
@@ -875,7 +876,7 @@ class CosmosEngine(NeutralCopier, Engine):
     # ---- the checks ----------------------------------------------------------
 
     def check_schema(self, db):
-        from .. import verifiers
+        verifiers = hooks.workflow("verifiers")
         pair = self._as_pair()
         return verifiers.compare_schema(
             pair, db, takes=lambda t: pair.hop.takes_table(db, t))
@@ -1175,7 +1176,7 @@ class CosmosEngine(NeutralCopier, Engine):
         """The reader of every container in scope, as they were when it
         was made: a container made on the source since joins at the
         tail's next start."""
-        from .. import changetopic
+        changetopic = hooks.workflow("changetopic")
         held = self.__dict__.setdefault("_followers", {})
         at = db
         if at not in held:
@@ -1332,7 +1333,7 @@ class CosmosEngine(NeutralCopier, Engine):
         return self._as_pair().delta_verify(db, limit, log)
 
     def reach_items(self, side):
-        from ..changetopic import CosmosFeed
+        CosmosFeed = hooks.ask("changetopic", "CosmosFeed")
         items = [{"level": "pass", "scope": "reach",
                   "item": "copied and verified",
                   "detail": "containers read one feed range at a time,"

@@ -40,6 +40,7 @@ import json
 import re
 import time
 
+from . import hooks
 from .base import Engine, NeutralCopier, Result
 
 KEY = "row_key"
@@ -420,7 +421,7 @@ class BigtableEngine(NeutralCopier, Engine):
     # ---- the checks ----------------------------------------------------------
 
     def check_schema(self, db):
-        from .. import verifiers
+        verifiers = hooks.workflow("verifiers")
         pair = self._as_pair()
         return verifiers.compare_schema(
             pair, db, takes=lambda t: pair.hop.takes_table(db, t))
@@ -679,7 +680,7 @@ class BigtableEngine(NeutralCopier, Engine):
     # ---- the change stream ---------------------------------------------------
 
     def _follower(self, db):
-        from .. import changetopic
+        changetopic = hooks.workflow("changetopic")
         held = self.__dict__.setdefault("_followers", {})
         if db not in held:
             tables = self.neutral_tables("src", db)
@@ -716,7 +717,7 @@ class BigtableEngine(NeutralCopier, Engine):
         return out
 
     def change_point(self, side, db):
-        from ..changetopic import SINCE
+        SINCE = hooks.ask("changetopic", "SINCE")
         made = [t for t in self.neutral_tables("src", db)
                 if self._described("src", db, t) is not None]
         if made:
@@ -731,12 +732,12 @@ class BigtableEngine(NeutralCopier, Engine):
         return self.change_point(side, db)
 
     def log_position(self, side, db):
-        from ..changetopic import SINCE
+        SINCE = hooks.ask("changetopic", "SINCE")
         return {"fence": int((time.time() - SINCE) * 10 ** 6)}
 
     @staticmethod
     def position_reached(have, want):
-        from ..changetopic import Follower
+        Follower = hooks.ask("changetopic", "Follower")
         return Follower.reached(have, want)
 
     def neutral_changes(self, side, db, token=None, limit=1000):
@@ -797,7 +798,7 @@ class BigtableEngine(NeutralCopier, Engine):
                   "detail": "rows read by key ranges and written whole, every"
                             " cell version with its timestamp"}]
         if side == "src":
-            from ..changetopic import BigtableChanges
+            BigtableChanges = hooks.ask("changetopic", "BigtableChanges")
             items.append({"level": "pass", "scope": "reach",
                           "item": "changes followed through its change"
                                   " stream",
@@ -849,7 +850,7 @@ class BigtableLanes:
         return sorted(self.live)
 
     def ends(self):
-        from ..changetopic import SINCE
+        SINCE = hooks.ask("changetopic", "SINCE")
         since = int((time.time() - SINCE) * 10 ** 6)
         self.live = None
         return {lane: {"at": since, "since": since} for lane in self.lanes()}

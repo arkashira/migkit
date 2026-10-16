@@ -870,3 +870,8 @@ def follow(eng, db, go, token_path, log, noun, look, behind, every=1.0):
              ledger=getattr(fn(), "ledger", None) if callable(fn) else None,
              secrets=(eng.hop.source.password, eng.hop.target.password),
              idle=(min(every, IDLE_MOST) / 8, every))
+
+
+from .engines import hooks  # noqa: E402
+
+hooks.fill("tailctl", globals())

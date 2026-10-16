@@ -1741,3 +1741,8 @@ def redis_two_site_live(eng, stop, log=print, rounds=None):
         dict(h, site="b") for h in held_b]
     out["skew_ms"] = skew
     return out
+
+
+from .engines import hooks  # noqa: E402
+
+hooks.fill("twoway", globals())

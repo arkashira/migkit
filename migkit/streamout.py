@@ -119,3 +119,8 @@ def count_skipped(hop, db, skipped):
     for stream, n in skipped.items():
         have[stream] = have.get(stream, 0) + n
     path.write_text(json.dumps(have, indent=1))
+
+
+from .engines import hooks  # noqa: E402
+
+hooks.fill("streamout", globals())

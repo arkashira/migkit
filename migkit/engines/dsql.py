@@ -37,6 +37,7 @@ import time
 from decimal import Decimal
 
 from .. import pieces
+from . import hooks
 from .base import Engine, Result
 from .pgwire import PgWireEngine
 
@@ -278,7 +279,7 @@ class DsqlEngine(PgWireEngine):
         return int(lag)
 
     def _follower(self, db):
-        from .. import changetopic
+        changetopic = hooks.workflow("changetopic")
         held = self.__dict__.setdefault("_followers", {})
         if db not in held:
             spec = self._changes_spec()
@@ -366,7 +367,8 @@ class DsqlEngine(PgWireEngine):
         dec = self.__dict__.get("_decoders_of", {}).get((db, table))
         key = self.neutral_key("src", db, table)
         declared = dict(self.neutral_columns("src", db, table))
-        from .. import canon, changetopic
+        from .. import canon
+        changetopic = hooks.workflow("changetopic")
         classes = {n: canon.type_class(self.CANON_ENGINE, t)
                    for n, t in declared.items()}
         typed = []
@@ -442,7 +444,7 @@ class DsqlEngine(PgWireEngine):
                                 "every index built")]
 
     def reach_items(self, side):
-        from ..changetopic import DsqlCdc
+        DsqlCdc = hooks.ask("changetopic", "DsqlCdc")
         items = [{"level": "pass", "scope": "reach",
                   "item": "copied and verified",
                   "detail": f"tables written {WRITE_ROWS} rows and at most"

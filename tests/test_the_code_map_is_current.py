@@ -95,3 +95,21 @@ def test_the_check_names_a_stale_inventory_or_layers_page(tmp_path,
         path.write_text(pages[attr])
     (tmp_path / "INVENTORY").unlink()
     assert gen_codemap.main(["--check"]) == 3
+
+
+def test_the_state_says_what_the_pairs_still_lack():
+    """STATE.md carries one line of gaps per pair, and the pair it names as
+    having the fewest and the most lacks has exactly that many by
+    `autonomous.gaps` (a pair lacks what its two engines lack)."""
+    import re
+    sys.path.insert(0, str(ROOT))
+    from migkit import autonomous
+    state = (ROOT / "docs" / "agents" / "STATE.md").read_text()
+    line = re.search(r"^Gaps per pair .*$", state, re.M)
+    assert line, "STATE.md lacks the gaps-per-pair line"
+    named = re.findall(r"(fewest|most) (\S+) -> (\S+) \((\d+)\)", line.group())
+    assert [k for k, *_ in named] == ["fewest", "most"], line.group()
+    for _kind, src, dst, count in named:
+        assert len(autonomous.gaps(src, dst)) == int(count), (src, dst)
+    assert re.search(r"\d+ shape lacks, \d+ capability lacks, \d+ depth"
+                     r" lacks in all", line.group())

@@ -331,3 +331,8 @@ def seam(hop, fence, db, pos, took, held=None, verify=None, log=None):
             "held": None if held is None else bool(held),
             "applied": applied, "past": past, "verified": verified,
             "said": said}
+
+
+from .engines import hooks  # noqa: E402
+
+hooks.fill("drainmark", globals())

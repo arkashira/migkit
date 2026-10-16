@@ -8,6 +8,7 @@ either side moves, is read back as it goes, and is checked. One writer at a
 time: DuckDB lets one process write a file.
 """
 from .. import pieces
+from . import hooks
 from .base import Engine, Result
 from .dbapi import MARK, DbapiRows
 from .warehouse_sql import DigestsInSQL
@@ -225,7 +226,7 @@ class DuckDBEngine(DigestsInSQL, DbapiRows, Engine):
         return out
 
     def check_schema(self, db):
-        from .. import verifiers
+        verifiers = hooks.workflow("verifiers")
         return verifiers.compare_schema(self._as_pair(), db)
 
     def check_counts(self, db):

@@ -46,6 +46,7 @@ import time
 import uuid
 from decimal import Decimal
 
+from . import hooks
 from .base import Engine, NeutralCopier, Result
 
 TABLES = {"graph": ("edges", "vertices"), "rdf": ("quads",)}
@@ -606,7 +607,7 @@ class NeptuneEngine(NeutralCopier, Engine):
             gone += n
 
     def check_schema(self, db):
-        from .. import verifiers
+        verifiers = hooks.workflow("verifiers")
         pair = self._as_pair()
         return verifiers.compare_schema(
             pair, db, takes=lambda t: pair.hop.takes_table(db, t))
@@ -949,7 +950,7 @@ class NeptuneEngine(NeutralCopier, Engine):
         return held[side]
 
     def _follower(self, db):
-        from .. import changetopic
+        changetopic = hooks.workflow("changetopic")
         held = self.__dict__.setdefault("_followers", {})
         if db not in held:
             model = self._model("src", db)
@@ -995,7 +996,7 @@ class NeptuneEngine(NeutralCopier, Engine):
 
     @staticmethod
     def position_reached(have, want):
-        from ..changetopic import Follower
+        Follower = hooks.ask("changetopic", "Follower")
         return Follower.reached(have, want)
 
     def neutral_changes(self, side, db, token=None, limit=1000):
@@ -1040,7 +1041,7 @@ class NeptuneEngine(NeutralCopier, Engine):
                   "detail": "vertices, edges and quads compared by id and by"
                             " value"}]
         if side == "src":
-            from ..changetopic import NeptuneChanges
+            NeptuneChanges = hooks.ask("changetopic", "NeptuneChanges")
             items.append({"level": "pass", "scope": "reach",
                           "item": "changes followed through Neptune Streams",
                           "detail": f"it loses {NeptuneChanges.LOSES}"})

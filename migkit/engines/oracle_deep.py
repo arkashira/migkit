@@ -14,6 +14,7 @@ in `capabilities.UNPROVED` until a sandbox run proves it.
 """
 import re
 
+from . import hooks
 from .base import Result
 from .dbapi import MARK
 
@@ -735,14 +736,14 @@ class OracleDeep:
                 for g, t, p, o in self._taken(db, rows, 1)}
 
     def _deep_grants(self, db):
-        from ..users import NOT_CARRIED, carried
+        NOT_CARRIED, carried = hooks.ask("users", "NOT_CARRIED", "carried")
         if not carried(self.hop):
             return Result("deep", f"{db} grants", "skip", NOT_CARRIED)
         status, detail, fix = self._grant_words(db, ("TABLE", "VIEW"))
         return Result("deep", f"{db} grants", status, detail, "", fix)
 
     def _deep_seq_grants(self, db):
-        from ..users import NOT_CARRIED, carried
+        NOT_CARRIED, carried = hooks.ask("users", "NOT_CARRIED", "carried")
         if not carried(self.hop):
             return Result("deep", f"{db} seq-grants", "skip", NOT_CARRIED)
         status, detail, fix = self._grant_words(db, ("SEQUENCE",))

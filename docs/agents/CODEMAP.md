@@ -199,7 +199,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/workload.py` - Whether the target answers the source's own queries as well as the source does (backlog 24, problems file G1; R23, 4).
 - `migkit/zones.py` - The time zone the data is written in, against the one the server declares (backlog 23).
 
-## `migkit/engines/` (65 modules)
+## `migkit/engines/` (66 modules)
 
 - `migkit/engines/__init__.py` - (no docstring)
 - `migkit/engines/ase.py` - SAP ASE (Sybase) as one side of a pair (backlog 34). Classes: AseEngine.
@@ -228,6 +228,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/engines/geminidb.py` - Huawei GeminiDB as a side of a pair (backlog P0-CLOUDS): its Cassandra, Redis and MongoDB APIs, each the engine whose API it speaks, with wh Classes: GeminiCassandraEngine, GeminiRedisEngine, GeminiMongoEngine.
 - `migkit/engines/generic.py` - (no docstring) Classes: GenericEngine.
 - `migkit/engines/hetero.py` - (no docstring) Classes: HeteroEngine.
+- `migkit/engines/hooks.py` - What an engine asks of the workflow above it, by name. Classes: HookNotFilled.
 - `migkit/engines/kafka.py` - (no docstring) Classes: KafkaEngine.
 - `migkit/engines/keyspaces.py` - Amazon Keyspaces as a side of a pair (backlog P0-CLOUDS): the Cassandra engine (`cassandra`), with what Keyspaces does differently. Classes: KeyspacesEngine, KeyspacesLanes.
 - `migkit/engines/kinesis.py` - Amazon Kinesis Data Streams as the destination of a change stream (backlog 33). Classes: KinesisEngine.

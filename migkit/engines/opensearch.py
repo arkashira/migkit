@@ -22,6 +22,7 @@ import urllib.error
 import urllib.request
 
 from .. import pieces
+from . import hooks
 from .base import Engine, NeutralCopier, Result
 
 #: mapping for each class, and the kinds of field a mapping names
@@ -898,7 +899,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
     # ---- the checks, through the pair every engine compares by ----
 
     def check_schema(self, db):
-        from .. import verifiers
+        verifiers = hooks.workflow("verifiers")
         pair = self._as_pair()
         return verifiers.compare_schema(
             pair, db, takes=lambda t: pair.hop.takes_table(db, t))
@@ -1443,7 +1444,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
         index on the source and not on the target is an application that
         stops working; one that may on the target and not on the source, a
         door opened."""
-        from .. import users
+        users = hooks.workflow("users")
         from ..util import Probes
         try:
             s = users._os_security(self.hop, "src")
@@ -1871,7 +1872,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
         from here."""
         import time
 
-        from .. import tailctl
+        tailctl = hooks.workflow("tailctl")
         out = super().stream_writers(db)
         names = [self._index("dst", db, t)
                  for t in self.neutral_tables("dst", db)]
@@ -2613,14 +2614,14 @@ class OpenSearchEngine(NeutralCopier, Engine):
     def tail_start(self, db, token_path):
         """The position the follow begins at, taken before the copy it
         follows (`change_point`)."""
-        from .. import tailctl
+        tailctl = hooks.workflow("tailctl")
         if token_path.exists():
             return False
         tailctl.begin(self, db, token_path, self.change_point("src", db))
         return True
 
     def tail_seed(self, db, token_path, point):
-        from .. import tailctl
+        tailctl = hooks.workflow("tailctl")
         tailctl.begin(self, db, token_path, point)
 
     def _follow_index(self, db, table, was, log):
@@ -2718,7 +2719,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
         change carried after a newer one, is left by the target; deletes
         are found by the counts (`_follow_index`). The position is saved
         after each look; the fence waits on it (`position_reached`)."""
-        from .. import tailctl
+        tailctl = hooks.workflow("tailctl")
 
         def look(token):
             indexes = dict((token or {}).get("indexes") or {})

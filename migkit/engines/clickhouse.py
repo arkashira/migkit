@@ -17,6 +17,7 @@ both servers compute.
 import re
 
 from .. import pieces
+from . import hooks
 from .base import (Engine, NeutralCopier, Result, clauses,
                    rows_counted)
 
@@ -606,7 +607,7 @@ class ClickHouseEngine(NeutralCopier, Engine):
     # ---- the checks, through the pair every engine compares by --------
 
     def check_schema(self, db):
-        from .. import verifiers
+        verifiers = hooks.workflow("verifiers")
         pair = self._as_pair()
         return verifiers.compare_schema(
             pair, db, takes=lambda t: pair.hop.takes_table(db, t))
@@ -1509,7 +1510,7 @@ class ClickHouseEngine(NeutralCopier, Engine):
     def _deep_grants(self, db):
         """What each account both sides hold may do to this database's
         tables - the grants a data move does not carry."""
-        from ..users import CH_SYS, NOT_CARRIED, carried
+        CH_SYS, NOT_CARRIED, carried = hooks.ask("users", "CH_SYS", "NOT_CARRIED", "carried")
         if not carried(self.hop):
             return [Result("deep", f"{db} grants", "skip", NOT_CARRIED)]
         try:
@@ -1618,7 +1619,7 @@ class ClickHouseEngine(NeutralCopier, Engine):
         """Whether the hop gives this table another name on the target or
         maps its columns: the fingerprints and the pull read the one name
         and every column on both sides."""
-        from ..movers import _renamed
+        _renamed = hooks.ask("movers", "_renamed")
         parts = self.hop.parts_of(table)
         return bool(self.hop.column_rules(db, *parts)
                     or _renamed(self.hop, db, parts))
@@ -2037,8 +2038,8 @@ class ClickHouseEngine(NeutralCopier, Engine):
         collapsing, summing, aggregating) holds `merged` rows - what a
         copy writes is not what a later merge leaves - and a target that
         is another server's tables is that server's."""
-        from .. import tableengine
-        from ..tableengine import Traits
+        tableengine = hooks.workflow("tableengine")
+        Traits = hooks.ask("tableengine", "Traits")
         if side == "dst" and name in tableengine.ONE_WAY:
             return tableengine.ONE_WAY[name]
         got = cls.STORAGE.get(str(name or "").lower())
@@ -2448,7 +2449,7 @@ class ClickHouseEngine(NeutralCopier, Engine):
         """The position the follow begins at, taken before the copy it
         follows: a partition written while the copy runs has other parts
         by the time the follow looks, and is compared again."""
-        from .. import tailctl
+        tailctl = hooks.workflow("tailctl")
         self._refuse_follow(db)
         if token_path.exists():
             return False
@@ -2456,7 +2457,7 @@ class ClickHouseEngine(NeutralCopier, Engine):
         return True
 
     def tail_seed(self, db, token_path, point):
-        from .. import tailctl
+        tailctl = hooks.workflow("tailctl")
         tailctl.begin(self, db, token_path, point)
 
     @staticmethod
@@ -2536,7 +2537,7 @@ class ClickHouseEngine(NeutralCopier, Engine):
         the columns of, or carries only some changes of (`mapping.ops`,
         `Hop.carries`) cannot be followed this way
         (`movers.stream_cannot_carry`)."""
-        from .. import movers
+        movers = hooks.workflow("movers")
         return movers.stream_cannot_carry(self.hop, db,
                                           self.neutral_tables("src", db))
 
@@ -2569,7 +2570,7 @@ class ClickHouseEngine(NeutralCopier, Engine):
         The position moves partition by partition as each matches, and its
         time only once every changed one has, so the fence
         (`position_reached`) waits for all of them."""
-        from .. import tailctl
+        tailctl = hooks.workflow("tailctl")
         self._refuse_follow(db)
         reach = {}
 

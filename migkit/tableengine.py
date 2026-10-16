@@ -1121,3 +1121,8 @@ def plan_lines(hop, eng, db):
                else "")
             + (f"; {len(p.changes) - made} converted in place after the"
                " copy" if len(p.changes) - made and p.mysql_target else "")]
+
+
+from .engines import hooks  # noqa: E402
+
+hooks.fill("tableengine", globals())

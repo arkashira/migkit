@@ -378,3 +378,8 @@ def changed_tables(before, after):
         return set()
     a, b = catalog_of(before).shape(), catalog_of(after).shape()
     return a.changed(b)
+
+
+from .engines import hooks  # noqa: E402
+
+hooks.fill("drift", globals())

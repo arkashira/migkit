@@ -15,6 +15,7 @@ by check. The time-series, search and file engines Lindorm also has are
 not this side. None of it has been run against a Lindorm instance: what
 it does is LindormTable's documented SQL, over a wire that has been.
 """
+from . import hooks
 from .base import Engine, Result
 from .dbapi import MARK, DbapiRows
 
@@ -137,7 +138,7 @@ class LindormEngine(DbapiRows, Engine):
         return {"version": str(version), "id": f"{ep.host}:{ep.port}"}
 
     def check_schema(self, db):
-        from .. import verifiers
+        verifiers = hooks.workflow("verifiers")
         pair = self._as_pair()
         return verifiers.compare_schema(
             pair, db, takes=lambda t: pair.hop.takes_table(db, t))

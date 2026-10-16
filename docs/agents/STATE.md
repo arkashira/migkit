@@ -219,7 +219,9 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 
 ## Source layout
 
-407 upward imports still listed (`docs/agents/LAYERS.md`; the list only shrinks); 0 files no package claims (`docs/agents/INVENTORY.md`).
+359 upward imports still listed (`docs/agents/LAYERS.md`; the list only shrinks); 0 files no package claims (`docs/agents/INVENTORY.md`).
+
+Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 2862 ordered pairs of 54 engines; 41 shape lacks, 97 capability lacks, 2155 depth lacks in all; fewest kinesis -> postgres (6), most oceanbase-oracle -> ase (153).
 
 ## Backlog (506 items, `docs/backlog-index.md`)
 

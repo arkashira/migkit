@@ -76,6 +76,7 @@ import time
 from decimal import Decimal
 
 from .. import pieces
+from . import hooks
 from .base import Engine, RepairAction, Result, clauses
 from .dbapi import MARK, DbapiRows
 
@@ -1286,7 +1287,7 @@ class TeradataEngine(DbapiRows, Engine):
         """This hop's line in `migkit_origin`, written in the batch's own
         transaction: the batch and the line saying it was applied are
         there together or not at all."""
-        from .. import twoway
+        twoway = hooks.workflow("twoway")
         self._origin_table(side, db)
         ledger = self._qualified(side, db, ORIGIN)
         with self._writer(side, db) as conn:
@@ -1302,7 +1303,7 @@ class TeradataEngine(DbapiRows, Engine):
     def origin_seen(self, side, db):
         """What the last batch this hop committed here said it was, None
         where there is none."""
-        from .. import twoway
+        twoway = hooks.workflow("twoway")
         try:
             got = self._rows(side, db, "select seen from"
                                        f" {self._qualified(side, db, ORIGIN)}"
@@ -1394,7 +1395,7 @@ class TeradataEngine(DbapiRows, Engine):
         return self._as_pair().check_data(db, table, stream)
 
     def check_schema(self, db):
-        from .. import verifiers
+        verifiers = hooks.workflow("verifiers")
         return verifiers.compare_schema(self._as_pair(), db)
 
     def check_counts(self, db):
