@@ -776,3 +776,19 @@ def test_every_profile_starts_lends_and_is_put_back(key, lane7):
         assert sp.servers and all(s.port for s in sp.servers)
     assert key not in servers._BROKEN
     servers.stop(key)
+
+
+def test_a_roomy_daemon_gets_no_more_lanes_than_there_are_numbers(monkeypatch):
+    """A daemon with room for more light lanes than `servers.LANES` is
+    given the numbered lanes and no more: the final suite numbers each
+    lane from that range, so a lane past it had no number to run under."""
+    import importlib
+    import sys
+    sys.path.insert(0, "tools")
+    fs = importlib.import_module("final_suite")
+    monkeypatch.setattr(fs.lock, "home_context", lambda: "default")
+    monkeypatch.setattr(fs.lock, "_has_colima", lambda: True)
+    rooms = {"home": (fs.ANY_LANE_MB + 40 * fs.LIGHT_LANE_MB, 64, "arm64")}
+    lanes = fs.lanes_for(rooms, True, "unit,docker,vm", None)
+    assert len(lanes) <= servers.LANES
+    assert [ln.kind for ln in lanes if ln.kind != "light"] == ["any", "vm"]

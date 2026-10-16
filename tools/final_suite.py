@@ -275,6 +275,12 @@ def lanes_for(rooms, want_vm, only, override):
                 n = max(0, min(VM_CPUS - 1, (VM_MB - RESERVE_MB - VM_LANE_MB)
                                // LIGHT_LANE_MB))
             lanes += [Lane("vm", vm_ctx, "light") for _ in range(n)]
+    if len(lanes) > servers.LANES:
+        # a daemon with more room than the servers have lane numbers:
+        # the light lanes past the last number are not run
+        kept = [ln for ln in lanes if ln.kind != "light"]
+        light = [ln for ln in lanes if ln.kind == "light"]
+        lanes = kept + light[:servers.LANES - len(kept)]
     return lanes
 
 
