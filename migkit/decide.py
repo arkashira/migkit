@@ -4052,3 +4052,42 @@ def change_depth_level(facts):
              footprint=1,
              because=f"{said} reads no changes, and the goal follows"
                      " them")), f)
+
+def session_settings(facts):
+    """The `Choice` of the session settings a program the move drives
+    sends a server (W15J-PG16): a build sends the settings of the server
+    version it was compiled for, and a server older than that refuses the
+    statement - in a transaction, every statement after it. Costed from
+    what was measured: `server` (the server's `server_version_num`, None
+    where it was not read), `build` (the major version the program was
+    compiled for, None where it was not read), `sends` (((setting, the
+    first `server_version_num` that has it), ...) the build sends), and
+    `can drop` (the program can be told to leave a setting out: its
+    statements given as text, or an option of its own). Send them all
+    where the server has every one; else leave out those it lacks where
+    the program can be told; else the program is refused and the range
+    copier, which sends only what the server has, carries the work. A
+    server or build not read is not taken as a match: a setting is sent
+    only where the server is known to have it."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+    server = f.get("server")
+    sends = tuple(f.get("sends") or ())
+    lacks = [n for n, low in sends if server is None or int(server) < low]
+    said = (f"the server is {server if server is not None else 'not read'},"
+            f" the build was compiled for"
+            f" {f.get('build') if f.get('build') is not None else 'a version not read'}"
+            + (f"; the server lacks {', '.join(lacks)}" if lacks else
+               "; the server has every setting it sends"))
+    return climb("the session settings sent the server", (
+        Rung("send", "every setting the build sends, sent", needs=(
+            Need("a server that has every setting the build sends",
+                 lambda f: not lacks, f"not sent as is: {said}"),),
+             because=said),
+        Rung("drop", "the settings the server lacks left out", footprint=1,
+             needs=(Need("a program that can be told to leave one out",
+                         lambda f: bool(f.get("can drop")),
+                         f"the program cannot be told to leave a setting"
+                         f" out: {said}"),),
+             because=said),
+        Rung("copier", "the range copier instead, which sends only what"
+             " the server has", footprint=2, because=said)), f)

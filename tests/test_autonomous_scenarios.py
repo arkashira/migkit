@@ -305,8 +305,7 @@ def _either(request):
 
 
 @pytest.fixture(params=[
-    pytest.param("postgres",
-                 marks=pytest.mark.xfail(strict=True, reason=PG16)),
+    "postgres",
     pytest.param("mysql",
                  marks=pytest.mark.xfail(strict=True, reason=MYBULK))])
 def side(request):
@@ -446,7 +445,6 @@ def test_injected_defects_are_each_found_and_named(side, tmp_path):
     assert all(found.values()), (found, out[-3000:])
 
 
-@pytest.mark.xfail(strict=True, reason=PG16)
 def test_a_target_capped_below_its_source_is_sized_to_it(pg_pair, capped,
                                                          tmp_path):
     """The target capped to 1 CPU and 512 MiB by its profile, the source

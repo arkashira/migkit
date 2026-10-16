@@ -76,6 +76,17 @@ def major(text, tool):
     return int(m.group(1).split(".")[0]) if m else None
 
 
+def compiled_for(text, program):
+    """The PostgreSQL major version a build was compiled for, from what it
+    says when asked its version, or None: the line a build of a program
+    that is not a PostgreSQL client prints (`compiled with PostgreSQL
+    18.4`), else the client's own major (`pg_restore (PostgreSQL) 18.6`),
+    whose settings are those of its version. The settings a build sends a
+    server are that version's (`decide.session_settings`)."""
+    m = re.search(r"compiled with PostgreSQL (\d+)", str(text or ""))
+    return int(m.group(1)) if m else major(text, program)
+
+
 def server_version(text):
     """The server's version from what the engine reported, as numbers -
     `8.4.2` of `8.4.2` and of `11.8.2-MariaDB-ubu2404` alike, (8, 4, 2) -

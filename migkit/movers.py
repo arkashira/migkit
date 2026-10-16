@@ -1589,8 +1589,9 @@ class _RestoreLog:
     #: the two ways it says the target refused a statement; its other
     #: error lines are context (`from TOC entry ...`), and in a parallel
     #: restore they arrive interleaved with the refusals they belong to
-    REFUSED = re.compile(r'error: (?:could not execute query|COPY failed for'
-                         r' table "[^"]*"): (?P<what>ERROR:.*)')
+    REFUSED = re.compile(r'(?:error: (?:could not execute query|COPY failed'
+                         r' for table "[^"]*")|psql:[^\n]*?:\d+): '
+                         r'(?P<what>ERROR:.*)')
     IGNORED = re.compile(r"errors ignored on restore: (?P<n>\d+)")
 
     def __init__(self):
@@ -1640,20 +1641,27 @@ def _restore(argv, env, log, what, existing_ok=False):
     they are. True when it had to tolerate some."""
     from . import wording
     reader = _RestoreLog()
+    failed = None
     try:
         _sh(argv, env, log, progress=reader)
     except RuntimeError as e:
-        real = reader.real(existing_ok)
-        if "errors ignored on restore" not in str(e) or real:
-            if not real:
-                raise
-            said = list(dict.fromkeys(real))
-            raise RuntimeError(wording.without_programs(
-                f"the target refused {len(real)} statements of {what}: "
-                + "; ".join(said[:4]) + (" ..." if len(said) > 4 else ""),
-                DRIVEN)) from e
-        return True
-    return False
+        # read from the restore's own count, not from the failure's words:
+        # those keep only the database's (`runner.classify`), and the count
+        # went with the program's - every tolerated setting then stopped
+        # the move (W15J-PG16)
+        if reader.ignored is None:
+            raise
+        failed = e
+    # a load given as text goes on past a refused statement and ends 0
+    # (`_pg_load_schema`): what it refused is read the same either way
+    real = reader.real(existing_ok)
+    if real:
+        said = list(dict.fromkeys(real))
+        raise RuntimeError(wording.without_programs(
+            f"the target refused {len(real)} statements of {what}: "
+            + "; ".join(said[:4]) + (" ..." if len(said) > 4 else ""),
+            DRIVEN)) from failed
+    return failed is not None or bool(reader.refused)
 
 
 def _pgdump_restore(load, env_t, log):
@@ -1833,12 +1841,94 @@ def _pg_schema(hop, db, section, tables, whole, log=None, workers=1):
                          [entries[k] for k in dict.fromkeys(dropped)], log)
         # a target with no tables can still have the schemas, types or
         # extensions someone made ready for it; those are left as they are
-        _restore(load, {**t.libpq_env(),
-                        "PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"},
-                 log, "the schema", existing_ok=True)
+        _pg_load_schema(hop, db, load, {
+            **t.libpq_env(), "PGPASSWORD": t.password,
+            "PGCONNECT_TIMEOUT": "15"}, log)
     finally:
         out.unlink(missing_ok=True)
         listed.unlink(missing_ok=True)
+        out.with_suffix(".sql").unlink(missing_ok=True)
+
+
+#: the session settings each program's build sends that a server has only
+#: from a version on: program -> ((setting, the major from which a build
+#: sends it, the first `server_version_num` that has it), ...). Measured on
+#: the PostgreSQL 16 sandbox: the restore of 18.6 opens every load with
+#: `SET transaction_timeout = 0`, the server refuses it, and the schema
+#: step of both the streaming copy and the range copier stopped on it
+#: (W15J-PG16). The streaming copy's build for 18 sends nothing of the
+#: kind in `copy table-data` - its server log stayed clean while 1,000
+#: rows landed, where a `SET transaction_timeout` beside it was logged as
+#: refused (`tests/test_the_streaming_copy_sends_only_what_the_server_has.py`);
+#: its clone and its large-object copy did, and migkit runs neither
+SENT_SETTINGS = {"pg_restore": (("transaction_timeout", 17, 170000),),
+                 "pgcopydb": ()}
+
+
+def _settings_choice(hop, db, program, can_drop, said=None):
+    """The `decide.session_settings` Choice for `program` against the
+    hop's target: the server's `server_version_num` (`Engine`'s reader),
+    the build's version (`toolversion.compiled_for` of what it says, or of
+    `said`), the settings that build sends, and whether it can be told to
+    leave one out. Kept in the run's decision record."""
+    from . import decide, toolversion
+    from .engines.postgres import PostgresEngine
+    server = PostgresEngine(hop)._server_version("dst", db)
+    build = toolversion.compiled_for(
+        toolversion.probe(program) if said is None else said, program)
+    sends = tuple((n, low) for n, since, low in SENT_SETTINGS.get(
+        program, ()) if build is None or build >= since)
+    choice = decide.session_settings({"server": server, "build": build,
+                                      "sends": sends, "can drop": can_drop})
+    decide.record(hop, choice)
+    lacks = [n for n, low in sends if server is None or int(server) < low]
+    return choice, lacks
+
+
+#: a setting the session is told, as a restore writes it in its text
+_SETTING_LINE = re.compile(
+    r"^\s*(?:SET\s+(?:SESSION\s+)?(?P<a>\w+)\s*(?:=|TO\b)"
+    r"|SELECT\s+pg_catalog\.set_config\('(?P<b>\w+)').*$", re.I | re.M)
+
+
+def _without_settings(text, names):
+    """`text` without the statements that set any of `names`."""
+    gone = {n.lower() for n in names}
+    return _SETTING_LINE.sub(
+        lambda m: "" if (m.group("a") or m.group("b") or "").lower() in gone
+        else m.group(0), text)
+
+
+def _pg_load_schema(hop, db, load, env, log=None):
+    """Restore the schema step `load` onto the target, sending only the
+    settings the server has (`decide.session_settings`): as it is where
+    the server has every setting the build sends; else written out as
+    text, the settings the server lacks left out, and run as text through
+    one session - its keys and indexes then built one at a time, the cost
+    of a load the server takes whole. Its refusals are read the one way
+    either way (`_restore`)."""
+    choice, lacks = _settings_choice(hop, db, "pg_restore", can_drop=True)
+    if choice.path == "send":
+        return _restore(load, env, log, "the schema", existing_ok=True)
+    from pathlib import Path
+
+    from .engines.postgres import PostgresEngine
+    archive = Path(load[-1])
+    sql = archive.with_suffix(".sql")
+    offline = ["pg_restore", *[a for a in load[9:-1]], "-f", str(sql),
+               str(archive)]
+    if "-j" in offline:
+        i = offline.index("-j")
+        del offline[i:i + 2]
+    _sh(offline, env)
+    sql.write_text(_without_settings(sql.read_text(), lacks))
+    if log:
+        log(f"{db}: the schema is loaded without {', '.join(lacks)}, which"
+            f" the target does not have - {choice.reason}")
+    argv, penv = PostgresEngine(hop)._client(
+        "dst", db, "psql", "-X", "-q", "-v", "ON_ERROR_STOP=0", "-f",
+        str(sql))
+    return _restore(argv, penv, log, "the schema", existing_ok=True)
 
 
 #: What depends on the relations `{names}` lists, the routines
@@ -5516,6 +5606,24 @@ def _pgcopydb_options(*sub):
     return _image_options(PGCOPYDB_IMAGE, tuple(sub))
 
 
+def _pgcopydb_said(how):
+    """What the build the streaming copy runs says when asked its version:
+    the local build's, or the image's, asked once per image."""
+    if how == "local":
+        return toolversion.probe("pgcopydb") or ""
+    return _image_said(PGCOPYDB_IMAGE)
+
+
+@functools.lru_cache(maxsize=None)
+def _image_said(image):
+    try:
+        p = runner.container(image, ["pgcopydb", "--version"], network=None,
+                             check=False, timeout=60, init=False)
+    except Exception:  # noqa: BLE001 - an image that cannot be asked
+        return ""
+    return (p.stdout or "") + (p.stderr or "")
+
+
 @functools.lru_cache(maxsize=None)
 def _image_options(image, sub):
     try:
@@ -6064,6 +6172,14 @@ def pgcopydb_move(hop, db, workers, go, log):
     # into a fallback rather than an outage - the dump and load, recorded as
     # themselves. A refusal of the database's is not that: every way would
     # meet it, and it stops the move (`runner.Refused`)
+    # the settings the build sends, held to the target's version before
+    # anything is written: it cannot be told to leave one out, so a target
+    # that lacks one is the range copier's (`decide.session_settings`)
+    gate, _ = _settings_choice(hop, db, "pgcopydb", can_drop=False,
+                               said=_pgcopydb_said(how))
+    if gate.path == "copier":
+        raise RuntimeError(f"the streaming copy is not run, nothing"
+                           f" written: {gate.reason}")
     try:
         # `ping` does not take `--dir` - it answers with its usage if you
         # give it one, which reads as a connectivity failure and sends the
@@ -8908,6 +9024,24 @@ def bulk_path_report(hop, db, via):
     return rows
 
 
+def _forecast_said(hop, db, eta=None):
+    """The move's forecast as its first lines say it: the median and the
+    90th percentile, in seconds, of `Engine.forecast` (or `eta`) - and
+    where the evidence holds no band yet, that, with what it waits for."""
+    if eta is None:
+        try:
+            from .engines import get_engine
+            eta = get_engine(hop).forecast("move", db)
+        except Exception as e:  # noqa: BLE001 - said, never assumed
+            return ("forecast: none - the work could not be listed"
+                    f" ({type(e).__name__})")
+    if eta.seconds is not None and eta.upper_bound is not None:
+        return (f"forecast: p50 {eta.seconds:.0f}s - p90"
+                f" {eta.upper_bound:.0f}s ({eta.basis or 'measured'},"
+                f" confidence {eta.confidence:.0%})")
+    return f"forecast: no band yet - {eta.operator_line()}"
+
+
 def run_via(via, hop, db, workers, go, log):
     """The bulk path `via` over database `db`: the steps it says, and with
     `go` what it ran - its programs run through the runner (`runner`),
@@ -8978,6 +9112,9 @@ def run_via(via, hop, db, workers, go, log):
     from .wording import DebugLog
     _SIZES = _source_sizes(hop, db) if go else None
     trial = go and on_trial(hop, via)
+    if go and log:
+        # the forecast first, with its band where the evidence holds one
+        log(f"{db}: {_forecast_said(hop, db)}")
     if trial and log:
         log(f"{db}: this machine never timed this bulk way on the hop;"
             " this move is its one trial - a failure holds it below"
