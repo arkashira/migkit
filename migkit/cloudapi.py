@@ -267,6 +267,13 @@ class Adapter:
     def find(self, host, port=None):
         raise NotImplementedError
 
+    def endpoints(self):
+        """[{"id", "engine", "host", "port"}] of every instance of the
+        product the account holds in the region, for `migkit estate`
+        (backlog W2): read only, never a change."""
+        raise NotOffered(f"{self.WHO}'s API is not asked here for every"
+                         f" instance of {self.product}")
+
     def restore_point(self, name, log):
         """A restore point made and waited for until the provider says it
         is ready. A product whose nature is a point in time has one at any
@@ -1120,6 +1127,21 @@ class Aws(Adapter):
                     out[name] = {"value": value, "modifiable": modifiable,
                                  "restart": restart, "kind": kind,
                                  "group": group}
+        return out
+
+    def endpoints(self):
+        """Every RDS and Aurora instance's endpoint in the region, a
+        cluster's writer once (built; not run against a real account)."""
+        if self.product not in ("rds",) + self.CLUSTERS:
+            return Adapter.endpoints(self)
+        c, out, seen = self.client(), [], set()
+        for x in _pages(c.describe_db_instances, "DBInstances"):
+            ep = x.get("Endpoint") or {}
+            who = x.get("DBClusterIdentifier") or x["DBInstanceIdentifier"]
+            if ep.get("Address") and who not in seen:
+                seen.add(who)
+                out.append({"id": who, "engine": x.get("Engine") or "",
+                            "host": ep["Address"], "port": ep.get("Port")})
         return out
 
     def find(self, host, port=None):

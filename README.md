@@ -199,6 +199,7 @@ off for a hop where the time matters more.
 | `users` | Sync logins source -> target keeping the same password. |
 | `telemetry` | Product telemetry: what migkit did, never what it carried. |
 | `secrets` | The user's own keys: replace the masking key, describe it. |
+| `estate` | Every database these addresses, networks and accounts reach: its engine, version and size, the time its move takes by migkit's own measured runs, and its cost on the catalog's machines. |
 <!-- /gen_docs: commands -->
 
 Every check is read-only and rerunnable. Every repair is dry-run unless

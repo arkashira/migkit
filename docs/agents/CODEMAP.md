@@ -22,7 +22,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - [`docs/agents/INVENTORY.md`](INVENTORY.md) - every file of `migkit/` and `tools/`: its responsibility package, owner domain, size, importers, the packages it reaches, the programs it wraps and the tests that reach it
 - [`docs/agents/LAYERS.md`](LAYERS.md) - the layering rule (a package imports its own rank and below) and every upward import still listed, with its reason
 
-## `migkit/` (175 modules)
+## `migkit/` (176 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/addresses.py` - A hop from two addresses (backlog R21).
@@ -80,6 +80,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/egress.py` - What leaves the machine, and the one gate it goes through (audit 2026-10-01, SEC12, SEC20, W8).
 - `migkit/engineat.py` - Which engine answers at an address that names none (backlog P0-MINIMAL-INPUT). Classes: Knock.
 - `migkit/envkeys.py` - Every environment variable migkit reads, in one place, and one way of reading each kind (audit 2026-10-01, K13). Classes: Var, Bad.
+- `migkit/estate.py` - The estate, not the hop (backlog W2): every database a machine or an account can reach, what moving each would take by migkit's own measurem Classes: Found.
 - `migkit/evidence.py` - The files migkit writes that hold the application's values, kept encrypted where the hop asks (backlog R17b): Classes: EvidencePath.
 - `migkit/export.py` - The evidence of a migration, exported: what migkit did on a hop and what it measured, in the forms audit and change processes take - HTML an
 - `migkit/factbook.py` - Every fact a choice may read, in one place (backlog P0-SMART, the owner's note B of 2026-09-30: "every factor"). Classes: Fact.

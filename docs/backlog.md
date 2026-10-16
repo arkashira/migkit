@@ -5896,10 +5896,21 @@ the gaps nothing above covers yet, now items of their own.
   never the requester's); source-change offers answered there and
   recorded by name; pages showing each side's outcome, the plan's phases
   with p50/p90 and the cutover outage, progress, evidence, the decision
-  record only when asked. Not built: discovery, sizing from performance
-  history, cost, a fleet view, the Terraform provider and the Kubernetes
-  operator; an encrypted SAML assertion, a signed authentication request,
-  single logout.
+  record only when asked. Built (W18M): `migkit estate` (`migkit/estate.py`)
+  - discovery of addresses, networks and an account's instances by the
+  server's own first words (bounded probes kept with their times), version
+  and size read once signed in, unreachable ports listed; each move sized
+  from the ledger's measured runs of that engine pair (`decide.estate_eta`,
+  "no history" and the assessment's class where none), priced on the
+  catalog over that measured time (`decide.estate_price`,
+  `machine.from_history`), one fleet table
+  (`tests/test_the_estate_is_discovered_sized_and_priced.py`, pg and mysql
+  lanes). Left: an account's listing on a real provider (AWS RDS/Aurora
+  built, not run against a real account; the other providers not asked);
+  the assessment's observed class for a server no hop has assessed. The
+  Terraform provider and the Kubernetes operator: not in 1.0, lead
+  decision (2026-10-16). Not built: an encrypted SAML assertion, a signed
+  authentication request, single logout.
 * **W3. Code conversion at enterprise breadth.** Beyond R11: PL/SQL
   packages with the emulation libraries they need (orafce and the
   like), T-SQL at depth, and the SQL embedded in application code
@@ -11554,3 +11565,4 @@ Not done: the move's copy-way choice itself (`physical.choose`, unowned this wav
 * Not read in this pass: `docs/problems-and-what-ends-them.md`, `docs/case-study-what-a-consistent-report-does-not-cover.md`, `docs/research-other-tools.md`, `docs/behavior-critical-params.md`, `docs/threat-model.md`, `docs/web.md`, `docs/goals-and-modes.md` prose, `docs/what-a-migration-actually-costs.md`, `docs/scale.md`, and the rows of `docs/backlog.md` (owned by the backlog).
 * Unverified: Debezium `table.include.list` and `pg_dump -t/-T` in the box page's item 3.
 - `R6.cloud` / `C1.managed` (W17F2 2026-10-16): PARTLY - every client of a provider's own API (data API, control plane, object store; 48 sites in 23 modules) is made after `cloudapi.gate` (the `provider` kind, the anchor and run-state buckets their own), proved by a walk of every module importing a provider library; the cloud side of readiness declared per provider (`cloud_readiness.UNPROVED_ON`). Left: every provider for real (no accounts); the crash-hold docker proof on SQL Server, Cassandra, Kafka and MongoDB (profiles without auth: W16J's note) - their hold rungs now read VIEW SERVER STATE, AUTHORIZE, ALTER on the cluster and a lock already held, proved on stand-ins; a Kafka quota way not built.
+- `C1.managed` (W18M 2026-10-16): PARTLY - the comparison's managed-service column is filled for every scenario from what the providers' own migration documents (`scenarios.managed_rows`, `data/managed.yaml` `comparison`: an operation's duration band or the cited mechanism), each cell said "documented, not measured" (`tests/test_the_managed_comparison_rows_are_documented_bands.py`). Left: the scenarios measured on a provider (no accounts).

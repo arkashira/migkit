@@ -7423,5 +7423,8 @@ def secrets_export_mask(as_json):
                " (the value is not shown)")
 
 
+from . import estate  # noqa: E402,F401 - `migkit estate` on main
+
+
 if __name__ == "__main__":
     main()

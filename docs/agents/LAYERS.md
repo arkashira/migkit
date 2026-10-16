@@ -26,7 +26,13 @@ A package imports its own rank and the ranks below it, never one above. A rank o
 
 Outside the rule: `tools` (the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them); `data` (the files migkit ships as resources).
 
-## Upward imports still listed: 381
+## Upward imports still listed: 384
+
+### (not listed)
+
+- `migkit/estate.py:44` decision -> cli (`cli`)
+- `migkit/estate.py:156` decision -> engines (`engines`)
+- `migkit/estate.py:308` decision -> integrations (`cloudapi`)
 
 ### a brand's confidence is a rung (`decide.brand_confidence`) the configuration reads once the server's signs are in; the rung moves below configuration
 
@@ -451,7 +457,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a rung or plan reads `consolidate` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
-- `migkit/scenarios.py:1301` decision -> workflows (`consolidate`)
+- `migkit/scenarios.py:1331` decision -> workflows (`consolidate`)
 
 ### a rung or plan reads `cutover` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
@@ -492,7 +498,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a rung or plan reads `reshard` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
-- `migkit/scenarios.py:733` decision -> workflows (`reshard`)
+- `migkit/scenarios.py:763` decision -> workflows (`reshard`)
 - `migkit/topology.py:19` decision -> workflows (`reshard`)
 
 ### a rung or plan reads `subset` for what the workflow can do; ends when the workflow publishes its abilities below decision
@@ -501,7 +507,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a rung or plan reads `tableengine` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
-- `migkit/scenarios.py:1216` decision -> workflows (`tableengine`)
+- `migkit/scenarios.py:1246` decision -> workflows (`tableengine`)
 
 ### a rung or plan reads `topicstates` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
@@ -531,7 +537,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a rung reads a wrapped tool's surface (`ship`); the surface is a fact handed down
 
-- `migkit/machine.py:967` decision -> integrations (`ship`)
+- `migkit/machine.py:986` decision -> integrations (`ship`)
 
 ### a safety check reads `barriers` for the step it guards; the step reports its own state down
 
@@ -894,7 +900,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/anchor.py:130` persistence -> integrations (`cloudapi`)
 - `migkit/dba.py:1141` decision -> integrations (`cloudapi`)
 - `migkit/freeze.py:6390` safety -> integrations (`cloudapi`)
-- `migkit/machine.py:600` decision -> integrations (`cloudapi`)
+- `migkit/machine.py:619` decision -> integrations (`cloudapi`)
 - `migkit/state.py:332` persistence -> integrations (`cloudapi`)
 - `migkit/variants.py:503` configuration -> integrations (`cloudapi`)
 - `migkit/variants.py:503` configuration -> safety (`egress`)
@@ -987,7 +993,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/capabilities.py:34` decision -> engines (`engines.base`)
 - `migkit/decide.py:2734` decision -> engines (`engines.base`)
 - `migkit/model.py:1110` decision -> engines (`engines.base`)
-- `migkit/scenarios.py:475` decision -> engines (`engines.base`)
+- `migkit/scenarios.py:505` decision -> engines (`engines.base`)
 - `migkit/workload.py:133` decision -> engines (`engines.base`)
 
 ### the decision engine asks an engine (`engines.dbapi`) what it can do; ends when the engine contract is a package below decision
@@ -1029,7 +1035,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/capabilities.py:33` decision -> engines (`engines`)
 - `migkit/dba.py:311` decision -> engines (`engines`)
 - `migkit/decide.py:2733` decision -> engines (`engines`)
-- `migkit/machine.py:927` decision -> engines (`engines`)
+- `migkit/machine.py:946` decision -> engines (`engines`)
 - `migkit/tableway.py:132` decision -> engines (`engines`)
 - `migkit/waysaid.py:71` decision -> engines (`engines`)
 

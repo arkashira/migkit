@@ -530,6 +530,25 @@ def from_model(m, direct=False, cpus=None):
                            + ", ".join(truths) + ")")
 
 
+def from_history(runs, direct=False):
+    """(fastest, slowest) `Stages` from kept runs ({"bytes", "seconds",
+    "at"} each, `planner.record_rate`'s): the servers and the link
+    together gave each run's bytes over its seconds, so the two ends of
+    what was measured stand as the stage no machine for migkit changes -
+    what `advise` prices a type against. None where no run kept both."""
+    rated = sorted((r["bytes"] / r["seconds"], str(r.get("at") or "")[:10])
+                   for r in runs or () if r.get("bytes") and r.get("seconds"))
+    if not rated:
+        return None
+    n = len(rated)
+
+    def at(rate, when, which):
+        return Stages(beyond=rate, wire=0.0 if direct else 1.0, measured=(
+            f"the {which} of {n} kept run{'s' if n != 1 else ''}"
+            f" ({when}): {_mb(rate)} MiB/s"))
+    return at(*rated[-1], "fastest"), at(*rated[0], "slowest")
+
+
 def _host_cpus():
     from . import sizing
     return sizing.host().get("cpus")

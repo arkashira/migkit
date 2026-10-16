@@ -148,6 +148,36 @@ def operation_rows():
     return got if isinstance(got, dict) else {}
 
 
+#: what every cell of the managed column says first: no provider ran it
+MANAGED_SOURCE = "documented, not measured"
+
+
+def managed_rows():
+    """{scenario row: its managed-service cell} for the comparison
+    (`autonomous.comparison`, backlog C1.managed): the provider's own
+    migration as its documentation states it for that case - an
+    operation's duration band (`operation_rows`) or the mechanism the
+    research notes cite - each said as documented, not measured. A row
+    the catalogue holds nothing for is left out, never filled."""
+    from . import managed
+    from .machine import _took
+    got = managed.catalogue().get("comparison") or {}
+    ops, out = operation_rows(), {}
+    for row, spec in (got.items() if isinstance(got, dict) else ()):
+        spec = spec if isinstance(spec, dict) else {}
+        op = ops.get(spec.get("operation") or "") or {}
+        band = op.get("duration") or {}
+        words = spec.get("said") or ""
+        if not words and band.get("per_tib"):
+            lo, hi = band["per_tib"]
+            words = (f"{spec.get('label') or spec['operation']}:"
+                     f" {_took(lo)} to {_took(hi)} a TiB, as its"
+                     " documentation states")
+        if words:
+            out[str(row)] = f"{MANAGED_SOURCE}: {words}"
+    return out
+
+
 def documented(offer, size):
     """The operation's `costmodel.Estimate` for `size` bytes from the
     band its documentation states (`startup` and `per_tib` [low, high]),

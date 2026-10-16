@@ -5398,3 +5398,82 @@ def anchor_interval(rate, put_seconds, span):
     return n, (f"every {n} entries: {rate:.3g} entries a second over"
                f" {span:.0f}s, an anchor taking {put_seconds:.3g}s, so"
                f" about {stretch:.3g}s of the record is left unanchored")
+
+def estate_eta(facts, costs=None):
+    """(the `Choice` of what a server's move in the estate is sized from,
+    (low, high) seconds or None) - `migkit estate` (backlog W2).
+
+    `facts`: `size` (the bytes its databases hold, as the server said
+    once signed in; None where nobody signed in), `pair` (the kept runs of
+    this engine pair on every hop: {"bytes", "seconds"} each, the ledger
+    `planner.record_rate` writes) and `engine` (the runs of the same
+    source engine to any other target). The bounds are the size over the
+    fastest and the slowest rate those runs measured - never a rate of a
+    table: where no run of the source's engine was kept, "no history" is
+    the answer and no number is said."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+
+    def rated(key):
+        return [r["bytes"] / r["seconds"] for r in f.get(key) or ()
+                if r.get("bytes") and r.get("seconds")]
+
+    def sized(x):
+        return x.get("size") is not None
+
+    size = Need("the size the server said", sized,
+                "nobody signed in to read the size, so no time is said")
+    choice = climb("what a server's move in the estate is sized from", (
+        Rung("pair", "the measured runs of this engine pair",
+             needs=(size, Need("a measured run of this pair",
+                               lambda x: bool(rated("pair")),
+                               "no run of this engine pair was kept")),
+             because="the same pair's own copies: what this move does"),
+        Rung("engine", "the measured runs of the source's engine to"
+             " another target", footprint=1,
+             needs=(size, Need("a measured run from this engine",
+                               lambda x: bool(rated("engine")),
+                               "no run from this engine was kept")),
+             because="the source's reads are the same; the target's"
+                     " writes are another engine's"),
+        Rung("none", "no history", footprint=2,
+             because="nothing measured: no time is said")),
+        f, costs=costs or None, prove=False)
+    rates = rated(choice.path) if choice.path in ("pair", "engine") else []
+    if not rates:
+        return choice, None
+    return choice, (f.get("size") / max(rates), f.get("size") / min(rates))
+
+
+def estate_price(facts, costs=None):
+    """(the `Choice` of how a server's move in the estate is priced, the
+    cheapest `machine.Advice` at each end of its time or None) - backlog
+    W2. `facts`: `bounds` (`estate_eta`'s seconds), `size`, `stages`
+    ((fastest, slowest) `machine.Stages` from the measured runs:
+    `machine.from_history`) and `types` ({(cloud, region): [Machine]}, the
+    catalog's priced types). The price is the catalog's price a second
+    times the time the measured rate takes on each type
+    (`machine.advise`); without a measured time there is none."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    choice = climb("how a server's move in the estate is priced", (
+        Rung("catalog", "the catalog's prices over the measured time",
+             needs=(Need("a measured time", lambda x: bool(x.get("bounds")),
+                         "no measured time, so no price"),
+                    Need("a priced type in the catalog",
+                         lambda x: any(x.get("types", {}).values()),
+                         "no type in the catalog has a price there"))),
+        Rung("none", "not priced", footprint=1,
+             because="a price without a measured time would be a guess")),
+        f, costs=costs or None, prove=False)
+    if choice.path != "catalog":
+        return choice, None
+    from . import machine
+    ends = []
+    for stages in f.get("stages"):
+        best = None
+        for (_, region), types in sorted(f.get("types").items()):
+            got = machine.advise(stages, f.get("size"), None, types, region)
+            if got.cost is not None and (best is None or got.cost < best[0]
+                                         .cost):
+                best = (got, region)
+        ends.append(best)
+    return choice, tuple(ends)

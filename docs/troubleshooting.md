@@ -2035,6 +2035,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>. Write it as the address's scheme: <...>://<...><...>:<...><...>
 
+* name an address, a network (10.0.0.0/24) or an account (--account aws:rds:us-east-1)
+
 * the tail keeps <...>, which the machines' store cannot hold; keep the hop's run state in a bucket or a directory every machine sees
 
 * the machines' store kept changing under migkit while it wrote <...>; too many machines write one record at once

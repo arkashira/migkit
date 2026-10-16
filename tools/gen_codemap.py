@@ -533,7 +533,7 @@ _BY_NAME = {
                 " scenarios legs sizing changedepth lacks sourcechange"
                 " bulkways ready cloud_readiness dba handwork rehearsal"
                 " faults model"
-                " machine topology waysaid workload advisors",
+                " machine topology waysaid workload advisors estate",
     "engines": "catalog pgslot binlog_marks binlog_payload logddl standby",
     "integrations": "tools tooluse toolversion cloudapi cloudseed"
                     " huawei_sdk imports integrations workflow_exporter"

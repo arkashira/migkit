@@ -1161,8 +1161,10 @@ def comparison(lines, table):
     """`table` (the comparison's markdown) with each scenario row's
     measured cells filled from the harness's JSON lines (one a run,
     `MIGKIT_MEASURE_OUT`): the last run of a scenario on an engine counts;
-    a row no run measured, and the managed-service column, are left as
-    they were - a number is never written that no run produced."""
+    a row no run measured is left as it was - a number is never written
+    that no run produced. The managed-service column is the providers'
+    documented band for each scenario (`scenarios.managed_rows`), each
+    cell said as documented, not measured."""
     import json
     got = {}
     for line in lines:
@@ -1173,15 +1175,21 @@ def comparison(lines, table):
         row = (SCENARIOS.get(m.get("scenario")), ENGINES.get(m.get("engine")))
         if all(row):
             got[row] = m
+    from .scenarios import managed_rows
+    managed, at = managed_rows(), 2 + len(MEASURED)
     out = []
     for line in table.splitlines():
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        m = got.get(tuple(cells[:2])) if line.startswith("| ") else None
-        if m is None or len(cells) < 2 + len(MEASURED):
+        row = line.startswith("| ") and len(cells) > at \
+            and cells[0] in SCENARIOS.values()
+        if not row:
             out.append(line)
             continue
+        m = got.get(tuple(cells[:2])) or {}
         for i, key in enumerate(MEASURED):
             if key in m:
                 cells[2 + i] = _cell(key, m[key])
+        if cells[0] in managed:
+            cells[at] = managed[cells[0]]
         out.append("| " + " | ".join(cells) + " |")
     return "\n".join(out) + ("\n" if table.endswith("\n") else "")

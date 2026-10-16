@@ -308,6 +308,36 @@ operations:
       per_tib: null
       said: "the instance is unavailable while it upgrades; no duration is documented"
 
+# The managed services' own migration beside each scenario of
+# docs/research/autonomous-comparison.md (`autonomous.comparison`'s managed
+# column, backlog C1.managed): what the provider's documentation states for
+# that case - an operation's duration band above, or the mechanism the
+# research notes cite - each cell said as documented, never as measured: no
+# scenario was run on a provider. Read by migkit.scenarios.managed_rows.
+comparison:
+  healthy:
+    operation: aws-aurora-replica
+    label: an Aurora read replica migration (AWS)
+  baseline, workers pinned to 1:
+    operation: aws-aurora-replica
+    label: an Aurora read replica migration (AWS)
+  target capped below its source:
+    operation: aws-aurora-replica
+    label: an Aurora read replica migration (AWS)
+  a value above the target's packet size:
+    operation: aws-aurora-replica
+    label: an Aurora read replica migration (AWS)
+  fault mid-copy, recovered in the run:
+    said: "Tencent DTS retries a failed task by itself within a 5-720 minute window [DTS 2.5]; no duration of the recovery is documented"
+  crash mid-copy, run again:
+    said: "AWS DMS resumes a stopped task from its recovery checkpoint [AWS 1.6]; no duration of the resume is documented"
+  interrupted three times, run again:
+    said: "AWS DMS resumes a stopped task from its recovery checkpoint each time [AWS 1.6]; no duration of the resume is documented"
+  injected defects, then the check:
+    said: "AWS DMS validation compares the rows after the full load and keeps each mismatch in its control table [AWS 1.7]; no duration is documented"
+  refused target (unrecoverable):
+    said: "AWS DMS stops the table or the task as its error-handling settings say [AWS 1.4]; no duration is documented"
+
 providers:
   aws:     {label: AWS, api: aws, console: the AWS console, cli: aws}
   gcp:     {label: Google Cloud, api: gcp, console: the Google Cloud console, cli: gcloud}

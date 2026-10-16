@@ -38,8 +38,12 @@ the move's own progress said it ran at once; "not said" where no progress
 file was left), questions (lines of the run asking the operator, the ease
 measure's own count). The baseline is the same copy with the workers
 pinned to 1 through the expert override (no switch to fixed defaults
-exists), its row beside the healthy one. A managed service column needs
-the same scenario on equal scope and resources and is not claimed.
+exists), its row beside the healthy one. The managed service column is
+what each provider's own migration documents for the case
+(`scenarios.managed_rows`, from `migkit/data/managed.yaml`'s `comparison`):
+every cell says "documented, not measured" - no scenario was run on a
+provider, and a measured column needs the same scenario on equal scope and
+resources.
 
 The table is written by the generator, never by hand; the next run
 rewrites it the same way:
@@ -51,23 +55,23 @@ The cells below are the run of 2026-10-16 (docker sandbox: the pg pair, postgres
 
 | Scenario | Engine | Inputs | Interventions | Completed | Recovered | Retry waste | Seconds | Forecast error | Workers | Questions | Managed service |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| healthy | MySQL | 6 | 0 | yes | none needed | 0 | 20.96 | 0.267 | 1 | 0 | to be measured |
-| healthy | PostgreSQL | 6 | 0 | yes | none needed | 0 | 15.66 | 0.317 | 1 | 0 | to be measured |
-| baseline, workers pinned to 1 | MySQL | 6 | 0 | yes | none needed | 0 | 35.36 | 0.339 | 1 | 0 | to be measured |
-| baseline, workers pinned to 1 | PostgreSQL | 6 | 0 | yes | none needed | 0 | 22.75 | 0.443 | 1 | 0 | to be measured |
-| fault mid-copy, recovered in the run | MySQL | 6 | 0 | yes | none needed | 0 | 22.09 | 0.287 | 1 | 0 | to be measured |
-| fault mid-copy, recovered in the run | PostgreSQL | 6 | 0 | yes | none needed | 0 | 24.91 | 0.384 | 1 | 0 | to be measured |
-| crash mid-copy, run again | MySQL | 6 | 1 | yes | none needed | 0 | 28.75 | no forecast said | 1 | 0 | to be measured |
-| crash mid-copy, run again | PostgreSQL | 6 | 1 | yes | none needed | 0 | 22.86 | 0.525 | 1 | 0 | to be measured |
-| interrupted three times, run again | MySQL | 6 | 3 | yes | none needed | 0 | 70.85 | 0.452 | 1 | 0 | to be measured |
-| interrupted three times, run again | PostgreSQL | 6 | 3 | yes | none needed | 0 | 27.35 | 0.414 | 1 | 0 | to be measured |
-| a value above the target's packet size | MySQL | 6 | 0 | no | none needed | 0 | 30.91 | no forecast said | 1 | 0 | to be measured |
-| a value above the target's packet size | PostgreSQL | 6 | 0 | yes | none needed | 0 | 17.1 | 0.381 | 1 | 0 | to be measured |
-| injected defects, then the check | MySQL | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured |
-| injected defects, then the check | PostgreSQL | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured |
-| refused target (unrecoverable) | MySQL | 6 | 0 | no | none needed | 0 | 11.65 | no forecast said | not said | 0 | to be measured |
-| refused target (unrecoverable) | PostgreSQL | 6 | 0 | no | 0% | 1 | 9.52 | no forecast said | not said | 0 | to be measured |
-| target capped below its source | PostgreSQL | 6 | 0 | yes | none needed | 0 | 32.7 | 0.421 | 1 | 0 | to be measured |
+| healthy | MySQL | 6 | 0 | yes | none needed | 0 | 20.96 | 0.267 | 1 | 0 | documented, not measured: an Aurora read replica migration (AWS): 1.0 hours to 6.0 hours a TiB, as its documentation states |
+| healthy | PostgreSQL | 6 | 0 | yes | none needed | 0 | 15.66 | 0.317 | 1 | 0 | documented, not measured: an Aurora read replica migration (AWS): 1.0 hours to 6.0 hours a TiB, as its documentation states |
+| baseline, workers pinned to 1 | MySQL | 6 | 0 | yes | none needed | 0 | 35.36 | 0.339 | 1 | 0 | documented, not measured: an Aurora read replica migration (AWS): 1.0 hours to 6.0 hours a TiB, as its documentation states |
+| baseline, workers pinned to 1 | PostgreSQL | 6 | 0 | yes | none needed | 0 | 22.75 | 0.443 | 1 | 0 | documented, not measured: an Aurora read replica migration (AWS): 1.0 hours to 6.0 hours a TiB, as its documentation states |
+| fault mid-copy, recovered in the run | MySQL | 6 | 0 | yes | none needed | 0 | 22.09 | 0.287 | 1 | 0 | documented, not measured: Tencent DTS retries a failed task by itself within a 5-720 minute window [DTS 2.5]; no duration of the recovery is documented |
+| fault mid-copy, recovered in the run | PostgreSQL | 6 | 0 | yes | none needed | 0 | 24.91 | 0.384 | 1 | 0 | documented, not measured: Tencent DTS retries a failed task by itself within a 5-720 minute window [DTS 2.5]; no duration of the recovery is documented |
+| crash mid-copy, run again | MySQL | 6 | 1 | yes | none needed | 0 | 28.75 | no forecast said | 1 | 0 | documented, not measured: AWS DMS resumes a stopped task from its recovery checkpoint [AWS 1.6]; no duration of the resume is documented |
+| crash mid-copy, run again | PostgreSQL | 6 | 1 | yes | none needed | 0 | 22.86 | 0.525 | 1 | 0 | documented, not measured: AWS DMS resumes a stopped task from its recovery checkpoint [AWS 1.6]; no duration of the resume is documented |
+| interrupted three times, run again | MySQL | 6 | 3 | yes | none needed | 0 | 70.85 | 0.452 | 1 | 0 | documented, not measured: AWS DMS resumes a stopped task from its recovery checkpoint each time [AWS 1.6]; no duration of the resume is documented |
+| interrupted three times, run again | PostgreSQL | 6 | 3 | yes | none needed | 0 | 27.35 | 0.414 | 1 | 0 | documented, not measured: AWS DMS resumes a stopped task from its recovery checkpoint each time [AWS 1.6]; no duration of the resume is documented |
+| a value above the target's packet size | MySQL | 6 | 0 | no | none needed | 0 | 30.91 | no forecast said | 1 | 0 | documented, not measured: an Aurora read replica migration (AWS): 1.0 hours to 6.0 hours a TiB, as its documentation states |
+| a value above the target's packet size | PostgreSQL | 6 | 0 | yes | none needed | 0 | 17.1 | 0.381 | 1 | 0 | documented, not measured: an Aurora read replica migration (AWS): 1.0 hours to 6.0 hours a TiB, as its documentation states |
+| injected defects, then the check | MySQL | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | documented, not measured: AWS DMS validation compares the rows after the full load and keeps each mismatch in its control table [AWS 1.7]; no duration is documented |
+| injected defects, then the check | PostgreSQL | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | documented, not measured: AWS DMS validation compares the rows after the full load and keeps each mismatch in its control table [AWS 1.7]; no duration is documented |
+| refused target (unrecoverable) | MySQL | 6 | 0 | no | none needed | 0 | 11.65 | no forecast said | not said | 0 | documented, not measured: AWS DMS stops the table or the task as its error-handling settings say [AWS 1.4]; no duration is documented |
+| refused target (unrecoverable) | PostgreSQL | 6 | 0 | no | 0% | 1 | 9.52 | no forecast said | not said | 0 | documented, not measured: AWS DMS stops the table or the task as its error-handling settings say [AWS 1.4]; no duration is documented |
+| target capped below its source | PostgreSQL | 6 | 0 | yes | none needed | 0 | 32.7 | 0.421 | 1 | 0 | documented, not measured: an Aurora read replica migration (AWS): 1.0 hours to 6.0 hours a TiB, as its documentation states |
 
 The recovery choices themselves are proved on fakes in
 `tests/test_autonomous_workflow.py`: reconcile before a repeat, a write
