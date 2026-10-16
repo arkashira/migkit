@@ -77,7 +77,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 ## Depth by engine
 
-88 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: built, unproved 1234, n/a 1471, not yet 1839, test owed 300, yes 964. A cell below is the ways proved of the items that apply.
+88 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: built, unproved 1234, claimed 4, n/a 1470, not yet 1836, test owed 300, yes 964. A cell below is the ways proved of the items that apply.
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -101,7 +101,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | delta | 0/9 | 0/24 | 0/6 | 0/5 | 1/2 | 2/6 | 0/3 | 1/1 | 0/1 | 0/1 | 4/58 |
 | dsql | 5/10 | 21/32 | 1/6 | 3/7 | 5/6 | 3/5 | 2/5 | 1/1 | 1/1 | 0/1 | 42/74 |
 | duckdb | 1/9 | 2/24 | - | 0/7 | 1/6 | 4/6 | 2/2 | 1/1 | 0/1 | 0/1 | 11/57 |
-| dynamodb | 6/8 | 12/14 | 4/5 | 5/6 | 2/2 | 4/4 | 4/4 | 1/1 | 1/1 | 0/1 | 39/46 |
+| dynamodb | 6/8 | 12/14 | 4/5 | 5/6 | 2/2 | 4/5 | 4/4 | 1/1 | 1/1 | 0/1 | 39/47 |
 | exasol | 0/10 | 0/39 | 0/6 | 0/7 | 0/6 | 0/6 | 0/6 | 0/1 | 0/1 | 0/1 | 0/83 |
 | firestore | 0/9 | 2/21 | 1/5 | 0/6 | 0/2 | 2/5 | 2/3 | 1/1 | 1/1 | 0/1 | 9/54 |
 | gaussdb | 0/10 | 3/39 | 1/6 | 0/7 | 1/6 | 2/7 | 3/7 | 1/1 | 1/1 | 0/1 | 12/85 |
@@ -274,7 +274,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | schema.routines | mssql mysql oracle postgres | mongodb | analyticdb-mysql bigquery cockroachdb dcdb geminidb-mongo oceanbase polardbx singlestore | the rest (33) | bigtable copybook datastore delta dynamodb firestore hetero iceberg kafka keyspaces kinesis neptune parquet pubsub qdrant saas sapodp sqlite tidb timestream |
 | move.table-copy | the rest (38) | neo4j timestream | analyticdb-mysql analyticdb-postgres bigquery databricks db2i db2zos dcdb exasol geminidb-cassandra geminidb-mongo informix lindorm netezza oceanbase-oracle polardbx progress saphana singlestore snowflake synapse vertica yugabytedb | - | kinesis pubsub saas sapodp |
 | move.bulk | bigtable cassandra clickhouse copybook datastore duckdb dynamodb firestore gaussdb kafka mongodb mssql mysql neptune opensearch oracle parquet postgres redis spanner sqlite timestream | hetero | ase bigquery cockroachdb cosmosdb couchbase db2 db2i db2zos geminidb-cassandra geminidb-mongo keyspaces tidb | dcdb delta iceberg neo4j oceanbase oceanbase-oracle polardbx qdrant | the rest (23) |
-| move.large-values | the rest (19) | teradata | analyticdb-mysql bigquery cockroachdb couchbase db2i db2zos dcdb dsql gaussdb geminidb-mongo geminidb-redis oceanbase oceanbase-oracle polardbx singlestore snowflake | analyticdb-postgres bigtable databricks datastore exasol firestore informix lindorm neo4j neptune netezza progress qdrant saphana spanner synapse timestream vertica yugabytedb | cassandra copybook cosmosdb dynamodb geminidb-cassandra keyspaces kinesis pubsub redshift saas sapodp |
+| move.large-values | the rest (19) | teradata | analyticdb-mysql bigquery cockroachdb couchbase db2i db2zos dcdb dsql gaussdb geminidb-mongo geminidb-redis oceanbase oceanbase-oracle polardbx singlestore snowflake | analyticdb-postgres bigtable databricks exasol informix lindorm neo4j neptune netezza progress qdrant saphana synapse timestream vertica yugabytedb | cassandra copybook cosmosdb geminidb-cassandra keyspaces kinesis pubsub redshift saas sapodp |
 | move.partitioned | clickhouse generic kafka mysql postgres tidb | oracle parquet teradata | analyticdb-mysql bigquery db2 db2i db2zos dcdb gaussdb mssql oceanbase oceanbase-oracle polardbx singlestore | analyticdb-postgres ase databricks delta exasol hetero iceberg informix lindorm neo4j netezza progress qdrant saphana synapse vertica yugabytedb | the rest (28) |
 | move.spread | hetero postgres | cassandra mongodb mysql | - | - | the rest (61) |
 | move.sized | ase bigquery clickhouse cosmosdb db2 dsql duckdb dynamodb hetero kafka mongodb mssql mysql opensearch postgres redis sqlite tidb | cassandra oracle teradata | analyticdb-mysql analyticdb-postgres cockroachdb db2i db2zos dcdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces lindorm oceanbase oceanbase-oracle polardbx redshift singlestore snowflake synapse yugabytedb | the rest (23) | kinesis pubsub |

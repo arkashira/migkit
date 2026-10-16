@@ -6630,7 +6630,6 @@ def tail_state(facts):
              because="nothing was written to carry"),
         Rung("following", "following", because="the quiet is ordinary")),
         f, prove=False)
-||||||| b4242c6d
 
 def free_space_source(facts, costs=None):
     """Where the target's free space is read from (backlog 7.free): the
@@ -6761,4 +6760,3 @@ def version_seen(facts):
                          " never run against it")),
              because="the version-keyed choices were run on it")),
         f, prove=False)
-||||||| b4242c6d
