@@ -659,7 +659,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### an engine calls `drift` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
 - `migkit/engines/hetero.py:4429` engines -> workflows (`drift`)
-- `migkit/engines/mssql.py:389` engines -> workflows (`drift`)
+- `migkit/engines/mssql.py:396` engines -> workflows (`drift`)
 - `migkit/engines/mysql.py:3362` engines -> workflows (`drift`)
 - `migkit/engines/postgres.py:1289` engines -> workflows (`drift`)
 
@@ -757,7 +757,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### an engine calls `unchanged` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/mssql.py:765` engines -> workflows (`unchanged`)
+- `migkit/engines/mssql.py:772` engines -> workflows (`unchanged`)
 - `migkit/engines/mysql.py:3859` engines -> workflows (`unchanged`)
 - `migkit/engines/postgres.py:6219` engines -> workflows (`unchanged`)
 
@@ -771,7 +771,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/engines/cassandra.py:1091` engines -> workflows (`users`)
 - `migkit/engines/kafka.py:2052` engines -> workflows (`users`)
 - `migkit/engines/mongodb.py:3641` engines -> workflows (`users`)
-- `migkit/engines/mssql.py:2147` engines -> workflows (`users`)
+- `migkit/engines/mssql.py:2154` engines -> workflows (`users`)
 - `migkit/engines/mysql.py:7054` engines -> workflows (`users`)
 - `migkit/engines/postgres.py:9657` engines -> workflows (`users`)
 - `migkit/engines/redis.py:244` engines -> workflows (`users`)
@@ -1031,7 +1031,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### the deep check compares Agent jobs through `jobs.shapes`; the job shapes move below engines
 
-- `migkit/engines/mssql.py:2061` engines -> workflows (`jobs`)
+- `migkit/engines/mssql.py:2068` engines -> workflows (`jobs`)
 
 ### the hop check refuses prefixes that meet through `topology.overlaps`; the key spaces move below configuration
 

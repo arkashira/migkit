@@ -152,10 +152,15 @@ def test_the_target_follows_and_the_fence_passes(pair):
 
 
 def test_a_table_it_does_not_track_stops_the_tail(pair):
+    """Tracking does not hold with a table in scope untracked: the ladder
+    leaves it (`decide.mssql_follow_way`) and the live log carries the
+    table, where the edition lets the log be read; read as tracking, the
+    stop names the table."""
     _sql("shop", "create table dbo.audit (id int primary key, at datetime2)")
+    way = pair.follow_way("src", "shop")
+    assert way.path == "log", way.reason
     with pytest.raises(SystemExit) as e:
-        pair.tail_start("shop", pair.hop.report_dir("shop")
-                        / "tail-token.json")
+        pair._all_tracked("src", "shop")
     assert str(e.value).startswith("Change Tracking does not follow"
                                    " dbo.audit"), e.value
 

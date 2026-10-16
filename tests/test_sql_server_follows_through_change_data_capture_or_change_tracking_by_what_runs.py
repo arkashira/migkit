@@ -9,10 +9,12 @@ The capture's reads - `sys.fn_cdc_get_max_lsn`, `fn_cdc_get_min_lsn`, the
 `cdc.fn_cdc_get_all_changes_<instance>` rows - are replayed from the
 answers the server's documentation shows: the sandbox is SQL Server's
 edge edition, which has no Agent and refuses to switch capture on (its
-refusal is asserted on the `sqlserver` lane, recorded below). There the
-ladder is run against the edition itself: with tracking on it follows
-through tracking, and with neither it follows the live log through the
-one hook (`MSSQLEngine.log_follower`). Built, unproved on a full SQL
+answer is asserted on the `sqlserver` lane, recorded below: it switches
+capture on and makes the capture jobs, and its Agent stays stopped, so
+nothing is ever captured). There the ladder is run against the edition
+itself: with tracking on it follows through tracking, and with the
+capture waiting for an Agent that does not run, or neither on, it follows
+the live log through the one hook (`MSSQLEngine.log_follower`). Built, unproved on a full SQL
 Server (`mssql.UNPROVED_ON`).
 """
 import subprocess
@@ -26,10 +28,13 @@ from migkit.engines.mssql import MSSQLEngine
 from tests import servers
 from tests.conftest import mssql_run, needs_docker
 
-#: what the edge edition answered to `exec sys.sp_cdc_enable_db`
-#: (2026-10-16, the `sqlserver` lane): capture is not in this edition
-EDGE_CDC_REFUSAL = ("sp_cdc_enable_db", "22988", "not available in every"
-                    " edition", "Change data capture is only available")
+#: what the edge edition answered (2026-10-16, the `sqlserver` lane):
+#: `sys.sp_cdc_enable_db` and `sp_cdc_enable_table` are accepted and make
+#: the capture and cleanup jobs in `msdb`; the Agent that would run them
+#: is `Stopped`; so `sys.fn_cdc_get_max_lsn()` stays NULL and the change
+#: table holds no row, however many rows change
+EDGE_CDC = {"agent": "Stopped", "max_lsn": None, "captured_rows": 0,
+            "jobs": ["cdc.f_capture", "cdc.f_cleanup"]}
 
 
 def _lsn(n):
@@ -163,8 +168,41 @@ def test_a_capture_cleaned_up_past_the_position_stops_named():
     assert eng.position_lost("src", "app", {"cdc": _hex(299)}) is None
 
 
+def test_a_capture_mark_is_the_newest_commit_and_covers_only_its_own_feed():
+    class Marked(_Fake):
+        def run_rule(self, side, db, sql, args=()):
+            return self._rows(side, db, sql, args)
+
+        def _marked_on(self, side, db):
+            return "host/5/2026-10-16T01:02:03"
+    eng = Marked(changes=[_row(100, 1, 2, 1, 10), _row(130, 1, 2, 3, 30)],
+                 top=130)
+    mark = eng.snapshot_mark("src", "app")
+    assert mark == f"host/5/2026-10-16T01:02:03|cdc|{130}"
+    first, _ = eng.neutral_changes("src", "app", {"cdc": _hex(99)})
+    # a capture change carries its commit position as `txn`
+    assert [c["txn"] for c in first] == [100, 130]
+    assert [eng.mark_covers("src", "app", mark, c) for c in first] == [
+        True, True]
+    later = dict(first[0], txn=131)
+    assert eng.mark_covers("src", "app", mark, later) is False
+    # the mark of another feed, or another database, says nothing
+    assert eng.mark_covers("src", "app", "host/5/2026-10-16T01:02:03|7",
+                           first[0]) is None
+    assert eng.mark_covers("src", "app", "other|cdc|130", first[0]) is None
+    # the Agent stopped: tracking is the feed, and the capture's mark no
+    # longer covers anything
+    eng.agent, eng.tracking = "Stopped", True
+    assert eng.snapshot_mark("src", "app") == \
+        "host/5/2026-10-16T01:02:03|7"
+    assert eng.mark_covers("src", "app", mark, first[0]) is None
+    # no feed at all, and the log: no mark
+    eng.cdc, eng.tracking, eng.live = False, False, True
+    assert eng.snapshot_mark("src", "app") is None
+
+
 @needs_docker
-def test_the_edge_edition_refuses_capture_and_is_followed_by_what_it_has():
+def test_the_edge_edition_makes_the_capture_and_nothing_fills_it():
     import pymssql
     name, port = servers.name("migkit-test-mssql-follow"), \
         servers.private_port(8)
@@ -193,14 +231,35 @@ def test_the_edge_edition_refuses_capture_and_is_followed_by_what_it_has():
                 break
             except Exception:  # noqa: BLE001 - starting
                 time.sleep(2)
-        sql("master", "create database f", "create database g")
-        for d in ("f", "g"):
+        sql("master", "create database f", "create database g",
+            "create database h")
+        for d in ("f", "g", "h"):
             sql(d, "create table dbo.orders (id int primary key, amount"
                 " int null)")
-        with pytest.raises(Exception) as refused:
-            sql("f", "exec sys.sp_cdc_enable_db")
-        said = str(refused.value)
-        assert any(w in said for w in EDGE_CDC_REFUSAL), said
+        # capture is switched on and the table captured: the edition
+        # accepts both
+        for d in ("f", "h"):
+            sql(d, "exec sys.sp_cdc_enable_db")
+            sql(d, "exec sys.sp_cdc_enable_table @source_schema = N'dbo',"
+                " @source_name = N'orders', @role_name = NULL")
+        assert sql("f", "select is_cdc_enabled from sys.databases where"
+                   " name = 'f'") == [(True,)]
+        assert sql("f", "select capture_instance from cdc.change_tables"
+                   ) == [("dbo_orders",)]
+        assert sorted(r[0] for r in sql(
+            "msdb", "select name from dbo.sysjobs where name like 'cdc.f_%'")
+        ) == EDGE_CDC["jobs"]
+        # the Agent is stopped, and no row is ever captured
+        assert sql("f", "select status_desc from sys.dm_server_services"
+                   " where servicename like 'SQL Server Agent%'") == [
+            (EDGE_CDC["agent"],)]
+        sql("f", "insert into dbo.orders values (1, 5)",
+            "update dbo.orders set amount = 6 where id = 1")
+        time.sleep(5)
+        assert sql("f", "select sys.fn_cdc_get_max_lsn()") == [
+            (EDGE_CDC["max_lsn"],)]
+        assert sql("f", "select count(*) from cdc.dbo_orders_CT") == [
+            (EDGE_CDC["captured_rows"],)]
 
         class Lane(MSSQLEngine):
             def _rows(self, side, db, q, args=()):
@@ -209,18 +268,35 @@ def test_the_edge_edition_refuses_capture_and_is_followed_by_what_it_has():
                            if args else q.replace(MARK, "%s")) or []
         ep = Endpoint(host="127.0.0.1", port=port, user="sa", password=pw)
         eng = Lane(Hop(name="lane", engine="mssql", source=ep, target=ep,
-                       databases=["f", "g"]))
+                       databases=["f", "g", "h"]))
         facts = eng.follow_facts("src", "f")
-        assert facts.get("capture") is False and facts.get("capturing") \
+        assert facts.get("capture") is True and facts.get("capturing") \
             is False
-        # tracking on: followed through tracking, the version its token
+        # the capture is asked for its position and says nothing was
+        # captured: stopped named, never a position made up
+        with pytest.raises(SystemExit, match="nothing has been captured"):
+            eng._cdc_point("src", "f")
+        # capture on and tracking on: the Agent that would fill the change
+        # tables is stopped, so tracking is the way, the version its token
         sql("master", "alter database f set change_tracking = on")
         sql("f", "alter table dbo.orders enable change_tracking")
-        assert eng.follow_way("src", "f").path == "tracking"
+        way = eng.follow_way("src", "f")
+        assert way.path == "tracking" and "Agent is not running" in \
+            way.reason, way.reason
         assert isinstance(eng.change_point("src", "f"), int)
+        mark = eng.snapshot_mark("src", "f")
+        assert mark and "|cdc|" not in mark
+        change = {"txn": int(mark.rpartition("|")[2])}
+        assert eng.mark_covers("src", "f", mark, change) is True
+        assert eng.mark_covers("src", "f", mark, {"txn": change["txn"] + 1}
+                               ) is False
+        # capture on, tracking off: the live log
+        way = eng.follow_way("src", "h")
+        assert way.path == "log", way.reason
         # neither on: the live log, through the one hook
         way = eng.follow_way("src", "g")
         assert way.path == "log", way.reason
+        assert eng.snapshot_mark("src", "g") is None
         token = eng.change_point("src", "g")
         assert isinstance(token, dict) and "lsn" in token
         sql("g", "insert into dbo.orders values (1, 5)",

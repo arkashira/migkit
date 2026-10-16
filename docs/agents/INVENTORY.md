@@ -18,7 +18,7 @@ None.
 | conversion | 6 | 58 | 39174 | a value or an object as another engine takes it: canonical text, transforms, types, stored code |
 | reporting | 7 | 10 | 7404 | what the operator reads: the verdict, the result shape, the log, the metrics, the notices |
 | decision | 8 | 31 | 30746 | choosing: the rungs, the cost model, the joint plan, what each engine can do |
-| engines | 9 | 74 | 121942 | the contract every engine fills and each engine's own adapter |
+| engines | 9 | 74 | 121973 | the contract every engine fills and each engine's own adapter |
 | integrations | 9 | 22 | 23080 | the programs, libraries and provider APIs migkit wraps, and the other tools it meets |
 | workflows | 10 | 36 | 47868 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
 | cli | 11 | 3 | 9630 | the command line and the guide that asks for two addresses |
@@ -257,7 +257,7 @@ None.
 | `migkit/engines/lake.py` | - | 895 | 2: engines, tooluse | configuration 1, conversion 8, engines 8 | - | 1: one_engine_is_asked_of_its_own_gaps |
 | `migkit/engines/lindorm.py` | - | 287 | 0 | conversion 2, engines 5 | - | 1: the_cloud_native_services_as_sides |
 | `migkit/engines/mongodb.py` | - | 5832 | 3: engines, engines.geminidb, movers | configuration 3, conversion 10, decision 16, engines 12, execution 10, persistence 8, reporting 5, safety 3, scope 1, workflows 24 | - | 63: mongo_fake.py, a_cluster_target_is_loaded_as_it_spreads_its_rows, a_collection_copied_document_for_document (+60) |
-| `migkit/engines/mssql.py` | - | 5075 | 5: engines, engines.ase, engines.db2, storedcode.corpus, users | conversion 14, decision 17, engines 13, execution 6, integrations 2, persistence 3, reporting 4, safety 1, workflows 8 | - | 49: mssql_stub.py, a_copier_reconciles_and_retunes, a_masked_column_is_proved_as_written (+46) |
+| `migkit/engines/mssql.py` | - | 5106 | 5: engines, engines.ase, engines.db2, storedcode.corpus, users | conversion 14, decision 17, engines 13, execution 6, integrations 2, persistence 3, reporting 4, safety 1, workflows 8 | - | 49: mssql_stub.py, a_copier_reconciles_and_retunes, a_masked_column_is_proved_as_written (+46) |
 | `migkit/engines/mssql_log.py` | - | 416 | 1: engines.mssql | conversion 1, decision 2 | - | 1: sql_server_changes_are_read_from_its_log_and_its_backups |
 | `migkit/engines/my_pass.py` | - | 298 | 2: engines.mysql, ship | engines 3, execution 3 | - | 1: mysql_tls_on_every_path |
 | `migkit/engines/mysql.py` | - | 11133 | 9: costmodel, crossmove, dba, engines, engines.distmysql (+4) | configuration 8, conversion 31, decision 32, engines 30, execution 16, persistence 12, reporting 5, safety 3, workflows 39 | reladiff | 190: cutover_harness.py, mysql_pair.py, a_clone_plugin_offer_on_mysql (+187) |

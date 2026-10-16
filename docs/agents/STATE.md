@@ -39,7 +39,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | kinesis | 16/16 | 12/12 | 4 | - |
 | lindorm | 12/16 | 10/12 | 55 | stream, fence, confirm, delta, large values, partitioned |
 | mongodb | 16/16 | 11/12 | 11 | missing grant |
-| mssql | 16/16 | 12/12 | 38 | - |
+| mssql | 16/16 | 12/12 | 33 | - |
 | mysql | 16/16 | 12/12 | 4 | - |
 | neo4j | 12/16 | 7/12 | 54 | bulk-move, confirm, users, snapshot, keyless, no unique index, wide key, large values, partitioned |
 | neptune | 16/16 | 11/12 | 43 | large values |
@@ -65,7 +65,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 ## Depth by engine
 
-88 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: built, unproved 595, n/a 1414, not yet 1301, test owed 489, yes 953. A cell below is the ways proved of the items that apply.
+88 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: built, unproved 590, n/a 1414, not yet 1301, test owed 489, yes 958. A cell below is the ways proved of the items that apply.
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -100,7 +100,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | kinesis | 0/1 | - | - | 0/2 | - | - | - | 1/1 | 1/1 | 0/1 | 2/6 |
 | lindorm | 0/9 | 2/27 | 0/6 | 0/7 | 0/5 | 0/6 | 1/5 | 1/1 | 1/1 | 0/1 | 5/68 |
 | mongodb | 8/9 | 21/24 | 4/6 | 6/7 | 1/3 | 4/6 | 4/5 | 1/1 | 1/1 | 0/1 | 50/63 |
-| mssql | 7/10 | 18/35 | 3/6 | 0/7 | 4/6 | 4/7 | 5/7 | 0/1 | 1/1 | 0/1 | 42/81 |
+| mssql | 9/10 | 21/35 | 3/6 | 0/7 | 4/6 | 4/7 | 5/7 | 0/1 | 1/1 | 0/1 | 47/81 |
 | mysql | 9/10 | 29/32 | 6/6 | 7/7 | 6/6 | 7/8 | 8/8 | 1/1 | 1/1 | 1/1 | 75/80 |
 | neo4j | 0/9 | 0/25 | 1/5 | 0/7 | 0/4 | 0/7 | 0/4 | 0/1 | 0/1 | 0/1 | 1/64 |
 | neptune | 0/8 | 0/20 | 1/5 | 0/7 | 0/3 | 2/4 | 0/3 | 1/1 | 1/1 | 0/1 | 5/53 |
@@ -137,7 +137,7 @@ Built, unproved - a way the code has on an engine no sandbox here can run; the e
 - geminidb-redis: built; not run on a real GeminiDB instance (29 cells)
 - keyspaces: built; not run on a real Amazon Keyspaces table (44 cells)
 - lindorm: built; not run on a real Lindorm instance (14 cells)
-- mssql: built; not run on a real SQL Server, only on its edge edition in the sandbox (32 cells)
+- mssql: built; not run on a real SQL Server, only on its edge edition in the sandbox (stopped Agent, CLR off, a thinner catalogue); a cell whose lane test is not written yet is owed that test (27 cells)
 - oceanbase: built; not run on a real OceanBase tenant (62 cells)
 - oceanbase-oracle: built; not run on a real OceanBase tenant (22 cells)
 - polardbx: built; not run on a real PolarDB-X or TDSQL instance (42 cells)
@@ -159,9 +159,9 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | scope.counters | mssql mysql oracle postgres tidb | cockroachdb dsql duckdb | ase db2 db2i db2zos dcdb gaussdb oceanbase oceanbase-oracle polardbx | generic hetero redshift snowflake spanner sqlite | the rest (31) |
 | scope.objects | generic kafka mongodb mssql mysql oracle postgres tidb | bigquery cassandra clickhouse cockroachdb cosmosdb dsql duckdb opensearch redshift snowflake sqlite teradata | db2 db2i db2zos dcdb gaussdb geminidb-cassandra geminidb-mongo keyspaces oceanbase oceanbase-oracle | the rest (13) | copybook dynamodb geminidb-redis kinesis neptune parquet pubsub qdrant redis saas sapodp |
 | scope.ops | the rest (19) | bigtable couchbase delta firestore iceberg kinesis neo4j neptune pubsub saas sapodp spanner | db2 db2i dcdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces oceanbase polardbx | ase kafka lindorm oceanbase-oracle | copybook datastore db2zos duckdb parquet qdrant sqlite teradata timestream |
-| scope.row-filter | bigquery clickhouse cockroachdb dsql duckdb generic hetero mongodb mysql opensearch oracle postgres redshift sqlite teradata tidb | the rest (17) | ase db2 db2i db2zos dcdb gaussdb geminidb-cassandra geminidb-mongo keyspaces lindorm mssql oceanbase oceanbase-oracle polardbx | geminidb-redis kafka redis saas sapodp | kinesis pubsub |
+| scope.row-filter | the rest (17) | bigtable cassandra copybook cosmosdb couchbase datastore delta dynamodb firestore iceberg neo4j neptune parquet qdrant snowflake spanner timestream | ase db2 db2i db2zos dcdb gaussdb geminidb-cassandra geminidb-mongo keyspaces lindorm oceanbase oceanbase-oracle polardbx | geminidb-redis kafka redis saas sapodp | kinesis pubsub |
 | scope.transforms | generic | - | - | the rest (51) | kinesis pubsub |
-| scope.names | bigquery cassandra clickhouse cosmosdb dsql dynamodb generic hetero mongodb mysql opensearch oracle postgres teradata tidb | the rest (18) | ase db2 db2i db2zos dcdb gaussdb geminidb-cassandra geminidb-mongo keyspaces lindorm mssql oceanbase oceanbase-oracle polardbx | geminidb-redis kafka redis saas sapodp | kinesis pubsub |
+| scope.names | bigquery cassandra clickhouse cosmosdb dsql dynamodb generic hetero mongodb mssql mysql opensearch oracle postgres teradata tidb | the rest (18) | ase db2 db2i db2zos dcdb gaussdb geminidb-cassandra geminidb-mongo keyspaces lindorm oceanbase oceanbase-oracle polardbx | geminidb-redis kafka redis saas sapodp | kinesis pubsub |
 | verify.value.one-plan | mssql postgres | mysql tidb | dcdb oceanbase polardbx | the rest (39) | geminidb-redis kinesis neo4j pubsub qdrant redis saas sapodp |
 | verify.access.object-ownership | dsql mysql postgres tidb | clickhouse cockroachdb oracle redshift snowflake teradata | db2 db2i db2zos dcdb mssql oceanbase | ase gaussdb generic hetero lindorm neo4j oceanbase-oracle polardbx spanner | the rest (29) |
 | verify.access.sequence-grants | postgres | cockroachdb dsql oracle snowflake | mssql | db2 db2i db2zos dcdb gaussdb generic hetero oceanbase oceanbase-oracle polardbx spanner | the rest (37) |
@@ -179,18 +179,18 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | verify.structure.materialized-views | postgres | bigquery cassandra clickhouse cockroachdb oracle redshift snowflake | db2 db2i db2zos geminidb-cassandra keyspaces | ase bigtable cosmosdb gaussdb generic hetero iceberg lindorm oceanbase oceanbase-oracle polardbx | the rest (30) |
 | verify.structure.objects | cockroachdb duckdb generic kafka mongodb mssql mysql oracle postgres tidb | bigquery cassandra clickhouse cosmosdb dsql opensearch redshift snowflake teradata | db2 db2i db2zos geminidb-cassandra geminidb-mongo keyspaces oceanbase-oracle | the rest (17) | copybook dynamodb geminidb-redis kinesis neptune parquet pubsub qdrant redis saas sapodp |
 | verify.structure.partitions | kafka mysql postgres tidb | bigquery clickhouse oracle teradata | db2 db2i db2zos dcdb gaussdb mssql oceanbase oceanbase-oracle | ase delta generic hetero iceberg lindorm parquet polardbx timestream | the rest (29) |
-| verify.structure.row-security | opensearch postgres | bigquery clickhouse oracle redshift snowflake | db2 db2i db2zos mssql | ase cockroachdb delta firestore gaussdb generic hetero iceberg oceanbase-oracle teradata | the rest (33) |
+| verify.structure.row-security | mssql opensearch postgres | bigquery clickhouse oracle redshift snowflake | db2 db2i db2zos | ase cockroachdb delta firestore gaussdb generic hetero iceberg oceanbase-oracle teradata | the rest (33) |
 | verify.structure.schema-diff | dsql mysql postgres | bigquery cassandra cockroachdb | db2 db2i db2zos gaussdb geminidb-cassandra keyspaces | the rest (25) | cosmosdb couchbase datastore dynamodb firestore geminidb-mongo geminidb-redis kafka kinesis mongodb neo4j neptune pubsub qdrant redis saas sapodp |
 | verify.structure.sharding | cosmosdb mongodb | clickhouse opensearch redshift teradata | db2 db2i db2zos geminidb-mongo | dcdb gaussdb generic hetero neo4j oceanbase oceanbase-oracle polardbx qdrant timestream | the rest (34) |
 | verify.structure.triggers | mssql postgres | cassandra cockroachdb cosmosdb mysql oracle teradata | db2 db2i db2zos dcdb geminidb-cassandra keyspaces oceanbase | ase couchbase gaussdb generic hetero neo4j oceanbase-oracle polardbx sqlite | the rest (30) |
 | verify.structure.unvalidated-constraints | dsql mysql oracle postgres tidb | cockroachdb | db2 db2i db2zos dcdb mssql oceanbase | ase gaussdb generic hetero neo4j oceanbase-oracle polardbx spanner sqlite teradata | the rest (32) |
-| verify.value.charset | cassandra mysql oracle postgres teradata tidb | bigquery clickhouse cockroachdb dsql mongodb | db2 db2i db2zos dcdb geminidb-cassandra geminidb-mongo keyspaces mssql oceanbase | the rest (23) | cosmosdb dynamodb kafka kinesis neo4j opensearch pubsub qdrant redis saas sapodp |
+| verify.value.charset | cassandra mssql mysql oracle postgres teradata tidb | bigquery clickhouse cockroachdb dsql mongodb | db2 db2i db2zos dcdb geminidb-cassandra geminidb-mongo keyspaces oceanbase | the rest (23) | cosmosdb dynamodb kafka kinesis neo4j opensearch pubsub qdrant redis saas sapodp |
 | verify.value.collation | dsql mongodb mysql opensearch postgres teradata tidb | bigquery cockroachdb oracle | db2 db2i db2zos dcdb geminidb-mongo mssql oceanbase | ase delta duckdb gaussdb generic hetero oceanbase-oracle polardbx redshift snowflake sqlite | the rest (26) |
 | verify.value.generated | cosmosdb dsql mysql opensearch postgres teradata tidb | clickhouse cockroachdb oracle | db2 db2i db2zos dcdb mssql oceanbase | ase delta duckdb gaussdb generic hetero lindorm oceanbase-oracle polardbx redshift snowflake spanner sqlite | the rest (25) |
 | verify.value.narrowing | cassandra cockroachdb dsql mongodb mysql opensearch postgres teradata tidb | bigquery clickhouse oracle | db2 db2i db2zos dcdb geminidb-cassandra geminidb-mongo keyspaces mssql oceanbase | the rest (24) | bigtable dynamodb geminidb-redis kafka kinesis pubsub redis saas sapodp |
 | verify.value.null-empty | cassandra cosmosdb dsql dynamodb generic kafka mongodb mysql opensearch postgres tidb | bigquery clickhouse cockroachdb oracle teradata | db2 db2i db2zos dcdb geminidb-cassandra geminidb-mongo keyspaces mssql oceanbase | the rest (23) | geminidb-redis kinesis pubsub redis saas sapodp |
 | verify.value.precision | cassandra dsql mongodb mysql opensearch postgres tidb | bigquery clickhouse cockroachdb oracle teradata | db2 db2i db2zos dcdb geminidb-cassandra geminidb-mongo keyspaces mssql oceanbase | the rest (24) | bigtable dynamodb geminidb-redis kafka kinesis pubsub redis saas sapodp |
-| verify.value.rendering | dsql mongodb mysql postgres | bigquery clickhouse cockroachdb oracle | db2 db2i db2zos dcdb geminidb-mongo mssql oceanbase | the rest (27) | bigtable cassandra cosmosdb dynamodb geminidb-redis kafka kinesis opensearch pubsub redis saas sapodp |
+| verify.value.rendering | dsql mongodb mssql mysql postgres | bigquery clickhouse cockroachdb oracle | db2 db2i db2zos dcdb geminidb-mongo oceanbase | the rest (27) | bigtable cassandra cosmosdb dynamodb geminidb-redis kafka kinesis opensearch pubsub redis saas sapodp |
 | verify.value.timezone | cassandra dsql mongodb mysql postgres teradata tidb | bigquery clickhouse cockroachdb opensearch oracle | db2 db2i db2zos dcdb geminidb-cassandra geminidb-mongo keyspaces mssql oceanbase | the rest (23) | bigtable cosmosdb dynamodb geminidb-redis kafka kinesis pubsub redis saas sapodp |
 | verify.value.type-drift | cosmosdb dynamodb mongodb opensearch | kafka | geminidb-mongo | bigtable couchbase datastore firestore geminidb-redis generic hetero neo4j neptune qdrant sqlite timestream | the rest (36) |
 | verify.delta | the rest (15) | bigquery bigtable cockroachdb couchbase dsql firestore neo4j neptune spanner | ase db2 db2i dcdb gaussdb geminidb-mongo geminidb-redis keyspaces oceanbase polardbx | delta iceberg lindorm oceanbase-oracle redshift snowflake | copybook datastore db2zos duckdb geminidb-cassandra kinesis parquet pubsub qdrant saas sapodp sqlite teradata timestream |
@@ -245,7 +245,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 
 380 upward imports still listed (`docs/agents/LAYERS.md`; the list only shrinks); 0 files no package claims (`docs/agents/INVENTORY.md`).
 
-Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 2862 ordered pairs of 54 engines; 26 shape lacks, 71 capability lacks, 2150 depth lacks in all; fewest kinesis -> postgres (6), most oceanbase-oracle -> db2i (143).
+Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 2862 ordered pairs of 54 engines; 26 shape lacks, 71 capability lacks, 2145 depth lacks in all; fewest kinesis -> postgres (6), most oceanbase-oracle -> db2i (143).
 
 ## Backlog (506 items, `docs/backlog-index.md`)
 

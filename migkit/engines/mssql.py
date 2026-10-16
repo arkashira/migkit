@@ -5,23 +5,30 @@ from .. import canon, commercial, decide, diagnostics, pieces
 from .base import Engine, RepairAction, Result, clauses, rows_counted
 from .dbapi import MARK, DbapiRows
 
-#: the sandbox is SQL Server's edge edition: no Agent, no Change Data
-#: Capture, and the cells below not run against a full server - built,
-#: unproved (`capabilities.UNPROVED_WHY`)
+#: the sandbox is SQL Server's edge edition: its Agent is stopped, so the
+#: capture it switches on is never filled, it has the CLR off, and its
+#: catalogue lacks a column the grants read asks for. The cells below are
+#: not run against a full server - built, unproved
+#: (`capabilities.UNPROVED_WHY`). A cell the edition could run and whose
+#: lane test is not written yet is a test owed, not a limit of the edition:
+#: `scope.row-filter`, `scope.names`, `verify.structure.row-security`,
+#: `verify.value.charset` and `verify.value.rendering` were that and are
+#: run on the lane now
 UNPROVED_ON = ("built; not run on a real SQL Server, only on its edge"
-               " edition in the sandbox")
+               " edition in the sandbox (stopped Agent, CLR off, a thinner"
+               " catalogue); a cell whose lane test is not written yet is"
+               " owed that test")
 UNPROVED_ITEMS = (
     "assess.brands assess.capacity assess.engine-checks assess.handwork "
     "assess.preflight assess.versions assess.writers cutover.jobs "
     "move.create-missing move.load-window move.partitioned schema.defaults "
-    "schema.indexes scope.names scope.row-filter tail.renames "
+    "schema.indexes tail.renames "
     "tail.table-states verify.access.object-ownership "
     "verify.access.sequence-grants verify.access.table-grants "
     "verify.structure.indexes verify.structure.partitions "
     "verify.structure.unvalidated-constraints verify.value.collation "
     "verify.value.generated verify.value.narrowing verify.value.null-empty "
-    "verify.value.precision verify.value.timezone verify.value.charset"
-    " verify.value.rendering verify.structure.row-security")
+    "verify.value.precision verify.value.timezone")
 
 #: the server's own databases, and the one a managed server keeps
 #: for its provider
@@ -4557,7 +4564,8 @@ class MSSQLEngine(DbapiRows, Engine):
                 if kind is None:
                     continue  # 3: the row before an update
                 found.append((at, self._lsn_hex(r[1]), r[3], canon.change(
-                    kind, t, ident, None if kind == "delete" else values)))
+                    kind, t, ident, None if kind == "delete" else values,
+                    txn=int(at, 16))))
         found.sort(key=lambda x: (int(x[0], 16), int(x[1], 16)))
         now = time.time()
         out, group, last = [], [], token["cdc"]
@@ -4710,16 +4718,29 @@ class MSSQLEngine(DbapiRows, Engine):
         return got[0] if got else None
 
     def snapshot_mark(self, side, db):
-        """The database's change tracking version now, after the database
-        it was read in (`database_id` and its creation time on this
-        server): every transaction at or below it has committed, and a
-        read begun after it sees it. None where the database tracks no
-        changes."""
+        """The database's position in the feed it is followed through
+        (`follow_way`) now, after the database it was read in
+        (`database_id` and its creation time on this server): every
+        transaction at or below it has committed, and a read begun after it
+        sees it. A capture's is the newest commit position its change
+        tables hold, a tracking one the Change Tracking version; None where
+        the way gives none (the log, or a database that tracks nothing)."""
         on = self._marked_on(side, db)
         try:
+            path = self.follow_way(side, db).path
+        except (Exception, SystemExit):  # noqa: BLE001 - the old read
+            path = "tracking"
+        if path == "log":
+            return None
+        try:
+            if path == "capture":
+                got = self.run_rule(side, db, "select"
+                                    " sys.fn_cdc_get_max_lsn()")
+                at = self._lsn_hex(got[0][0]) if got else None
+                return f"{on}|cdc|{int(at, 16)}" if on and at else None
             got = self.run_rule(side, db, "select"
                                 " change_tracking_current_version()")
-        except Exception:  # noqa: BLE001 - no tracking, no mark
+        except Exception:  # noqa: BLE001 - no feed, no mark
             return None
         if not on or not got or got[0][0] is None:
             return None
@@ -4743,15 +4764,25 @@ class MSSQLEngine(DbapiRows, Engine):
         return known[(side, db)]
 
     def mark_covers(self, side, db, mark, change):
-        """Whether the change's version (`txn`, the transaction that last
-        changed the row) is at or below the mark's, in the same
-        database."""
+        """Whether the change's position (`txn`: the version of the
+        transaction that last changed the row, or its capture's commit
+        position) is at or below the mark's, in the same database and the
+        same feed - a mark of one way says nothing of a change the other
+        minted."""
         version = change.get("txn")
         if not isinstance(mark, str) or not isinstance(version, int) \
                 or isinstance(version, bool):
             return None
         on, _, at = mark.rpartition("|")
+        way = "tracking"
+        if on.endswith("|cdc"):
+            on, way = on[:-4], "capture"
         if not on or on != self._marked_on(side, db):
+            return None
+        try:
+            if self.follow_way(side, db).path != way:
+                return None
+        except (Exception, SystemExit):  # noqa: BLE001 - not known: not said
             return None
         try:
             return version <= int(at)

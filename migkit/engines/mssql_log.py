@@ -283,7 +283,7 @@ def restored_to(standby, name):
 
 def _units(eng, side, db):
     """{allocation unit: table} of the heaps and clustered indexes."""
-    return {int(u): eng._said(str(t)) for u, _, t in
+    return {int(u): f"{s}.{t}" for u, s, t in
             eng._rows(side, db, UNITS)}
 
 
