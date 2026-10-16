@@ -1534,6 +1534,121 @@
     "x-migkit-role": "operator"
    }
   },
+  "/api/v1/hops/{hop}/tails/{db}/drain": {
+   "post": {
+    "operationId": "drain",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "hop",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "db",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "additionalProperties": false,
+        "properties": {
+         "go": {
+          "type": "boolean"
+         },
+         "to": {
+          "type": "string"
+         }
+        },
+        "type": "object"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "properties": {
+          "action": {
+           "type": "string"
+          },
+          "argv": {
+           "items": {
+            "type": "string"
+           },
+           "type": "array"
+          },
+          "by": {
+           "type": "string"
+          },
+          "exit": {
+           "type": [
+            "integer",
+            "null"
+           ]
+          },
+          "hop": {
+           "type": "string"
+          },
+          "id": {
+           "type": "string"
+          },
+          "run": {
+           "type": "string"
+          },
+          "state": {
+           "enum": [
+            "queued",
+            "running",
+            "ended",
+            "lost"
+           ],
+           "type": "string"
+          }
+         },
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "drain a running change tail to a position and hold it there - a run of the drain action; a dry run without go",
+    "tags": [
+     "hops"
+    ],
+    "x-migkit-role": "operator"
+   }
+  },
   "/api/v1/hops/{hop}/tails/{db}/hold": {
    "post": {
     "operationId": "hold",

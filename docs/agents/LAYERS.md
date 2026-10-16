@@ -26,7 +26,11 @@ A package imports its own rank and the ranks below it, never one above. A rank o
 
 Outside the rule: `tools` (the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them); `data` (the files migkit ships as resources).
 
-## Upward imports still listed: 380
+## Upward imports still listed: 381
+
+### (not listed)
+
+- `migkit/anchor.py:452` persistence -> decision (`decide`)
 
 ### a brand's confidence is a rung (`decide.brand_confidence`) the configuration reads once the server's signs are in; the rung moves below configuration
 
@@ -375,7 +379,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### a report asks an engine (`engines`) for a name or a fact; the engine contract moves below reporting
 
 - `migkit/export.py:97` reporting -> engines (`engines`)
-- `migkit/report.py:839` reporting -> engines (`engines`)
+- `migkit/report.py:872` reporting -> engines (`engines`)
 - `migkit/telemetry.py:146` reporting -> engines (`engines`)
 - `migkit/troubleshooting.py:62` reporting -> engines (`engines`)
 
@@ -405,7 +409,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### a report reads `movers` for the state of the running workflow; the state moves below reporting
 
 - `migkit/export.py:129` reporting -> workflows (`movers`)
-- `migkit/report.py:838` reporting -> workflows (`movers`)
+- `migkit/report.py:871` reporting -> workflows (`movers`)
 
 ### a report reads `physical` for the state of the running workflow; the state moves below reporting
 
@@ -422,11 +426,11 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### a report states what the decision engine (`capabilities`) chose; the choice is handed down as a fact
 
 - `migkit/diagnostics.py:107` reporting -> decision (`capabilities`)
-- `migkit/report.py:838` reporting -> decision (`capabilities`)
+- `migkit/report.py:871` reporting -> decision (`capabilities`)
 
 ### a report states what the decision engine (`decide`) chose; the choice is handed down as a fact
 
-- `migkit/report.py:838` reporting -> decision (`decide`)
+- `migkit/report.py:871` reporting -> decision (`decide`)
 - `migkit/telemetry.py:180` reporting -> decision (`decide`)
 
 ### a report states what the decision engine (`faults`) chose; the choice is handed down as a fact
@@ -439,11 +443,11 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a report states what the decision engine (`sizing`) chose; the choice is handed down as a fact
 
-- `migkit/report.py:874` reporting -> decision (`sizing`)
+- `migkit/report.py:907` reporting -> decision (`sizing`)
 
 ### a report states what the decision engine (`waysaid`) chose; the choice is handed down as a fact
 
-- `migkit/report.py:838` reporting -> decision (`waysaid`)
+- `migkit/report.py:871` reporting -> decision (`waysaid`)
 
 ### a report states what the decision engine (`workload`) chose; the choice is handed down as a fact
 
@@ -931,7 +935,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### persistence reaches `tooluse` (integrations); the shared piece moves below both, or the call is inverted
 
-- `migkit/anchor.py:664` persistence -> integrations (`tooluse`)
+- `migkit/anchor.py:712` persistence -> integrations (`tooluse`)
 - `migkit/shared.py:512` persistence -> integrations (`tooluse`)
 
 ### reporting reaches `cli` (cli); the shared piece moves below both, or the call is inverted

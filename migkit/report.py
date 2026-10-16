@@ -563,15 +563,48 @@ def write_back(hop, sid, status, seconds, proof, rows=None, unit=None):
     return step
 
 
-def step_ended(hop, db, phase, status, seconds, proof, rows=None):
+#: the phases a run passes through, in the order it ends them: written
+#: into the sheet as the run opens, so that each has a step to write back to
+RUN_PHASES = ("schema", "copy", "index", "check")
+#: and the phases of a run that follows its source on, to the cutover
+FOLLOW_PHASES = ("catch-up", "cutover")
+
+
+def open_sheet(hop, dbs, follows=False):
+    """The sheet a run writes back to as each phase ends: a step for every
+    phase of `RUN_PHASES` (and `FOLLOW_PHASES` where the run follows on)
+    that `dbs` has none for, with empty times - a phase the plan did not
+    estimate keeps none, never a figure made up. A step an exported plan
+    already holds is left as it is, with its times. Returns the ids
+    added."""
+    have = {(s.get("db"), s.get("phase")) for s in read_change_sheet(hop)}
+    want = RUN_PHASES + (FOLLOW_PHASES if follows else ())
+    steps = []
+    for d in dbs:
+        steps += change_sheet(hop, d, [{"name": p} for p in want
+                                       if (d, p) not in have])
+    if steps:
+        write_change_sheet(hop, steps)
+    return [s["id"] for s in steps]
+
+
+def step_ended(hop, db, phase, status, seconds, proof, rows=None,
+               create=False):
     """A run's phase of `db` ended at its boundary: every step of the
-    hop's change sheet that is that phase (`copy`, `index`, `catch-up`,
-    `check`, `cutover`) gets the evidence written back (`write_back`).
+    hop's change sheet that is that phase (`schema`, `copy`, `index`,
+    `catch-up`, `check`, `cutover`, `repair`) gets the evidence written
+    back (`write_back`).
     A step with a table takes no seconds of its own - the phase's time
     is not split by guess - and says so in its proof. Nothing where the
-    hop keeps no sheet or the sheet has no such step; a step already
-    done is left as it is. Returns the ids written."""
+    hop keeps no sheet or the sheet has no such step (with `create`, a
+    sheet the hop keeps gets the step, as a phase the plan did not
+    hold); a step already done is left as it is. Returns the ids
+    written."""
     out = []
+    if create and read_change_sheet(hop) and not any(
+            s.get("db") == db and s.get("phase") == phase
+            for s in read_change_sheet(hop)):
+        write_change_sheet(hop, change_sheet(hop, db, [{"name": phase}]))
     for s in read_change_sheet(hop):
         if s.get("db") != db or s.get("phase") != phase \
                 or s.get("status") == "done":

@@ -82,6 +82,7 @@
       <td>{% if d.tail and d.tail.running and may.operator %}
         {% if d.tail.paused %}<button data-post="{{ api }}/tails/{{ d.db|urlencode }}/resume">Let it go on</button>
         {% else %}<button data-post="{{ api }}/tails/{{ d.db|urlencode }}/hold" data-confirm="Hold the change tail of {{ d.db }} between batches?">Hold</button>{% endif %}
+        <button data-post="{{ api }}/tails/{{ d.db|urlencode }}/drain" data-body='{"to": "now"}' data-confirm="Show what draining the change tail of {{ d.db }} to now would do? Nothing is held until it is run with go.">Drain</button>
         <button data-post="{{ api }}/tails/{{ d.db|urlencode }}/stop" data-confirm="End the change tail of {{ d.db }} at its next batch?">End</button>
       {% endif %}</td></tr>
     {% else %}

@@ -5375,3 +5375,26 @@ def mssql_follow_way(facts, costs=None):
              because="neither capture nor tracking is on; the log names"
                      " every row change as it commits")),
         f, costs=costs or None, prove=False)
+
+
+def anchor_interval(rate, put_seconds, span):
+    """(entries, said) between two anchors of the audit record, taken from
+    what was measured of it: `rate` entries a second over `span` seconds
+    of the record, and the seconds one anchor took to put (`put_seconds`).
+    Anchoring more often leaves less of the record unanchored but spends
+    more of the run on puts; the sum of the two over a run of `span`
+    seconds is least when the stretch left unanchored is
+    sqrt(2 x put x span) seconds (the interval a checkpoint is taken at
+    when its cost and the run's length are known), and that stretch at
+    the measured rate is the number of entries. Where nothing was
+    measured - no rate yet, no anchor put yet - every entry is anchored:
+    the interval is never longer than what is known to be safe."""
+    if not rate or rate <= 0 or not put_seconds or put_seconds <= 0 \
+            or not span or span <= 0:
+        return 1, ("every entry: the record's rate or the time an anchor"
+                   " takes has not been measured yet")
+    stretch = (2 * put_seconds * span) ** 0.5
+    n = max(1, int(round(rate * stretch)))
+    return n, (f"every {n} entries: {rate:.3g} entries a second over"
+               f" {span:.0f}s, an anchor taking {put_seconds:.3g}s, so"
+               f" about {stretch:.3g}s of the record is left unanchored")

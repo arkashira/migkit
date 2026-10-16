@@ -72,6 +72,10 @@ def _changelog(hop, entry, eng=None):
     # entry changed afterwards shows (`migkit.audit`)
     from . import audit
     audit.append(hop.report_dir() / "changelog.jsonl", entry)
+    # and held in the bucket every `anchor.interval` entries, not only at
+    # the end of a run (R5.anchor)
+    from . import anchor
+    anchor.keep_up(hop, lambda m: console.print(f"  {_esc(m)}"))
 
 
 class _Checkpoint(dict):
@@ -1123,13 +1127,14 @@ def _doctor_side(name, hop, eng, side, ep):
         # (`sizing.capacity`), on every engine that says
         e, key = _looking_at(eng, hop, "source" if side == "src"
                              else "target")
-        replica = sizing.capacity(e, key, one if side == "src"
-                                  else hop.target_db(one) if one
-                                  and key == "src" else one).get("replica")
+        cap = sizing.capacity(e, key, one if side == "src"
+                              else hop.target_db(one) if one
+                              and key == "src" else one)
+        replica = cap.get("replica")
         role = {True: " [red]READER/read-only[/red]",
                 False: " [dim]writer[/dim]"}.get(replica, "")
         out.append(f"{_esc(name)} {side}: [green]ok[/green]"
-                   f" ({_esc(ep.host)}, {note}){role}")
+                   f" ({_esc(ep.host)}, {note}{_capacity_said(cap)}){role}")
         said, rtt = _link_said(eng, side, one,
                                "source" if side == "src" else "target")
         if said:
@@ -1151,6 +1156,64 @@ def _doctor_side(name, hop, eng, side, ep):
         if grant:
             out.append(f"  the user needs {_esc(grant)}")
         return out, None, False, True
+
+
+def _capacity_said(cap):
+    """The numbers a server said of itself that a verdict stands on, as
+    the end of its `ok` line: connections free and in use, CPUs."""
+    parts = []
+    if cap.get("free_connections") is not None:
+        parts.append(f"{cap['free_connections']} connections free")
+    if cap.get("running") is not None:
+        parts.append(f"{cap['running']} running")
+    if cap.get("cpus"):
+        parts.append(f"{cap['cpus']} CPUs")
+    return "; " + ", ".join(parts) if parts else ""
+
+
+def _connections_said(hop, dbs):
+    """A line for each side connection a run of the hop holds, with its
+    state, from what the run keeps (R21.9): the change stream (running and
+    how far behind, stopped on an error, or not running), the second
+    reader (installed here or not) and the fence read back from each
+    side. A connection that is not held is said as not held, never
+    left out."""
+    from . import freeze, second_reader, tailctl
+    out = []
+    for d in dbs:
+        st = tailctl.state(hop.report_dir(d))
+        if st is None:
+            out.append(f"{d}: change stream: not running, none stopped on"
+                       " an error")
+        elif st["stopped"] is not None:
+            out.append(f"{d}: change stream: STOPPED on an error -"
+                       f" {_clean(st['stopped'], raw=True)[:140]}")
+        elif not st["running"]:
+            out.append(f"{d}: change stream: marked but its holder is gone"
+                       " - not running")
+        else:
+            nums = [f"{st['behind']:.1f}s behind the source's log"
+                    if st["behind"] is not None else None,
+                    f"{st['changes']} changes carried"
+                    if st["changes"] is not None else None,
+                    f"last beat {st['beat_age']:.1f}s ago"
+                    if st["beat_age"] is not None else None]
+            out.append(f"{d}: change stream: "
+                       + ("paused" if st["paused"] else "running")
+                       + ", " + ", ".join(x for x in nums if x))
+        for side, word in (("src", "source"), ("dst", "target")):
+            try:
+                rec = freeze.state(hop, d, side)
+            except (OSError, SystemExit):
+                rec = None
+            out.append(f"{d}: fence read back from the {word}: "
+                       + (f"held on {rec.get('way') or 'a way not named'}"
+                          f" since {rec.get('since') or '?'}" if rec
+                          else "no hold recorded"))
+    where = second_reader.interpreter()
+    out.append("second reader: " + ("installed, its own interpreter found"
+                                     if where else "not installed here"))
+    return out
 
 
 def _doctor_hop(name, hop, raw_hop):
@@ -1222,6 +1285,9 @@ def _doctor_hop(name, hop, raw_hop):
             pass
     for line in _rungs_said(hop, eng, reached):
         out.append(f"{_esc(name)}: {_esc(line)}")
+    for line in _connections_said(hop, hop.databases or []):
+        out.append(f"{_esc(name)} [yellow]connections[/yellow]:"
+                   f" {_esc(line)}")
     for line in _numbers_said(hop, eng, reached):
         out.append(f"{_esc(name)} [yellow]numbers[/yellow]: {_esc(line)}")
     for d in (hop.databases or []):
@@ -2650,8 +2716,14 @@ def _repair_one(hop, eng, db, kind, do_apply, state=None):
                       f" {upto} of {planned}: {_esc(repairlog.said(path))}"
                       "[/yellow]")
     paused = _make_room_for_rows(hop, eng, db, actions) if do_apply else []
+    began = time.monotonic()
     try:
         _apply_actions(hop, eng, db, actions, do_apply, undo_dir, state)
+        if do_apply:
+            _sheet_ended(hop, db, "repair", "done", time.monotonic() - began,
+                         f"{len(actions)} repair actions were applied, with"
+                         " their undo kept; check again to prove them",
+                         create=True)
     finally:
         for what in paused:
             eng.resume_writer(db, what)
@@ -3506,15 +3578,28 @@ def _record_run(hop, eng, d, via, rows, began, spent, narrowed=()):
 
 
 
-def _sheet_ended(hop, d, phase, status, took, proof, rows=None):
+def _sheet_ended(hop, d, phase, status, took, proof, rows=None,
+                 create=False):
     """A phase's end written back to the change sheet; a sheet that cannot
     be written is said, with what to do, and never stops the run."""
     try:
         return _words.step_ended(hop, d, phase, status, took, proof,
-                                 rows=rows)
+                                 rows=rows, create=create)
     except (OSError, SystemExit, ValueError) as e:
         _sheet_not_written(hop, e)
         return []
+
+
+def _open_sheet(hop, eng, db, mode):
+    """The change sheet a run writes back to, opened as the run begins
+    (`report.open_sheet`): a step for every phase it will end, so that
+    each is written the moment it ends and none waits for an export. A
+    sheet that cannot be opened is said and never stops the run."""
+    try:
+        dbs = [db] if db else list(hop.databases or eng.databases())
+        _words.open_sheet(hop, dbs, follows=mode in ("cdc", "full+cdc"))
+    except (OSError, SystemExit, ValueError) as e:
+        _sheet_not_written(hop, e)
 
 
 def _sheet_not_written(hop, e):
@@ -4225,7 +4310,12 @@ def _move_full(hop, eng, db, table, chunk, go):
             # empty target, the move stopped on `relation ... does not
             # exist`, where the bulk paths create what is missing
             if not table:
+                schema_began = time.monotonic()
                 eng.create_missing(d, lambda m: console.print(f"  {m}"))
+                _sheet_ended(hop, d, "schema", "done",
+                             time.monotonic() - schema_began,
+                             "the tables the target lacked were made; the"
+                             " check proves their shape")
             if share:
                 # the hop is held for the setup only; from here each table
                 # is held on its own, by whichever machine takes it
@@ -5454,6 +5544,8 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
                  mode=mode, drop=do_drop,
                  step="cutover" if do_drop else None, approve=[db],
                  preflight=mode, db=db)
+    if go:
+        _open_sheet(hop, eng, db, mode)
     if not go:
         from . import upgrade
         if upgrade.settings(hop) is not None and mode != "cdc":

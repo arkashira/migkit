@@ -445,6 +445,54 @@ def checkpoint(hop, say=None, s3=None):
     return _settled(hop, conf, out, None, say, path, wanted)
 
 
+def interval(hop):
+    """(entries between anchors, why) of this hop's record: the rung on
+    the entry rate and the measured time of an anchor
+    (`decide.anchor_interval`)."""
+    from . import decide
+    path = Path(hop.report_dir()) / "changelog.jsonl"
+    try:
+        lines = [x for x in path.read_text().splitlines() if x.strip()]
+        first = datetime.strptime(json.loads(lines[0])["at"],
+                                  "%Y-%m-%d %H:%M:%S")
+        last = datetime.strptime(json.loads(lines[-1])["at"],
+                                 "%Y-%m-%d %H:%M:%S")
+    except (OSError, ValueError, KeyError, IndexError):
+        return decide.anchor_interval(None, None, None)
+    span = (last - first).total_seconds()
+    return decide.anchor_interval(len(lines) / span if span > 0 else None,
+                                  _read(hop).get("put_seconds"), span)
+
+
+def keep_up(hop, say=None, s3=None):
+    """Called as the record grows: the head anchored once `interval`
+    entries have been added since the last anchor, so that a run that
+    never ends well still has its record held. None where the hop names
+    no anchor or none is due; else what `checkpoint` returned. The
+    seconds the anchor took are kept for the next interval."""
+    from . import durable
+    if settings(hop) is None:
+        return None
+    path = Path(hop.report_dir()) / "changelog.jsonl"
+    try:
+        entries = sum(1 for x in path.read_text().splitlines() if x.strip())
+    except OSError:
+        return None
+    done = (_read(hop).get("anchored") or {}).get("seq") or 0
+    every, _ = interval(hop)
+    if entries - done < every:
+        return None
+    began = time.monotonic()
+    got = checkpoint(hop, say, s3)
+    took = time.monotonic() - began
+    try:
+        durable.change_json(_state_path(hop), lambda doc: doc.update(
+            put_seconds=round(took, 4)), kind="cache")
+    except OSError:
+        pass
+    return got
+
+
 def _hashes(path):
     from . import audit
     return audit.hashes(path)

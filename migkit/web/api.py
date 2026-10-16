@@ -138,6 +138,13 @@ ROUTES = (
     Route("POST", "/hops/<hop>/tails/<db>/hold", "hold",
           "hold a change tail between batches, its position saved",
           need="operator", recorded=True),
+    Route("POST", "/hops/<hop>/tails/<db>/drain", "drain",
+          "drain a running change tail to a position and hold it there - a"
+          " run of the drain action; a dry run without go",
+          need="operator", recorded=True, answer=_RUN, body={
+              "type": "object", "properties": {
+                  "to": _S, "go": {"type": "boolean"}},
+              "additionalProperties": False}),
     Route("POST", "/hops/<hop>/tails/<db>/resume", "resume",
           "let a held change tail go on", need="operator", recorded=True),
     Route("POST", "/hops/<hop>/tails/<db>/stop", "tail_stop",
@@ -429,6 +436,19 @@ def hold(ctx, db):
 HOLD_WAIT = 20.0
 
 
+def drain(ctx, db):
+    """The `drain` action on a running follow: the same run the command
+    line's `migkit drain` is, with its guards. Refused where no tail of
+    this database runs - there is nothing to drain."""
+    from .. import tailctl
+    where = _tail(ctx, db)
+    if not tailctl.alive(where):
+        raise Answer(409, "no change tail runs for this database")
+    params = {"db": db, "to": str(ctx.body.get("to") or "now"),
+              "go": bool(ctx.body.get("go"))}
+    return _start(ctx, "drain", params)
+
+
 def resume(ctx, db):
     from .. import tailctl
     where = _tail(ctx, db)
@@ -523,7 +543,8 @@ HANDLERS = {"me": me, "hops": hops, "hop": hop, "validation": validation,
             "evidence_file": evidence_file,
             "evidence_run_file": evidence_run_file,
             "decisions": decisions, "notifications": notifications,
-            "notify_test": notify_test, "hold": hold, "resume": resume,
+            "notify_test": notify_test, "hold": hold, "drain": drain,
+            "resume": resume,
             "tail_stop": tail_stop, "tokens": tokens,
             "token_new": token_new, "token_revoke": token_revoke,
             "people": people, "sessions": sessions, "record": record,
