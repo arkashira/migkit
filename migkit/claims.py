@@ -422,7 +422,7 @@ def copy(pair, db, key, src_t, k, ck, lo, hi, edges, log, fn, item,
     term = ha.term()
     table = Table(store, path(hop, db, key), me, term)
     rec = table.plan(key, lo, hi,
-                     lambda: [list(r) for r in ranges.split(lo, hi, edges())])
+                     lambda: ranges.layout(lo, hi, edges()))
     _index(hop, db, store, key)
     # the table's entry is the record's until one machine finishes it: an
     # entry this machine saved would be written over another's

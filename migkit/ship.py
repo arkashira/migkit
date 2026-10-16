@@ -908,9 +908,14 @@ def _plan_table(w, src_t):
             entry["because"]["cut"] = "the table holds no rows"
         else:
             lo, hi = int(got[0][0]), int(got[0][1])
-            edges = [r[0] for r in src.run_rule("src", db, ranges.bounds_sql(
-                src._quote_ident, table, k, per, src_where))]
-            entry["ranges"] = [list(r) for r in ranges.split(lo, hi, edges)]
+            # the statistics where they hold, else a sample, else the key
+            # in order (`ranges.cut`)
+            edges = ranges.cut(
+                lambda sql: src.run_rule("src", db, sql),
+                ranges.kind_of(src), src._quote_ident, table, k,
+                rows if rows is not None else hi - lo + 1, per,
+                where=src_where, into=entry, log=w.log, label=src_t)
+            entry["ranges"] = ranges.layout(lo, hi, edges)
     fmt = decide.climb(f"the format of {src_t}'s parts", FORMATS,
                        _format_facts(w, src_t, entry))
     entry["format"] = fmt.path

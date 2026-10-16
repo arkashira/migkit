@@ -1,5 +1,6 @@
 import json
 import re
+import threading
 import time
 
 from .. import pieces
@@ -11,6 +12,18 @@ SKIP_DBS = {"admin", "local", "config"}
 # Target documents per comparison range. Ranges keep the memory
 # cost proportional to the range rather than to the collection.
 DRILL_RANGE_DOCS = 200_000
+
+
+def _dumps_key(value):
+    """An `_id` as a copy's checkpoint keeps it: its canonical extended
+    JSON, which reads back as the same BSON type and value."""
+    from bson import json_util
+    return json_util.dumps(value, json_options=json_util.CANONICAL_JSON_OPTIONS)
+
+
+def _loads_key(text):
+    from bson import json_util
+    return json_util.loads(text)
 
 
 def _bound_kind(bound):
@@ -645,7 +658,7 @@ class MongoEngine(Engine):
         """The collections the hop masks on the way (`mask_on_write`),
         which this engine's copier cannot (`move_table`)."""
         from ..movers import mask_rules
-        return set(mask_rules(self.hop, db))
+        return set(mask_rules(self.hop, db, self.neutral_tables("src", db)))
 
 
     def row_query(self, db, table):
@@ -1063,8 +1076,10 @@ class MongoEngine(Engine):
         dst = target[there]
         # only the documents the hop's row filter takes, if it has one
         rows = self._rows_of(db, name)
-        after = json_util.loads(st["last"]) if "last" in st else None
-        started_here = after is None
+        # a copy begun by one stream past the last `_id` goes on that way;
+        # any other copies the collection as ranges of `_id` side by side
+        streamed = "last" in st and "ranges" not in st
+        started_here = "last" not in st and "ranges" not in st
         if started_here:
             st["made"] = there not in target.list_collection_names()
             # what the target already holds is not this copy's
@@ -1085,14 +1100,9 @@ class MongoEngine(Engine):
                           .limit(1)), None) for o in (1, -1)]
         one_type = all(ends) and type(ends[0]["_id"]) is \
             type(ends[1]["_id"])
-        while True:
-            flt = {} if after is None else (
-                {"_id": {"$gt": after}} if one_type else
-                {"$expr": {"$gt": ["$_id", {"$literal": after}]}})
-            docs = self._docs_until(src, self._within(flt, rows), None,
-                                    batch, raw=True)
-            if not docs:
-                break
+        lock = threading.Lock()
+
+        def write(docs):
             try:
                 # into a collection this copy emptied: new documents,
                 # nothing to replace - except after a stop, where the batch
@@ -1105,18 +1115,131 @@ class MongoEngine(Engine):
                 dst.bulk_write([ReplaceOne({"_id": d["_id"]}, d,
                                            upsert=True) for d in docs],
                                ordered=False)
-            moved += len(docs)
-            after = docs[-1]["_id"]
-            st["moved"] = moved
-            st["last"] = json_util.dumps(after)
-            ck.save()
+
+        def counted(n):
+            nonlocal moved
+            with lock:
+                moved += n
+                st["moved"] = moved
             log(progress(key, moved, total, began, time.monotonic(),
                          unit="documents", since=from_docs))
+
+        if streamed:
+            after = json_util.loads(st["last"])
+            while True:
+                docs = self._docs_until(src, self._within(
+                    self._past(after, one_type), rows), None, batch,
+                    raw=True)
+                if not docs:
+                    break
+                write(docs)
+                after = docs[-1]["_id"]
+                st["last"] = json_util.dumps(after)
+                counted(len(docs))
+                ck.save()
+        else:
+            from .. import ranges
+            slots = ranges.active
+            n = total if total is not None else src.count_documents(
+                rows or {})
+
+            def edges():
+                every = ranges.step(n, chunk, slots.workers)
+                if int(n or 0) <= every:
+                    return []
+                return self._move_edges(src, rows, n, every, st, log, key)
+            todo = ranges.plan_keyed(st, edges, ck.save, table=key)
+            seen = st.get("ranges_seen") or {}
+
+            def one(rng):
+                lo, hi = (None if e is None else _loads_key(e) for e in rng)
+                bound = self._within(self._span(lo, hi, one_type), rows)
+                if ranges.ident(rng[0]) in seen:
+                    # begun before a stop: what it wrote then is taken out
+                    # and the range copied whole again
+                    dst.delete_many(self._span(lo, hi, one_type))
+                ranges.started(st, rng[0], None, ck.save)
+                got, after = 0, lo
+                while True:
+                    docs = self._docs_until(src, self._within(
+                        self._past(after, one_type), bound), None, batch,
+                        raw=True)
+                    if not docs:
+                        break
+                    write(docs)
+                    after = docs[-1]["_id"]
+                    got += len(docs)
+                    counted(len(docs))
+                ranges.finished(st, rng[0], ck.save, rows=got)
+                return got
+            if len(todo) > 1 or len(st["ranges"]) > 1:
+                log(f"{key}: {len(todo):,} of {len(st['ranges']):,} ranges"
+                    f" of _id to copy, up to {slots.workers} at a time")
+            slots.each(todo, one)
         if st.get("made"):
             for index_name, keys, spec in self._index_specs(src):
                 dst.create_index(keys, name=index_name, **spec)
         st["done"] = True
         ck.save()
+
+    @staticmethod
+    def _past(after, one_type):
+        """The documents after `after` in `_id` order: a plain `$gt` within
+        one BSON type, which takes the index; across types through `$expr`,
+        which orders across types as the sort does."""
+        if after is None:
+            return {}
+        if one_type:
+            return {"_id": {"$gt": after}}
+        return {"$expr": {"$gt": ["$_id", {"$literal": after}]}}
+
+    @classmethod
+    def _span(cls, lo, hi, one_type):
+        """One range `(lo, hi]` of `_id`, an open end no bound."""
+        parts = [] if lo is None else [cls._past(lo, one_type)]
+        if hi is not None:
+            parts.append({"_id": {"$lte": hi}} if one_type else
+                         {"$expr": {"$lte": ["$_id", {"$literal": hi}]}})
+        return parts[0] if len(parts) == 1 else (
+            {"$and": parts} if parts else {})
+
+    def _move_edges(self, src, rows, n, every, st, log, label):
+        """The `_id` edges a copy cuts a collection by, through the one place
+        edges are chosen (`ranges.cut_with`): the server's equal-count
+        buckets of `_id` read now (`$bucketAuto`), else a sample of the live
+        `_id`s (`$sample`), else every `every`-th `_id` in order. Each edge is
+        kept as its canonical extended JSON, so an `_id` of any BSON type
+        comes back as the value it was."""
+        from .. import ranges
+        need = -(-int(n) // every)
+        match = [{"$match": rows}] if rows else []
+
+        def stats():
+            out = list(src.aggregate(match + [{"$bucketAuto": {
+                "groupBy": "$_id", "buckets": need}}], allowDiskUse=True))
+            total = sum(int(b.get("count") or 0) for b in out)
+            seen, points = 0, []
+            for b in out:
+                seen += int(b.get("count") or 0)
+                points.append((_dumps_key(b["_id"]["max"]), seen / total))
+            return ranges.Stats(points, modified=0, touched=False) \
+                if total else None
+
+        def sample():
+            return [_dumps_key(d["_id"]) for d in src.aggregate(
+                match + [{"$sample": {"size": need * ranges.SAMPLE_PER_RANGE}},
+                         {"$project": {"_id": 1}}, {"$sort": {"_id": 1}}],
+                allowDiskUse=True)]
+
+        def order():
+            out = []
+            for i, d in enumerate(src.find(rows or {}, {"_id": 1})
+                                  .sort("_id", 1)):
+                if i and i % every == 0:
+                    out.append(_dumps_key(d["_id"]))
+            return out
+        return ranges.cut_with(n, every, order, read=stats, sample=sample,
+                               into=st, log=log, label=label)
 
     def moved_nothing(self, db):
         """Collections the source has documents in and the target has none.
