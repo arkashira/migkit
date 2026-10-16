@@ -407,6 +407,9 @@ class _Conn:
     def __init__(self, rows=()):
         self.rows, self.done = list(rows), []
 
+    def ping(self, reconnect=False):
+        pass  # the load pings its connection before each try, as a driver's does
+
     def cursor(self, *a):
         conn = self
 
