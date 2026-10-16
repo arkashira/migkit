@@ -243,8 +243,11 @@ def replay(entries, lines):
     for e in lines:
         st = entries.setdefault(e["k"], {})
         if "seen" in e:
+            # named as `ranges.started` named it, so a text key, a
+            # composite or the open first end is found again after a reload
+            from . import ranges
             after, mark = e["seen"]
-            st.setdefault("ranges_seen", {})[str(after)] = mark
+            st.setdefault("ranges_seen", {})[ranges.ident(after)] = mark
         if "done" in e:
             have = st.setdefault("ranges_done", [])
             got = done.get(e["k"])

@@ -72,9 +72,8 @@ def test_a_filtered_range_resumed_deletes_only_what_the_filter_takes(
     src.db("shop").add("orders", DOCS)
     _stop_in_the_second_range(eng, tmp_path, monkeypatch, write_first=True)
     st = _entry(_Checkpoint(tmp_path / "move.json"))
-    # read back from the journal, the begin is named by its text, and
-    # still read as the range's
-    assert str(st["ranges"][1][0]) in st["ranges_seen"]
+    # read back from the journal, the begin is named as it was written
+    assert ranges.ident(st["ranges"][1][0]) in st["ranges_seen"]
     assert ranges.ident(st["ranges"][1][0]) in ranges.begun_ranges(st)
     assert 250 in _ids(dst)
     # meanwhile the source lost one the stopped range wrote, and another
@@ -100,7 +99,7 @@ def _taken_over(tmp_path, monkeypatch, host):
     st = _entry(ck)
     second = st["ranges"][1][0]
     st["ranges_seen"] = {k: v for k, v in st["ranges_seen"].items()
-                         if k not in (str(second), ranges.ident(second))}
+                         if k != ranges.ident(second)}
     st["copying"] = {"host": host, "pid": 4242}
     ck.save()
     dst.db("shop").colls["orders"].docs += [
@@ -137,9 +136,9 @@ def test_what_counts_as_begun():
     st = {"ranges": [[None, 10], [10, 20], [20, None]],
           "ranges_done": [None], "ranges_seen": {"null": None, "10": 7}}
     seen = {"null", "10"}
-    # a begin the journal gave back by its text is the range's ident
-    assert ranges.begun_ranges({**st, "ranges_seen": {"None": None}}) == \
-        {"None", "null"}
+    # the journal gives a begin back by its ident, never by its text
+    assert ranges.begun_ranges({**st, "ranges_seen": {"null": None}}) == \
+        {"null"}
     # this machine's own record of what began is exact
     assert ranges.begun_ranges(st) == seen
     assert ranges.begun_ranges(st, {"host": here, "pid": 1}) == seen

@@ -744,13 +744,10 @@ def begun_ranges(st, was=None, gone=()):
     `lease.taken_from`) - every range not done. A taker reads the entry
     from the machines' store, which trails the departed mover by its last
     push: a range begun after it holds documents on the target and is not
-    in `ranges_seen`. A begin the checkpoint's journal gave back
-    (`checkpoint.read_move`, which names it by its text) is the range's
-    `ident` here."""
+    in `ranges_seen`, which the checkpoint's journal gives back named by
+    `ident` as `started` wrote it."""
     import socket
-    have = set((st.get("ranges_seen") or {}).keys())
-    seen = have | {ident(r[0]) for r in st.get("ranges") or ()
-                   if str(r[0]) in have}
+    seen = set((st.get("ranges_seen") or {}).keys())
     if not isinstance(was, dict) or not was.get("host"):
         return seen
     who = f"{was['host']}:{was.get('pid')}"
