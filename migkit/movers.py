@@ -4794,6 +4794,11 @@ def mydumper_move(hop, db, workers, go, log, only=None):
                 raise SystemExit(f"{db}: the tables masked on the way are not"
                                  " what the hop's transforms make them: "
                                  + "; ".join(wrong[:6]))
+        # each table the copy's own checksum found equal on both sides is
+        # done: a stop here leaves it loaded and unrecorded, emptied and
+        # loaded again by the next run (no unit is recorded done before)
+        for _ in sorted(t for t, (a, b) in sums.items() if a == b):
+            failpoint.hit("table.done")
         if skip:
             _my_orphans_left(hop, db, log)
         # the position the copy is a snapshot at, for a replica that follows
@@ -4806,6 +4811,9 @@ def mydumper_move(hop, db, workers, go, log, only=None):
                   else _shell_position(shell_reader))
             if at:
                 (root / "dump-position.json").write_text(json.dumps(at))
+        # the copy's position written, its resume record not yet cleared:
+        # a stop here is the next run's to go on from or load again
+        failpoint.hit("checkpoint.written")
         if resumable:
             _shell_resume_record(hop, db).unlink(missing_ok=True)
             (root / "straight-copy.progress").unlink(missing_ok=True)
@@ -6272,11 +6280,19 @@ def pgcopydb_move(hop, db, workers, go, log):
             finally:
                 _overlap_evidence(hop, db, beside, progress, indexes, ended)
             took = time.monotonic() - began
+    # each table the copy's catalogue has done, the copy's program ended:
+    # a stop here leaves no program writing, and the next run goes on from
+    # the catalogue - a table found done there is done again, not copied
+    for _ in sorted(progress.seen) or sorted(carried or ()):
+        failpoint.hit("table.done")
     if how == "local":
         # a resumed copy's time is not the whole copy's, so only a copy
         # from the start is a rate
         if not resume:
             _record_copy(hop, work, split.way, took, carried)
+        # the copy's record kept, its catalogue not yet cleared: a stop
+        # here is gone on from by the next run, every table found done
+        failpoint.hit("checkpoint.written")
         # finished: nothing to go on from next time
         import shutil
         shutil.rmtree(work, ignore_errors=True)
@@ -9042,6 +9058,26 @@ def _forecast_said(hop, db, eta=None):
     return f"forecast: no band yet - {eta.operator_line()}"
 
 
+def _bulk_progress(hop, db, workers, took):
+    """`progress.json` of a finished bulk move (`planner.progress`): the
+    rows the source's catalogue holds in scope, the time the way took and
+    the workers it ran with, for `watch`, the metrics and the next plan.
+    Kept without it where the source cannot be listed, said nowhere."""
+    from . import planner, sizing
+    try:
+        from .engines import get_engine
+        eng = get_engine(hop)
+        facts = eng.table_facts("src", db) or {}
+        rows = sum(int((f or {}).get("rows") or 0) for t, f in facts.items()
+                   if eng.in_scope(db, t))
+        n = max(1, int(workers or 1))
+        pace = sizing.Pace(n, n)
+        pace.total, pace.started = float(rows), pace._clock() - took
+        planner.progress(hop.report_dir(db), pace, rows, done=True)
+    except Exception:  # noqa: BLE001 - the move's result stands without it
+        pass
+
+
 def run_via(via, hop, db, workers, go, log):
     """The bulk path `via` over database `db`: the steps it says, and with
     `go` what it ran - its programs run through the runner (`runner`),
@@ -9129,7 +9165,10 @@ def run_via(via, hop, db, workers, go, log):
                 # stopped by a service manager or `kill`: taken as ctrl-c,
                 # so the programs this run started are stopped with it
                 stack.enter_context(runner.stopping())
+            began = time.monotonic()
             got = fns[via](hop, db, workers, go, log)
+            if go:
+                _bulk_progress(hop, db, workers, time.monotonic() - began)
     except Exception as e:
         from .decide import operational
         if trial and operational(e):

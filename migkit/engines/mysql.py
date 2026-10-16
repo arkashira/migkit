@@ -4988,6 +4988,41 @@ class MySQLEngine(Engine):
         want = 2 * largest + self.PACKET_MARGIN
         return min(-(-want // mib) * mib, self.PACKET_CEILING)
 
+    def writes_in_pieces(self, db, table):
+        """(whether `table`'s rows go to the copier that writes a value in
+        pieces, `Choice` or None) - the target's `max_allowed_packet` read
+        off it against the table's widest row's large columns read to the
+        end on the source (`_row_sizes`: a file under the bound stands for
+        every row), within `lob_scan_seconds` for the database, asked once
+        a database a run (`decide.written_in_pieces`). A table without a
+        large column is bounded by its declared widths: sent whole."""
+        from .. import decide
+        known = self.__dict__.setdefault("_pieces_of", {})
+        if db not in known:
+            try:
+                packet = int(self._q(
+                    "dst", "select @@global.max_allowed_packet")[0][0])
+            except Exception:  # noqa: BLE001 - not read: in pieces
+                packet = None
+            sizes = None
+            if packet:
+                try:
+                    sizes = {str(t): (k, n) for t, k, n in self._row_sizes(
+                        db, (packet - self.PACKET_MARGIN) / 2,
+                        time.monotonic() + float(self.hop.options.get(
+                            "lob_scan_seconds", 60)))}
+                except Exception:  # noqa: BLE001 - not read: in pieces
+                    sizes = None
+            known[db] = (packet, sizes)
+        packet, sizes = known[db]
+        name = str(table).rsplit(".", 1)[-1]
+        if sizes is not None and name not in sizes:
+            return False, None
+        kind, n = (sizes or {}).get(name, ("unknown", None))
+        return decide.written_in_pieces({
+            "packet": packet, "widest": n, "margin": self.PACKET_MARGIN,
+            "exact": kind in ("measured", "bounded")})
+
     def _packet_items(self):
         """Does the largest row on the source fit the target's
         `max_allowed_packet`.
@@ -5037,12 +5072,19 @@ class MySQLEngine(Engine):
                      and 2 * n + self.PACKET_MARGIN > limit]
             said = ", ".join(f"{t} {n:,} bytes"
                              for n, t in (over or tight)[:4])
+            # a table whose widest row the target cannot take in one
+            # statement goes to the copier that writes it in pieces
+            # (`writes_in_pieces`): carried whole, more slowly
+            carried = all(self.writes_in_pieces(db, t)[0] for _, t in over)
             if over:
-                add("fail", f"{said}: larger than the target's"
-                            f" max_allowed_packet of {limit:,}, and the"
-                            " copy stops on such a row with a lost"
-                            " connection - "
-                            + how.format(self._packet_to_set(largest)))
+                add("warn" if carried else "fail",
+                    f"{said}: larger than the target's max_allowed_packet"
+                    f" of {limit:,}"
+                    + (", so the copy writes their values in pieces, more"
+                       " slowly than a load - " if carried else
+                       ", and the copy stops on such a row with a lost"
+                       " connection - ")
+                    + how.format(self._packet_to_set(largest)))
             elif tight:
                 add("warn", f"{said}: within the target's"
                             f" max_allowed_packet of {limit:,}, but a"
@@ -9336,7 +9378,7 @@ class MySQLEngine(Engine):
         Way("rows", "the table copier's rows", short="the table copier's rows",
             gives=frozenset({"row filter", "resume by chunk", "keyless",
                              "large values", "resume by key",
-                             "masked on the way"}),
+                             "masked on the way", "written in pieces"}),
             needs=(Need("a move not asked to copy straight across",
                         lambda f: not f["straight_only"],
                         "the move is asked to copy straight across"),),

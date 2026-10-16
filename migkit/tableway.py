@@ -395,6 +395,11 @@ def _needs(eng, db, name, masked=False, begun=False):
         need.append("row filter")
     if begun:
         need.append("resume by chunk")
+    # a row the target cannot take in one statement, from its measured
+    # packet and the widest row read to the end (`decide.written_in_pieces`)
+    pieces = getattr(eng, "writes_in_pieces", None)
+    if pieces is not None and pieces(db, name)[0]:
+        need.append("written in pieces")
     return tuple(need)
 
 

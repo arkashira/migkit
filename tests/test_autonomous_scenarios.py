@@ -171,11 +171,6 @@ def _minimal(conf):
 #: run that waits on itself fails its case instead of holding the harness
 #: (the slowest whole case measured took under a minute)
 HANG = 600
-CUT = ("W16N-CUT: the run is not cut where MIGKIT_FAILPOINT says: the copy"
-       " goes by the bulk way, which passes no range.committed, table.done"
-       " or checkpoint.written point, so the first run ends whole (MySQL:"
-       " 0 of 3 runs cut on either engine, the copy then whole; the crash"
-       " case fails at the same step)")
 DEFECTS = ("W16N-DEFECTS: the copy before the defects are injected does not"
            " complete when the source also holds a sequence, a role and its"
            " grant. PostgreSQL: the structural schema check (engines/"
@@ -185,11 +180,19 @@ DEFECTS = ("W16N-DEFECTS: the copy before the defects are injected does not"
            " exact call not yet traced. MySQL: the proof ends 'w9c is"
            " different after its repair' (the differing finding not read)")
 LOB_MYSQL = ("W16N-LOB: on MySQL the 8 MiB value does not arrive whole on a"
-             " target holding a 4 MiB packet (the run exits non-zero in 23 s)")
+             " target holding a 4 MiB packet: the readiness check now passes"
+             " it to the copier that writes in pieces (decide."
+             "written_in_pieces), but the move step stops - 'copy stopped:"
+             " nothing past the last finished table is marked as moved' -"
+             " the table not yet carried by that copier (movers.py's table"
+             " split, step: move)")
 
 _LEFT = re.compile(r"~([\d.,]+)\s*(s|min|h)\b[^;\n]*\bleft")
 _BAND = re.compile(r"([\d.,]+)\s*(?:-|to)\s*([\d.,]+)\s*(s|min|h)\b[^;\n]*"
                    r"\bleft")
+#: the move's own first line: its median and 90th percentile
+_P50 = re.compile(r"forecast: p50 ([\d.,]+)\s*(s|min|h) - p90 ([\d.,]+)"
+                  r"\s*(s|min|h)\b")
 _UNIT = {"s": 1, "min": 60, "h": 3600}
 
 
@@ -245,7 +248,11 @@ def _forecast(run):
             if at > q * took:
                 break
             b, m = _BAND.search(line), _LEFT.search(line)
-            if b:
+            p = _P50.search(line)
+            if p:
+                mid, hi = _secs(p[1], p[2]), _secs(p[3], p[4])
+                said = (at, mid, (hi - mid) / mid if mid else None)
+            elif b:
                 lo, hi = _secs(b[1], b[3]), _secs(b[2], b[3])
                 mid = (lo + hi) / 2
                 said = (at, mid, (hi - lo) / 2 / mid if mid else None)
@@ -401,11 +408,10 @@ def test_a_fault_mid_copy_is_recovered_inside_the_run(side, tmp_path):
     assert m["recovered"] in (None, 1.0)
 
 
-@pytest.mark.xfail(strict=True, reason=CUT)
 def test_a_crash_mid_copy_completes_on_the_next_run(side, tmp_path):
     conf = _conf(tmp_path, side)
     side.seed()
-    runs = [_run(conf, side, *GO, MIGKIT_FAILPOINT="range.committed:1:exit")]
+    runs = [_run(conf, side, *GO, MIGKIT_FAILPOINT="table.done:1:exit")]
     assert runs[0]["r"].returncode != 0
     assert "proved equal" not in runs[0]["r"].stdout
     runs.append(_run(conf, side, *GO))
@@ -414,11 +420,11 @@ def test_a_crash_mid_copy_completes_on_the_next_run(side, tmp_path):
     assert m["completed"] and m["interventions"] == 1
 
 
-@pytest.mark.xfail(strict=True, reason=CUT)
 def test_three_interruptions_end_where_a_straight_run_does(side, tmp_path):
-    """Cut at three phases - a range committed, a table done, a checkpoint
-    written - and run again each time: the same digest and the same units
-    as one straight run, no unit finished twice."""
+    """Cut where every way of the copy passes - a table confirmed done,
+    its checkpoint written, and a table again on the run that goes on from
+    both - and run again each time: the same digest and the same units as
+    one straight run, no unit finished twice."""
     straight, cut = tmp_path / "straight", tmp_path / "cut"
     straight.mkdir()
     cut.mkdir()
@@ -430,8 +436,8 @@ def test_three_interruptions_end_where_a_straight_run_does(side, tmp_path):
     conf = _conf(cut, side)
     side.seed()
     runs = [_run(conf, side, *GO, MIGKIT_FAILPOINT=f"{point}:1:exit")
-            for point in ("range.committed", "table.done",
-                          "checkpoint.written")]
+            for point in ("table.done", "checkpoint.written",
+                          "table.done")]
     runs.append(_run(conf, side, *GO))
     m = _measure("interrupted three times", conf, runs, side,
                  cut_short=sum(r["r"].returncode != 0 for r in runs[:-1]))

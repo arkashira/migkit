@@ -5044,3 +5044,51 @@ def oracle_reader_rungs():
                          " redo and name it (redo_reader: host:port)"),),
              because="in every edition, on a managed database, with"
                      " nothing installed"))
+
+
+# ---- whether a table's rows are written in pieces (W16N-LOB) --------------
+
+WORDS["written in pieces"] = ("a value too large for one statement on the"
+                              " target is written in pieces, which {rung}"
+                              " does not do")
+
+
+def written_in_pieces(facts):
+    """(whether a table goes to the copier that writes a value too large
+    for one statement in pieces, `Choice`). `facts`: {"packet": the
+    target's max_allowed_packet as read off it, "widest": the table's
+    widest row's large columns in bytes, "exact": whether that is every
+    row's maximum read to the end or a bound no row can pass - never a
+    sample, which bounds nothing - and "margin": what the rest of a
+    statement takes}. A loader escapes a binary value, which can double
+    it, so a row past half the packet is not sent whole either. Where the
+    packet or the widest row is not known the copier that writes in
+    pieces is taken: it carries a value of any size."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    margin = int(f.get("margin") or 0)
+
+    def fits(x):
+        return (x.get("widest") is not None and bool(x.get("packet"))
+                and 2 * int(x["widest"]) + margin <= int(x["packet"]))
+    said = (f"the target's packet {int(f.get('packet') or 0):,} bytes; the"
+            " widest row's large columns "
+            + (f"{int(f.get('widest')):,} bytes" if f.get("widest")
+               is not None else "not known"))
+    got = climb("how a table's widest row reaches the target", (
+        Rung("whole", "every row sent whole, one statement a batch",
+             because=said, needs=(
+                 Need("the target's packet read",
+                      lambda x: bool(x.get("packet")),
+                      "the target's max_allowed_packet could not be read"),
+                 Need("the widest row read to the end",
+                      lambda x: bool(x.get("exact"))
+                      and x.get("widest") is not None,
+                      "the widest row was not read to the end within the"
+                      " scan's time, and a sample bounds nothing"),
+                 Need("the widest row within the packet once escaped", fits,
+                      lambda x: f"its widest row, {int(x['widest']):,}"
+                      " bytes, may double once escaped, past the target's"
+                      f" max_allowed_packet of {int(x['packet']):,}"))),
+        Rung("pieces", "a value too large for one statement written in"
+             " pieces, inside its row's transaction", because=said)), f)
+    return got.path == "pieces", got
