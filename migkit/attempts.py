@@ -29,6 +29,7 @@ import os
 import sys
 import threading
 import time
+import weakref
 from dataclasses import asdict, dataclass, field
 
 COMPUTING = "computing"
@@ -327,6 +328,31 @@ def work_unit(eng, kind, name, level="table", parent="", parts=None):
     return fn(kind, name, level, parent, parts)
 
 
+#: every ledger this process holds, so a stop reads the longest statement
+#: measured anywhere in the run (`slowest_statement`) without a second store
+_HELD = weakref.WeakSet()
+
+
+def slowest_statement():
+    """(seconds, operation) of the longest statement that ended well in any
+    ledger this process holds, earlier runs' kept waits included; (0.0,
+    None) where none was measured. Read from a signal's handler, so it
+    takes no lock a thread it interrupted may hold: a copy torn by a
+    concurrent write is read again."""
+    best, op = 0.0, None
+    for _ in range(3):
+        try:
+            for led in list(_HELD):
+                for name, waits in list(led.durations.items()):
+                    top = max((float(w) for w in list(waits)), default=0.0)
+                    if top > best:
+                        best, op = top, name
+            return best, op
+        except RuntimeError:  # changed size while read: read it again
+            best, op = 0.0, None
+    return best, op
+
+
 class Ledger:
     """The attempts of one run's units and the waits each operation took,
     kept in one file (`durable`) so a restart reads what was measured and
@@ -346,6 +372,7 @@ class Ledger:
         #: where the ledger was read from: the file, its last good
         #: snapshot beside it (`.bak`) where the file was torn, or nothing
         self.read_from = None
+        _HELD.add(self)
         if path:
             got = self._read(path)
             if isinstance(got, dict):

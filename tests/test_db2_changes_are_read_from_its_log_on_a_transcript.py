@@ -9,7 +9,7 @@ them in the order a real read makes them. What is proved is migkit's side
 of it: the rows handed on, the choice of how by each table's own logging
 setting, the refusal where the client is not installed, and a reader
 stopped mid-batch that starts again from its saved position handing
-nothing twice. Built, unproved on a real server (`db2_log.UNPROVED_ON`).
+nothing twice. Built, unproved on a real server (`db2.UNPROVED_ON`, `tail.follows`).
 """
 import struct
 from decimal import Decimal

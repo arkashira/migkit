@@ -508,7 +508,7 @@ def servers_of(key):
     if key not in PROFILES:
         raise KeyError(f"no server profile {key!r}: one of"
                        f" {', '.join(sorted(PROFILES))}")
-    if key in _RUNNING and key not in _BROKEN:
+    if key in _RUNNING and key not in _BROKEN and _alive(_RUNNING[key]):
         _LAST[key] = time.monotonic()
         return _RUNNING[key]
     stop(key)
@@ -529,6 +529,23 @@ def servers_of(key):
     return _RUNNING[key]
 
 
+def _alive(got):
+    """Whether every container of a profile started here still runs: one
+    removed under the session (an earlier module's teardown, a run on the
+    same lane) is started afresh, never handed out as if it were there."""
+    names = [s.container for s in got if getattr(s, "container", None)]
+    if not names:
+        return True
+    out = docker("inspect", "-f", "{{.State.Running}}", *names)
+    return out.returncode == 0 and out.stdout.split() == ["true"] * len(
+        names)
+
+
+#: the process that started this lane's servers: a child forked from it
+#: inherits the exit hook, and must not remove what it did not start
+_OWNER = os.getpid()
+
+
 def stop(key):
     got = _RUNNING.pop(key, None)
     _BROKEN.discard(key)
@@ -537,6 +554,8 @@ def stop(key):
 
 
 def stop_all():
+    if os.getpid() != _OWNER:
+        return
     for key in list(_RUNNING):
         stop(key)
     if _NETWORKS:

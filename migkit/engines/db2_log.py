@@ -33,9 +33,6 @@ import os
 import struct
 from decimal import Decimal
 
-#: what a run of it owes: no Db2 server runs here (`db2.UNPROVED_ON`)
-UNPROVED_ON = "built; not run on a real Db2 LUW server"
-
 #: the position is read off the log, never written to it
 CHANGE_POINT_READS_ONLY = True
 

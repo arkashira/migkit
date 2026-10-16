@@ -41,9 +41,6 @@ from_its_log_and_its_backups.py`.
 import struct
 from decimal import Decimal
 
-#: what a run of it owes: the sandbox's build is not the server's own
-UNPROVED_ON = "built; not run on a real SQL Server"
-
 CHANGE_POINT_READS_ONLY = True
 
 ROWS = ("LOP_INSERT_ROWS", "LOP_DELETE_ROWS", "LOP_MODIFY_ROW",

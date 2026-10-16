@@ -644,8 +644,12 @@ def _arm_stop_bound():
             sys.stderr.flush()
             os._exit(130)
         return
+    from . import attempts
+    slow, _ = attempts.slowest_statement()
+    stopped, _ = runner.stop_took()
     secs, why = decide.stop_grace({"programs": runner.running(),
-                                   "grace": runner.GRACE})
+                                   "grace": runner.GRACE,
+                                   "stopped": stopped, "slowest": slow})
     _STOP_BOUND["armed"] = time.monotonic() + secs
     over = _STOP_BOUND["over"] = threading.Event()
 
@@ -653,7 +657,7 @@ def _arm_stop_bound():
         if over.wait(secs):
             return
         sys.stderr.write(f"the stop's cleanup did not end in {secs:.0f}s"
-                         f" ({why.path}): ended now; what was saved is"
+                         f" ({why.reason}): ended now; what was saved is"
                          " kept and the next run reconciles the rest\n")
         sys.stderr.flush()
         os._exit(130)

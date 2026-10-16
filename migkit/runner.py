@@ -333,8 +333,21 @@ _TERM = {"depth": 0, "before": None}
 #: told of every stop taken as ctrl-c, before it is raised: the command's
 #: bound on its cleanup is armed here (`cli._term_as_interrupt`)
 ON_STOP = []
-#: what one program's stop is given before it is made to end (`stop`)
+#: what one program's stop is given before it is made to end (`stop`), and
+#: the floor of a stopped command's bound (`decide.stop_grace`)
 GRACE = 15
+#: seconds the last stop of each program took (`Proc.stop`), by program
+STOPS = {}
+
+
+def stop_took():
+    """(seconds, program) of the longest last stop of any program this
+    process stopped; (0.0, None) where none was."""
+    got = list(STOPS.items())
+    if not got:
+        return 0.0, None
+    name, secs = max(got, key=lambda kv: kv[1])
+    return secs, name
 
 
 def _as_interrupt(signum, frame):
@@ -426,7 +439,15 @@ class Proc:
     def stop(self, grace=GRACE):
         """Ask the program's whole group to end, then make it: SIGTERM,
         `grace` seconds, SIGKILL. A container is removed as well - its
-        client's end does not end it."""
+        client's end does not end it. The time it took is kept as the
+        program's last stop (`STOPS`)."""
+        began = time.monotonic()
+        try:
+            self._stop(grace)
+        finally:
+            STOPS[self.program] = round(time.monotonic() - began, 3)
+
+    def _stop(self, grace):
         if self.container:
             _remove_container(self.container)
         _signal_group(self.popen, signal.SIGTERM)

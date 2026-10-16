@@ -135,3 +135,88 @@ def test_a_cleanup_that_ends_takes_the_bound_off():
     assert not [t for t in threading.enumerate() if t.name == "stop-bound"
                 and t.is_alive()]
     assert cli._arm_stop_bound not in runner.ON_STOP
+
+
+def _armed(monkeypatch):
+    """The facts `cli._arm_stop_bound` hands the rung and what it decided,
+    the bound taken off again at once."""
+    from migkit import cli
+    seen = {}
+    real = decide.stop_grace
+
+    def told(facts):
+        seen["facts"] = dict(facts)
+        seen["secs"], seen["why"] = real(facts)
+        return seen["secs"], seen["why"]
+    monkeypatch.setattr(decide, "stop_grace", told)
+    try:
+        cli._arm_stop_bound()
+    finally:
+        if cli._STOP_BOUND["over"] is not None:
+            cli._STOP_BOUND["over"].set()
+        cli._STOP_BOUND["armed"] = cli._STOP_BOUND["over"] = None
+    return seen
+
+
+def test_the_bound_is_twice_the_slowest_statement_measured(monkeypatch):
+    """CRIT17 1: a statement the run's ledger measured at 9 s, slower than
+    half the floor, gives the stop 18 s, and the decision says so."""
+    import weakref
+    from migkit import attempts
+    monkeypatch.setattr(attempts, "_HELD", weakref.WeakSet())
+    monkeypatch.setattr(runner, "STOPS", {})
+    monkeypatch.setattr(runner, "GRACE", 15)
+    led = attempts.Ledger()
+    led.measured("read a range", 2.5)
+    led.measured("read a range", 9.0)
+    assert attempts.slowest_statement() == (9.0, "read a range")
+    seen = _armed(monkeypatch)
+    assert seen["facts"]["slowest"] == 9.0
+    assert seen["secs"] == 18
+    assert seen["why"].path == "statement"
+    assert "bound 18s from the slowest statement 9.0s" in seen["why"].reason
+    assert "slowest" in seen["why"].asked
+
+
+def test_nothing_measured_leaves_the_floor(monkeypatch):
+    import weakref
+    from migkit import attempts
+    monkeypatch.setattr(attempts, "_HELD", weakref.WeakSet())
+    monkeypatch.setattr(runner, "STOPS", {})
+    monkeypatch.setattr(runner, "GRACE", 15)
+    attempts.Ledger()   # a ledger with no statement ended in it
+    assert attempts.slowest_statement() == (0.0, None)
+    seen = _armed(monkeypatch)
+    assert seen["facts"]["slowest"] == 0 and seen["facts"]["stopped"] == 0
+    assert seen["secs"] == 15
+    assert "bound 15s from the 15s floor" in seen["why"].reason
+    assert "no statement measured" in seen["why"].reason
+
+
+def test_a_programs_measured_stop_raises_the_grace(monkeypatch):
+    """A program that ignores SIGTERM is stopped by its ladder; the time
+    that stop took is kept (`runner.STOPS`) and a later stop's bound is
+    raised to it where it passes the floor."""
+    monkeypatch.setattr(runner, "STOPS", {})
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import signal, time;"
+         " signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+         " print('up', flush=True); time.sleep(60)"],
+        stdout=subprocess.PIPE, text=True, start_new_session=True)
+    proc = runner.Proc(child, [sys.executable], "stubborn")
+    try:
+        assert child.stdout.readline().strip() == "up"
+        proc.stop(grace=1.2)
+    finally:
+        child.kill()
+        child.wait()
+    took, name = runner.stop_took()
+    assert name == "stubborn" and took >= 1.2
+    secs, why = decide.stop_grace({"programs": 1, "grace": 1,
+                                   "stopped": took, "slowest": 0})
+    assert why.path == "programs" and secs == 2 * took
+    assert f"a program's last stop measured {took:.1f}s" in why.reason
+    # under the floor the floor holds, the measured stop said beside it
+    secs, why = decide.stop_grace({"programs": 1, "grace": 15,
+                                   "stopped": took})
+    assert secs == 30 and "floor" in why.reason

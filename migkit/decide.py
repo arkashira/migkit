@@ -4533,29 +4533,47 @@ def mongo_change_images(facts):
 def stop_grace(facts):
     """(seconds a command's cleanup is given after SIGTERM before it ends
     as a crash would, `Choice`). A stop runs every `finally`: the
-    programs migkit started are asked to end and given the runner's grace
+    programs migkit started are asked to end and given a program's stop
     twice over (its SIGTERM, then its SIGKILL); with none running, the one
-    statement in flight is given that grace once to answer its cancel. A
+    statement in flight is given that stop once to answer its cancel. A
+    statement measured slower than either is given twice its own time. A
     cleanup still waiting past it waits on something that will not end:
     what a crash leaves, every checkpoint written only after its effect,
     the next run reconciles. `facts`: {"programs": programs running now,
-    "grace": the runner's grace for one program's stop, "slowest": the
-    longest one statement has taken here, where measured}."""
+    "grace": the runner's grace for one program's stop - the floor,
+    "stopped": the longest the last stop of a program took here, where
+    measured, "slowest": the longest one statement has taken here, where
+    measured}. The reason names the bound and the fact it came from."""
     f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
-    grace = max(1.0, float(f.get("grace") or 1.0))
+    floor = max(1.0, float(f.get("grace") or 1.0))
+    stopped = max(0.0, float(f.get("stopped") or 0.0))
+    grace = max(floor, stopped)
     slow = max(0.0, float(f.get("slowest") or 0.0))
-    said = (f"{int(f.get('programs') or 0)} programs running; a program's"
-            f" stop is given {grace:.0f}s; the slowest statement took"
-            f" {slow:.1f}s")
+    stop_from = (f"a program's last stop measured {stopped:.1f}s"
+                 if stopped > floor else
+                 f"the {floor:.0f}s floor of a program's stop"
+                 + (f" (its last stop measured {stopped:.1f}s)"
+                    if stopped else ", no stop measured"))
+    slow_said = (f"the slowest statement {slow:.1f}s" if slow
+                 else "no statement measured")
+
+    def bound(each):
+        if 2 * slow > each:
+            return 2 * slow, (f"bound {2 * slow:.0f}s from {slow_said}"
+                              f" (twice its time; {stop_from})")
+        return each, f"bound {each:.0f}s from {stop_from} ({slow_said})"
+    many, many_said = bound(2 * grace)
+    one, one_said = bound(grace)
+    running = int(f.get("programs") or 0)
     got = climb("how long a stopped command's cleanup is given", (
         Rung("programs", "the programs it started stopped by their own"
              " ladder, SIGTERM then SIGKILL", needs=(Need(
                  "a program running", lambda x: (x.get("programs") or 0) > 0,
-                 "no program is running"),), because=said),
+                 f"no program is running; {one_said}"),),
+             because=f"{running} programs running; {many_said}"),
         Rung("statement", "the statement in flight given its cancel",
-             because=said)), f)
-    secs = 2 * grace if got.path == "programs" else grace
-    return max(secs, 2 * slow), got
+             because=f"no program is running; {one_said}")), f)
+    return (many if got.path == "programs" else one), got
 
 def ase_bulk_way(facts):
     """How one table of an SAP ASE pair is carried: by the server itself,

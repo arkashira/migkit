@@ -9,7 +9,7 @@ the same reader. The log backups' way is replayed: restored in order onto
 a server migkit owns, a backup already restored read again and not
 restored twice, and a chain with a gap refused. The way is the decision's
 (`decide.mssql_log_way`) from what the server says. Built, unproved on a
-real SQL Server (`mssql_log.UNPROVED_ON`).
+real SQL Server (`mssql.UNPROVED_ON`).
 """
 import struct
 import subprocess

@@ -311,3 +311,33 @@ def test_an_engine_with_no_sandbox_says_which_server_it_was_not_run_on():
             " UNPROVED_ON in their module: "
             + ", ".join(f"{n} ({len(v)})" for n, v in sorted(owed.items())),
             stacklevel=1)
+
+
+def _said_on_with_no_items(root):
+    """The modules under `root` that declare `UNPROVED_ON` and list no
+    `UNPROVED_ITEMS`: a reason with no cells, which nothing reads."""
+    from pathlib import Path
+    out = []
+    for path in sorted(Path(root).rglob("*.py")):
+        on, items = caps._module_declares(path)
+        if on and not items:
+            out.append(str(path.relative_to(root)))
+    return out
+
+
+def test_a_module_that_says_unproved_lists_its_whole_set():
+    """CRIT17 4: `UNPROVED_ON` is half a declaration - a module that gives
+    the reason lists the cells it is the reason for (`UNPROVED_ITEMS`), or
+    gives neither and leaves the cells to the engine module that owns them."""
+    from pathlib import Path
+    assert _said_on_with_no_items(Path(caps.__file__).resolve().parent) == []
+
+
+def test_a_reason_with_no_cells_is_caught(tmp_path):
+    (tmp_path / "said.py").write_text(
+        'UNPROVED_ON = "built; not run on a real Example server"\n')
+    (tmp_path / "whole.py").write_text(
+        'UNPROVED_ON = "built; not run on a real Example server"\n'
+        'UNPROVED_ITEMS = "scope.deep"\n')
+    (tmp_path / "none.py").write_text("X = 1\n")
+    assert _said_on_with_no_items(tmp_path) == ["said.py"]
