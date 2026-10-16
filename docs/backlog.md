@@ -6110,9 +6110,11 @@ the gaps nothing above covers yet, now items of their own.
   under a row locked for update) hold the number and refuse a stopped
   mover's write themselves, proved on their lanes; ClickHouse keeps the
   highest number in a replacing row read whole - a weaker hold, this
-  process judges, said where chosen; Kafka's producer-epoch way is built
-  and refused on the sandbox's broker (no transactional producer there):
-  built, unproved on a real broker. The way and its placement (in the
+  process judges, said where chosen; Kafka's producer-epoch way is proved
+  on the sandbox broker (W19H, row 524: a standby takes the lease over,
+  the old mover's next send is fenced by the broker, no record of it in a
+  committed read after the fence; a broker with transactions off is
+  refused with the reason, on fakes). The way and its placement (in the
   target's database, beside it, or refused with the grant) are
   `decide.fence_way`/`fence_place` rungs. The bulk paths of
   mongodb/redis/kafka/cassandra/clickhouse/oracle hold before each batch

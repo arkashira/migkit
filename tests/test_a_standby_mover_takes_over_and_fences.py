@@ -7,16 +7,33 @@ keeps, per range, the highest number any claim raised it to - refusing a
 write under a lower one, as `fencing.hold` makes a real target do. The
 lease, the claims and the takeover are migkit's own; the clock is the
 test's.
+
+On the Kafka broker of the sandbox (`FENCE.kafka-epoch`): a standby takes
+the lease over and starts its producer under the same transactional id, the
+broker's epoch for the id moves, the old mover's next send is fenced by the
+broker itself, and a read of only what was committed holds no record of the
+old one after the fence. On a cluster without a server: a broker that takes
+no transactional producer gets no producer-epoch hold - the standby is
+refused with the reason, not trusted on a hold the broker would not keep.
 """
+import json
 import os
 import socket
 import threading
 
 import pytest
 
-from migkit import attempts, claims, fleet
+from migkit import attempts, claims, decide, engines, fencing, fleet
 from migkit import lease as L
+from migkit.config import Hop
 from migkit.state import Taken
+from tests import kafka_fake, servers
+from tests.conftest import needs_docker
+
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("operations.fencing", ("kafka",))]
+
+kafka = servers.fixture("kafka")
 
 SPANS = [[0, 100], [100, 200], [200, 300], [300, 400]]
 TABLE = "db.t"
@@ -231,3 +248,172 @@ def test_what_the_ledger_left_open_is_read_and_settled_by_the_record():
     assert acct.done == [0, 100] and not acct.taken_back
     said = " ".join(acct.lines(TABLE))
     assert "done in the machines' record" in said and "names no range" in said
+
+
+# ---- Kafka: the broker's producer epoch (FENCE.kafka-epoch) ----------------
+
+def _kafka(space, name):
+    hop = Hop(name=name, engine="kafka", source=space.src.endpoint(),
+              target=space.dst.endpoint(), databases=[space.name])
+    return engines.get_engine(hop)
+
+
+def _committed(eng, topic):
+    """(offset, key, value) of every record a committed-only read finds in
+    partition 0 of `topic`, to the end the broker says is stable."""
+    from kafka import TopicPartition
+    c = eng._consumer("dst", isolation_level="read_committed",
+                      consumer_timeout_ms=3000)
+    try:
+        tp = TopicPartition(topic, 0)
+        c.assign([tp])
+        c.seek_to_beginning(tp)
+        end = c.end_offsets([tp])[tp]
+        got, empty = [], 0
+        while c.position(tp) < end:
+            polled = c.poll(timeout_ms=2000)
+            empty = 0 if polled else empty + 1
+            assert empty <= 5, f"{topic} could not be read to its end"
+            for batch in polled.values():
+                got.extend((m.offset, m.key, m.value) for m in batch)
+        return got
+    finally:
+        c.close()
+
+
+@needs_docker
+def test_a_standby_takes_the_lease_and_the_old_movers_next_send_is_fenced(
+        tmp_path, clock, kafka):
+    eng = _kafka(kafka, "w19h-standby")
+    db, store = eng.CLUSTER, Store()
+    lease_at = tmp_path / "lease.json"
+    assert fencing.prove(eng, "dst", db) is None
+    got = fencing.way(eng, "dst", db)
+    assert got.choice.path == "producer-epoch" and got.target_refuses
+    row = f"{eng.hop.name}#t"
+    a_lease = _held(lease_at, store)
+    assert a_lease.fence == 1
+    old = fencing.Token(row, a_lease.fence, a_lease.me, "store")
+    try:
+        assert fencing.raise_once(eng, "dst", db, old) == 1
+        fencing.arm(eng.hop, old)
+        fencing.hold(eng, "dst", db, None)      # the mover writes, twice
+        fencing.hold(eng, "dst", db, None)
+        fencing.disarm(eng.hop)
+        # the mover stops answering; the standby takes the lease over
+        clock.now += 11
+        b_lease = _held(lease_at, store)
+        assert b_lease.fence == 2 and b_lease.took_over["holder"] == a_lease.me
+        new = fencing.Token(row, b_lease.fence, b_lease.me, "store")
+        assert fencing.raise_once(eng, "dst", db, new) == 2
+        stable = _committed(eng, fencing.OWN)
+        # the old mover wakes and writes: the broker refuses its producer
+        fencing.arm(eng.hop, old)
+        with pytest.raises(fencing.Fenced) as refused:
+            fencing.hold(eng, "dst", db, None)
+        assert "the broker fenced this producer" in str(refused.value)
+        fencing.disarm(eng.hop)
+        # nothing of the refused write is in the stable log
+        assert _committed(eng, fencing.OWN) == stable
+        # a lower number raised again does not take the row back
+        assert fencing.raise_to(eng, "dst", db, old)[0] == 2
+        assert fencing.read(eng, "dst", db, row)[0] == 2
+        # the standby, armed, still writes
+        fencing.arm(eng.hop, new)
+        fencing.hold(eng, "dst", db, None)
+    finally:
+        fencing.disarm(eng.hop)
+        fencing.forget(eng)
+    log = [(off, json.loads(val)) for off, key, val in
+           _committed(eng, fencing.OWN) if key == row.encode()]
+    taken = next(i for i, (_, v) in enumerate(log) if v["n"] == 2)
+    assert all(v["n"] == 1 for _, v in log[:taken]) and taken >= 3
+    after = log[taken:]
+    assert after and all(v["n"] == 2 and v["by"] == b_lease.me
+                         for _, v in after), after
+    assert not any(v["by"] == a_lease.me for _, v in after)
+
+
+@needs_docker
+def test_the_broker_fences_the_old_producer_on_its_next_send(kafka):
+    from kafka.admin import NewTopic
+    from kafka.errors import InvalidProducerEpochError, ProducerFencedError
+    eng = _kafka(kafka, "w19h-direct")
+    topic = f"{kafka.name}.epoch"
+    admin = eng._admin("dst")
+    try:
+        admin.create_topics([NewTopic(topic, num_partitions=1,
+                                      replication_factor=1)])
+    finally:
+        admin.close()
+    tid = f"{fencing.OWN}:{kafka.name}:direct"
+    old, new = eng._producer(transactional_id=tid), None
+    try:
+        old.init_transactions()
+        old.begin_transaction()
+        old.send(topic, key=b"k", value=b"old-1").get(15)
+        old.commit_transaction()
+        new = eng._producer(transactional_id=tid)
+        new.init_transactions()                 # the epoch for the id moves
+        with pytest.raises((ProducerFencedError,
+                            InvalidProducerEpochError)) as fenced:
+            old.begin_transaction()
+            old.send(topic, key=b"k", value=b"old-2").get(15)
+            old.commit_transaction()
+        assert isinstance(fenced.value, ProducerFencedError), fenced.value
+        new.begin_transaction()
+        new.send(topic, key=b"k", value=b"new-1").get(15)
+        new.commit_transaction()
+    finally:
+        for p in (old, new):
+            try:
+                p and p.close()
+            except Exception:  # noqa: BLE001 - it is going anyway
+                pass
+    assert [v for _, _, v in _committed(eng, topic)] == [b"old-1", b"new-1"]
+
+
+def _kafka_without_server(monkeypatch, transactions):
+    """A cluster in memory whose broker takes a transactional producer or
+    answers that it cannot start one."""
+    kafka_fake.install(monkeypatch)
+    cluster = kafka_fake.Cluster("dst")
+    eng = kafka_fake.engine(kafka_fake.Cluster("src"), cluster)
+    make = eng._producer
+
+    def producer(**kw):
+        got = make(**kw)
+        if not transactions and kw.get("transactional_id"):
+            def refused():
+                raise RuntimeError("the transaction coordinator is not"
+                                   " available")
+            got.init_transactions = refused
+        return got
+    eng._producer = producer
+    return eng
+
+
+def test_a_broker_that_takes_a_transactional_producer_gets_the_epoch_hold(
+        monkeypatch):
+    eng = _kafka_without_server(monkeypatch, True)
+    facts = eng.fence_facts("dst", eng.CLUSTER)
+    assert facts["transactions"] is True and facts["create_in"]
+    chosen = decide.fence_way(facts)
+    assert chosen.path == "producer-epoch"
+    got = fencing.way(eng, "dst", eng.CLUSTER)
+    assert isinstance(got, fencing.Way) and got.choice.path == "producer-epoch"
+    fencing.forget(eng)
+
+
+def test_a_broker_that_takes_no_transactional_producer_refuses_the_standby(
+        monkeypatch):
+    eng = _kafka_without_server(monkeypatch, False)
+    facts = eng.fence_facts("dst", eng.CLUSTER)
+    assert facts["transactions"] is False
+    chosen = decide.fence_way(facts)
+    assert chosen.rung is None
+    assert "the broker takes no transactional producer" in chosen.reason
+    why = fencing.prove(eng, "dst", eng.CLUSTER)
+    assert why and "no way to hold a number" in why
+    assert "allow its transactional id" in why
+    fencing.forget(eng)
