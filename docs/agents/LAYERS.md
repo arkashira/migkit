@@ -451,7 +451,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a rung or plan reads `consolidate` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
-- `migkit/scenarios.py:1331` decision -> workflows (`consolidate`)
+- `migkit/scenarios.py:1333` decision -> workflows (`consolidate`)
 
 ### a rung or plan reads `cutover` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
@@ -501,7 +501,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a rung or plan reads `tableengine` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
-- `migkit/scenarios.py:1246` decision -> workflows (`tableengine`)
+- `migkit/scenarios.py:1248` decision -> workflows (`tableengine`)
 
 ### a rung or plan reads `topicstates` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
@@ -606,7 +606,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### a wrapper reports through `movers`, the workflow that drives it; the shared piece moves below both
 
 - `migkit/redisshake.py:520` integrations -> workflows (`movers`)
-- `migkit/ship.py:2610` integrations -> workflows (`movers`)
+- `migkit/ship.py:2612` integrations -> workflows (`movers`)
 - `migkit/tooluse.py:47` integrations -> workflows (`movers`)
 
 ### a wrapper reports through `physical`, the workflow that drives it; the shared piece moves below both

@@ -1174,7 +1174,7 @@ class SpannerEngine(DigestsInSQL, _Folded, NeutralCopier, Engine):
                         because="every table as of one moment, no row read"
                                 " by migkit"),
             decide.Rung("tables", "the tables by the table copier")),
-            run, decide.Facts(unfit=unfit), log=log,
+            run, decide.Facts({"unfit": unfit}), log=log,
             switch=decide.only_blocked)
         return steps
 

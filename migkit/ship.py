@@ -2239,8 +2239,10 @@ class _Loader:
               " the source over the link")
         spool = carriers.LocalStore(w.spool / "relinked",
                                     "this machine's spool")
-        carrier = carriers.Carrier(decide.Rung("spool", "the spool"), spool,
-                                   carriers.Limits(), "read again")
+        # the spool is not chosen among carriers: a part read again has
+        # no other place to go, so no rung stands for it
+        carrier = carriers.Carrier(None, spool, carriers.Limits(),
+                                   "read again")
         ex = _Exporter(w, carrier, evidence.recipients_of(w.hop))
         ex.state = _State(w.dir / "seed-relink.json")
         again = json.loads(json.dumps(entry, default=str))

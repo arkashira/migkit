@@ -3,9 +3,9 @@ path, the architecture change, a shard split or merge, the topologies of
 many nodes and the copy way by storage - each reached on the branches it
 has through the case itself, on fakes (backlog
 AUD-Z.rungs-outside-owed): a way the facts allow is held, one they do not
-is refused with its own reason. `topology-unknown` is a blocker built as
-a rung whose need never holds: it is proved refused here, and its held
-branch stays owed as the defect it is."""
+is refused with its own reason. `topology-unknown`, the kind decided
+before its ladder, is proved refused here and held in
+`tests/test_the_rung_defects_are_fixed.py`."""
 
 from migkit import decide, scenarios
 from tests.rung_branches import HOLDS, REFUSES, branch, watched, why

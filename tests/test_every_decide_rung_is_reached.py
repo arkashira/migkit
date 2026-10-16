@@ -53,30 +53,7 @@ OWED = {}
 #: (module, ladder, rung) built outside decide.py -> the test module that
 #: should reach it on every branch it has; owned by backlog row
 #: AUD-Z.rungs-outside-owed. It only shrinks.
-OWED_OUTSIDE = {
-    # defect (W21A): its one need, 'its programs as installed now',
-    # reads a dict `_bulk_or_copier` always builds, never None - so
-    # the rung can never be refused; held in
-    # tests/test_the_move_way_rungs_hold_and_refuse.py
-    ('cli', '_bulk_or_copier', '<v>'):
-        'new: tests/test_the_rung_defects_are_fixed.py',
-    # defect (W21B): `native_bulk` hands `decide.Facts(unfit=unfit)` -
-    # the value where a reader is taken - so asking the restore's need
-    # raises TypeError before either way is pruned
-    ('engines.spanner', 'SpannerEngine', 'restore'):
-        'new: tests/test_the_rung_defects_are_fixed.py',
-    ('engines.spanner', 'SpannerEngine', 'tables'):
-        'new: tests/test_the_rung_defects_are_fixed.py',
-    # defect (W21C): its only need is `lambda f: False`, a blocker built
-    # as a rung that can never hold; refused in
-    # tests/test_the_scenario_rungs_hold_and_refuse.py
-    ('scenarios', 'topology_case', 'topology-unknown'):
-        'new: tests/test_the_rung_defects_are_fixed.py',
-    # defect (W21D): `_Loader.relink` builds it only to label a
-    # `carriers.Carrier` and never hands it to `decide.prune`
-    ('ship', '_Loader', 'spool'):
-        'new: tests/test_the_rung_defects_are_fixed.py',
-}
+OWED_OUTSIDE = {}
 
 
 def _ladder(stmt):

@@ -245,7 +245,9 @@ def test_a_bulk_way_that_fails_falls_to_the_table_copier(monkeypatch,
                         lambda *a: ran.append("copier"))
     monkeypatch.setattr(cli, "_lock", lambda h: type(
         "L", (), {"unlink": lambda self: None})())
-    monkeypatch.setattr(movers, "which", lambda p: None)
+    # its programs installed: a way missing one is refused before it runs
+    monkeypatch.setattr(movers, "which", lambda p: f"/usr/bin/{p}")
+    monkeypatch.setattr(movers, "program_version", lambda p: "16.4")
     said = []
     monkeypatch.setattr(cli.console, "print", lambda m="", **k:
                         said.append(str(m)))

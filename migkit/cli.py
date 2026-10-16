@@ -5936,13 +5936,19 @@ def _bulk_or_copier(hop, eng, d, v, table, chunk, engine, go=True):
     up and writing nothing (`record`), so it names the way `--go` takes."""
     from . import decide, movers
     ladder = {r.name: r for r in movers._ladder()}
+    # {program: its version as it prints it ("" where it prints none), or
+    # None where it is not installed here}: what the way stands on, so a
+    # way given up is tried again once a program is installed or upgraded
+    def missing(f):
+        return [p for p, ver in f["programs"].items() if ver is None]
     ran = decide.Need(
-        "its programs as installed now", lambda f: f["programs"] is not None)
+        "its programs as installed now", lambda f: not missing(f),
+        lambda f: "not installed here: " + ", ".join(missing(f)))
     rungs = (decide.Rung(v, ladder[v].said if v in ladder else v,
                          needs=(ran,)),
              decide.Rung("builtin", ladder["builtin"].said))
     facts = decide.Facts(programs=lambda: {
-        p: movers.program_version(p) if movers.which(p) else None
+        p: (movers.program_version(p) or "") if movers.which(p) else None
         for p in movers.programs(v)})
 
     def run(choice):

@@ -1117,17 +1117,19 @@ def topology_case(facts):
     the way keeps and gives up of the guarantees is said."""
     from . import guarantees as g
     kind = facts.get("kind")
-    ladder = _LADDERS.get(kind)
-    if ladder is None:
-        refused = decide.Rung("topology-unknown", "no way here",
-                              frozenset({"topology"}), needs=(decide.Need("a known topology",
-                                                 lambda f: False,
-                                                 lambda f: f"{kind!r} is not"
-                                                 " one of " + ", ".join(TOPOLOGIES)),))
-        choice = decide.climb("many-node topology", (refused,), facts,
-                              need=("topology",))
-        return ScenarioDecision("many-node topology", choice)
-    rungs = ladder()
+    # the kind is decided before its ladder: held where migkit knows it,
+    # refused with the kinds it knows where it does not
+    known = decide.Rung(
+        "topology-unknown", "a topology migkit knows", frozenset({"topology"}),
+        needs=(decide.Need("a known topology",
+                           lambda f: f.get("kind") in _LADDERS,
+                           lambda f: f"{f.get('kind')!r} is not one of "
+                                     + ", ".join(TOPOLOGIES)),))
+    gate = decide.climb("many-node topology", (known,), facts,
+                        need=("topology",))
+    if gate.rung is None:
+        return ScenarioDecision("many-node topology", gate)
+    rungs = _LADDERS[kind]()
     choice = decide.climb(f"many-node topology ({kind})", rungs, facts,
                           need=("topology",))
     details = [f"{TOPOLOGIES[kind]}: {', '.join(facts.get('sources', ()))}"
