@@ -21,7 +21,7 @@ import pytest
 from migkit import users
 from migkit.config import Endpoint, Hop
 
-PROVES = [("verify.users", "hetero")]
+PROVES = [("verify.users", ("hetero", "neo4j", "synapse"))]
 
 
 class _Cur:
@@ -196,3 +196,5 @@ def test_an_engine_read_in_no_shape_but_its_own_is_not_compared(
 def test_the_capability_is_read_off_the_code():
     from migkit import capabilities
     assert capabilities.implemented("hetero", "users")
+    assert capabilities.implemented("neo4j", "users")
+    assert capabilities.implemented("synapse", "users")

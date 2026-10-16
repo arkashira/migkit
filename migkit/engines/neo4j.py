@@ -616,6 +616,22 @@ class Neo4jEngine(NeutralCopier, Engine):
                              " suspended, home RETURN user, suspended, home")
         return [r for r in rows if r.get("user")]
 
+    def accounts(self, side):
+        out = {}
+        for u in self._users(side):
+            name = u.get("user")
+            if not name:
+                continue
+            roles = [r for r in u.get("roles", []) if r]
+            out[f"user:{name}"] = {
+                "login": not u.get("suspended", False),
+                "roles": roles,
+                "grants": [],
+                "hash": None,
+                "attrs": {"home": u.get("home", "")},
+            }
+        return out
+
     def carry_database_objects(self, db, log=None):
         """The source's users made on the target: name, status, home
         database and roles. A password cannot be read, so each is made with

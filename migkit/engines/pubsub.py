@@ -24,6 +24,9 @@ import time
 from . import hooks
 from .base import Engine
 
+UNPROVED_ON = "built; not run on a real Google Cloud Pub/Sub topic"
+UNPROVED_ITEMS = "scope.ops"
+
 #: bytes in one message, as the service allows
 MOST_BYTES = 10 * 2 ** 20
 #: bytes in an ordering key

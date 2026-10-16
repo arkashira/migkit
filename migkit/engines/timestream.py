@@ -29,6 +29,12 @@ import time
 from . import hooks
 from .base import Engine, NeutralCopier, Result
 
+UNPROVED_ON = "built; not run on a real Amazon Timestream database"
+UNPROVED_ITEMS = (
+    "scope.repair scope.row-filter scope.names verify.repair "
+    "verify.repair-undo verify.table assess.engine-checks schema.create "
+    "move.table-copy scope.listings scope.copy")
+
 #: records one WriteRecords call takes, the service's most
 RECORDS = 100
 #: DESCRIBE's word for each part of a record

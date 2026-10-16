@@ -2579,7 +2579,11 @@ WAYS = {
             ("db2i", "Db2iHold"), ("ase", "AseHold"),
             ("teradata", "TeradataHold"), ("redshift", "RedshiftHold"),
             ("snowflake", "SnowflakeHold"), ("couchbase", "CouchbaseHold"),
-            ("dynamodb", "DynamoDBHold"), ("bigquery", "BigQueryHold"))},
+            ("dynamodb", "DynamoDBHold"), ("bigquery", "BigQueryHold"),
+            ("synapse", "SynapseHold"), ("netezza", "NetezzaHold"),
+            ("saphana", "SapHanaHold"), ("informix", "InformixHold"),
+            ("progress", "ProgressHold"), ("vertica", "VerticaHold"),
+            ("exasol", "ExasolHold"), ("databricks", "DatabricksHold"))},
         # a pair's target is kept as its own engine keeps it
         "hetero": ("yes", "freeze.protect"),
         "generic": (NOT_APPLICABLE, _COMPARES_ONLY),
@@ -2627,7 +2631,11 @@ WAYS = {
             ("clickhouse", "ClickHouseHold"), ("oracle", "OracleHold"),
             ("db2", "Db2Hold"), ("ase", "AseHold"),
             ("teradata", "TeradataHold"), ("redshift", "RedshiftHold"),
-            ("snowflake", "SnowflakeHold"), ("couchbase", "CouchbaseHold"))},
+            ("snowflake", "SnowflakeHold"), ("couchbase", "CouchbaseHold"),
+            ("synapse", "SynapseHold"), ("netezza", "NetezzaHold"),
+            ("saphana", "SapHanaHold"), ("informix", "InformixHold"),
+            ("progress", "ProgressHold"), ("vertica", "VerticaHold"),
+            ("exasol", "ExasolHold"), ("databricks", "DatabricksHold"))},
         # a pair's source is held as its own engine holds it
         "hetero": ("yes", "freeze.hold_for"),
         "generic": (NOT_APPLICABLE, _COMPARES_ONLY),
@@ -6121,8 +6129,8 @@ for _shape, _ways in WAYS.items():
 for _engine, _shapes in {
         "analyticdb-postgres": ("large values", "partitioned"),
         "yugabytedb": ("large values", "partitioned"),
-        "synapse": ("large values", "partitioned", "read-only target",
-                    "writes held", "keyless", "no unique index",
+        "synapse": ("large values", "partitioned",
+                    "keyless", "no unique index",
                     "wide key")}.items():
     for _shape in _shapes:
         WAYS[_shape][_engine] = (NOT_YET, "P0-CLOUDS.more")

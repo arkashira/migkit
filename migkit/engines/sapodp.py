@@ -85,6 +85,11 @@ from decimal import Decimal
 from . import hooks
 from .base import Engine
 
+UNPROVED_ON = "built; not run on a real SAP Gateway system"
+UNPROVED_ITEMS = (
+    "scope.ops verify.table tail.table-states assess.engine-checks "
+    "schema.defaults")
+
 #: where Gateway publishes its services
 SERVICE_ROOT = "/sap/opu/odata/sap"
 #: the fields a delta page adds to each row

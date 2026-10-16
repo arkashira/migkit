@@ -641,6 +641,10 @@ SCOPE = {"pg_server": "server", "pg_database": "database",
          "sf_grants": "database", "cb_roles": "database",
          "ddb_policy": "database", "bq_access": "database",
          "lindorm_grants": "database",
+         "synapse_grants": "database", "netezza_grants": "database",
+         "hana_grants": "database", "informix_grants": "database",
+         "progress_grants": "database", "vertica_grants": "database",
+         "exasol_grants": "database", "databricks_grants": "database",
          # a group's sides, each held its own way (`GroupHold`)
          "group_server": "server", "group_database": "database",
          "group_kept": "database"}
@@ -6128,6 +6132,52 @@ class SnowflakeHold(_Grants):
         return [f"write transaction {t} on {res}, since {began}"
                 for t, began, res in self.locks(db)]
 
+class SynapseHold(MSSQLHold):
+    WAY = "synapse_grants"
+    SAID = "the application's write permissions on Synapse SQL pool revoked"
+
+
+class NetezzaHold(_Grants):
+    WAY = "netezza_grants"
+    SAID = "the application's write privileges on Netezza tables revoked"
+    SOURCE = True
+
+
+class SapHanaHold(_Grants):
+    WAY = "hana_grants"
+    SAID = "the application's write privileges on SAP HANA schema revoked"
+    SOURCE = True
+
+
+class InformixHold(_Grants):
+    WAY = "informix_grants"
+    SAID = "the application's write privileges on Informix tables revoked"
+    SOURCE = True
+
+
+class ProgressHold(_Grants):
+    WAY = "progress_grants"
+    SAID = "the application's write privileges on Progress OpenEdge tables revoked"
+    SOURCE = True
+
+
+class VerticaHold(_Grants):
+    WAY = "vertica_grants"
+    SAID = "the application's write privileges on Vertica schema revoked"
+    SOURCE = True
+
+
+class ExasolHold(_Grants):
+    WAY = "exasol_grants"
+    SAID = "the application's write privileges on Exasol schema revoked"
+    SOURCE = True
+
+
+class DatabricksHold(_Grants):
+    WAY = "databricks_grants"
+    SAID = "the application's modify privileges on Databricks tables revoked"
+    SOURCE = True
+
 
 # Couchbase
 # Each local user's roles that write the hop's bucket - by name, never one
@@ -6741,7 +6791,13 @@ HOLDS = {"postgres": PostgresHold, "mysql": MySQLHold, "mongodb": MongoHold,
          "polardbx": MySQLHold, "dcdb": MySQLHold,
          "oceanbase-oracle": OracleHold,
          "geminidb-cassandra": CassandraHold, "geminidb-redis": RedisHold,
-         "geminidb-mongo": MongoHold}
+         "geminidb-mongo": MongoHold,
+         "analyticdb-mysql": MySQLHold, "singlestore": MySQLHold,
+         "analyticdb-postgres": PostgresHold, "yugabytedb": PostgresHold,
+         "synapse": SynapseHold, "netezza": NetezzaHold,
+         "saphana": SapHanaHold, "informix": InformixHold,
+         "progress": ProgressHold, "vertica": VerticaHold,
+         "exasol": ExasolHold, "databricks": DatabricksHold}
 #: the sources the cutover freezes itself; any other is frozen by its
 #: operator (`freeze: operator`) and proved by migkit
 FREEZES = tuple(HOLDS)

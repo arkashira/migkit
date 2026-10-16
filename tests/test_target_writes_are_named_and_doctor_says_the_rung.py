@@ -10,6 +10,13 @@ import pytest
 
 from migkit import cli, decide, freeze, report
 
+PROVES = [
+    ("cutover.freeze", ("synapse", "netezza", "saphana", "informix",
+                        "progress", "vertica", "exasol", "databricks")),
+    ("cutover.read-only-target", ("synapse", "netezza", "saphana", "informix",
+                                 "progress", "vertica", "exasol", "databricks")),
+]
+
 
 def _hop(tmp_path, goal=True, protect=True):
     hop = types.SimpleNamespace(
@@ -176,3 +183,11 @@ def test_the_report_shows_unaccounted_writes(tmp_path, monkeypatch):
     assert "target writes" in html and "2 writes no unit named" in html
     assert report._target_writes_section(_hop(tmp_path, protect=False),
                                          ["app"]) == ""
+
+
+def test_holds_for_the_eight_engines():
+    from migkit import capabilities
+    for eng in ("synapse", "netezza", "saphana", "informix",
+                "progress", "vertica", "exasol", "databricks"):
+        assert capabilities.depth_cell(eng, "cutover.freeze")[0] == "yes"
+        assert capabilities.depth_cell(eng, "cutover.read-only-target")[0] == "yes"

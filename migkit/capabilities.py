@@ -543,7 +543,7 @@ GAPS.update({
                                  " reads, and is a pair's warehouse target")
            for cap in ("stream", "fence", "confirm", "delta")},
         **{cap: (NOT_YET, "P0-CLOUDS.more")
-           for cap in ("sequences", "params", "users", "statistics",
+           for cap in ("sequences", "params", "statistics",
                        "snapshot")},
     },
 })
@@ -3246,7 +3246,6 @@ GAPS["qdrant"] = {
 }
 GAPS["neo4j"] = {
     "sequences": (NOT_APPLICABLE, _GIVEN_KEYS.format("node or relationship")),
-    "users": (NOT_YET, "R16c"),
     "confirm": (NOT_YET, "R16c"),
     "bulk-move": (NOT_YET, "R16c"),
     "snapshot": (NOT_YET, "R16c"),

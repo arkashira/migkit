@@ -540,12 +540,12 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a safety check reads `barriers` for the step it guards; the step reports its own state down
 
-- `migkit/freeze.py:6847` safety -> workflows (`barriers`)
+- `migkit/freeze.py:6903` safety -> workflows (`barriers`)
 
 ### a safety check reads `cutover` for the step it guards; the step reports its own state down
 
 - `migkit/approvals.py:246` safety -> workflows (`cutover`)
-- `migkit/freeze.py:1002` safety -> workflows (`cutover`)
+- `migkit/freeze.py:1006` safety -> workflows (`cutover`)
 
 ### a safety check reads `fleet` for the step it guards; the step reports its own state down
 
@@ -554,7 +554,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### a safety check reads `tailctl` for the step it guards; the step reports its own state down
 
 - `migkit/approvals.py:246` safety -> workflows (`tailctl`)
-- `migkit/freeze.py:3254` safety -> workflows (`tailctl`)
+- `migkit/freeze.py:3258` safety -> workflows (`tailctl`)
 
 ### a safety check reads `users` for the step it guards; the step reports its own state down
 
@@ -904,7 +904,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 - `migkit/anchor.py:130` persistence -> integrations (`cloudapi`)
 - `migkit/dba.py:1141` decision -> integrations (`cloudapi`)
-- `migkit/freeze.py:6390` safety -> integrations (`cloudapi`)
+- `migkit/freeze.py:6440` safety -> integrations (`cloudapi`)
 - `migkit/machine.py:620` decision -> integrations (`cloudapi`)
 - `migkit/state.py:333` persistence -> integrations (`cloudapi`)
 - `migkit/variants.py:503` configuration -> integrations (`cloudapi`)
@@ -951,11 +951,11 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### safety reaches `decide` (decision); the shared piece moves below both, or the call is inverted
 
-- `migkit/freeze.py:661` safety -> decision (`decide`)
+- `migkit/freeze.py:665` safety -> decision (`decide`)
 
 ### safety reaches `engines.dbapi` (engines); the shared piece moves below both, or the call is inverted
 
-- `migkit/freeze.py:4652` safety -> engines (`engines.dbapi`)
+- `migkit/freeze.py:4656` safety -> engines (`engines.dbapi`)
 
 ### safety reaches `engines` (engines); the shared piece moves below both, or the call is inverted
 
@@ -963,7 +963,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### safety reaches `sourcechange` (decision); the shared piece moves below both, or the call is inverted
 
-- `migkit/freeze.py:953` safety -> decision (`sourcechange`)
+- `migkit/freeze.py:957` safety -> decision (`sourcechange`)
 
 ### safety reaches `web.approve` (web); the shared piece moves below both, or the call is inverted
 
@@ -996,7 +996,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### the decision engine asks an engine (`engines.base`) what it can do; ends when the engine contract is a package below decision
 
 - `migkit/capabilities.py:34` decision -> engines (`engines.base`)
-- `migkit/decide.py:2759` decision -> engines (`engines.base`)
+- `migkit/decide.py:2767` decision -> engines (`engines.base`)
 - `migkit/model.py:1111` decision -> engines (`engines.base`)
 - `migkit/scenarios.py:505` decision -> engines (`engines.base`)
 - `migkit/workload.py:133` decision -> engines (`engines.base`)
@@ -1039,7 +1039,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 - `migkit/capabilities.py:33` decision -> engines (`engines`)
 - `migkit/dba.py:311` decision -> engines (`engines`)
-- `migkit/decide.py:2758` decision -> engines (`engines`)
+- `migkit/decide.py:2766` decision -> engines (`engines`)
 - `migkit/machine.py:948` decision -> engines (`engines`)
 - `migkit/tableway.py:132` decision -> engines (`engines`)
 - `migkit/waysaid.py:71` decision -> engines (`engines`)

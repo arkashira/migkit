@@ -49,6 +49,14 @@ from decimal import Decimal
 from . import hooks
 from .base import Engine, NeutralCopier, Result
 
+UNPROVED_ON = "built; not run on a real Amazon Neptune cluster"
+UNPROVED_ITEMS = (
+    "scope.repair scope.ops scope.row-filter scope.names verify.delta "
+    "verify.fence verify.confirm verify.repair verify.repair-undo "
+    "verify.table tail.table-states assess.engine-checks schema.create "
+    "cutover.rollback cutover.drain schema.foreign-keys tail.quiet "
+    "scope.listings scope.copy")
+
 TABLES = {"graph": ("edges", "vertices"), "rdf": ("quads",)}
 COLUMNS = {
     "vertices": [("id", "string"), ("label", "string"),

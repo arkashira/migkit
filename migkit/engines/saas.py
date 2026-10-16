@@ -70,6 +70,9 @@ from decimal import Decimal
 from . import hooks
 from .base import Engine
 
+UNPROVED_ON = "built; not run on a real SaaS production service"
+UNPROVED_ITEMS = "scope.ops verify.table tail.table-states cutover.drain"
+
 KINDS = ("dlt", "singer", "airbyte", "salesforce")
 #: fields a program marks a deleted row with, and the row is then carried
 #: as a delete

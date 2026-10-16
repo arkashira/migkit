@@ -21,6 +21,9 @@ import time
 from . import hooks
 from .base import Engine
 
+UNPROVED_ON = "built; not run on a real Amazon Kinesis Data Stream"
+UNPROVED_ITEMS = "scope.ops"
+
 #: records per request, and bytes in one, as the service allows
 BATCH_RECORDS, BATCH_BYTES = 500, 5 * 2 ** 20
 

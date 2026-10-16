@@ -60,7 +60,8 @@ ACCOUNTS_AS = {"oceanbase": "mysql", "polardbx": "mysql", "dcdb": "mysql",
                "geminidb-cassandra": "cassandra", "geminidb-redis": "redis",
                "geminidb-mongo": "mongodb",
                "analyticdb-mysql": "mysql", "singlestore": "mysql",
-               "analyticdb-postgres": "postgres", "yugabytedb": "postgres"}
+               "analyticdb-postgres": "postgres", "yugabytedb": "postgres",
+               "synapse": "mssql"}
 
 
 def _speaking(hop):
