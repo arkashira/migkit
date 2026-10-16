@@ -7,7 +7,6 @@ the reader is the server's own; the draw and the verdict on a reader over
 lists. The size is the decision engine's, from the reader's measured
 rate and the time the quick signal may take (`decide.check_sample`).
 """
-import pytest
 
 from migkit import decide, ranges, verdict
 from tests import servers
@@ -196,9 +195,6 @@ mysql_pair = servers.fixture("mysql")
 
 
 @needs_docker
-@pytest.mark.xfail(strict=True, reason="the keyed read now lines rows up by"
-                   " class, but the sampled check's own path still folds"
-                   " the declared type ('int') where a class is expected")
 def test_on_a_mysql_pair_the_sample_misses_what_the_full_check_finds(
         mysql_pair, tmp_path):
     from migkit.config import Hop

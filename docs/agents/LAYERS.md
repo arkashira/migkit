@@ -456,7 +456,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### a rung or plan reads `cutover` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
 - `migkit/planner.py:786` decision -> workflows (`cutover`)
-- `migkit/ready.py:430` decision -> workflows (`cutover`)
+- `migkit/ready.py:444` decision -> workflows (`cutover`)
 - `migkit/repairways.py:383` decision -> workflows (`cutover`)
 - `migkit/workload.py:338` decision -> workflows (`cutover`)
 
@@ -497,7 +497,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a rung or plan reads `subset` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
-- `migkit/ready.py:507` decision -> workflows (`subset`)
+- `migkit/ready.py:521` decision -> workflows (`subset`)
 
 ### a rung or plan reads `tableengine` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
@@ -514,7 +514,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### a rung or plan reads `upgrade` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
 - `migkit/lacks.py:174` decision -> workflows (`upgrade`)
-- `migkit/ready.py:507` decision -> workflows (`upgrade`)
+- `migkit/ready.py:521` decision -> workflows (`upgrade`)
 - `migkit/workload.py:87` decision -> workflows (`upgrade`)
 
 ### a rung or plan reads `users` for what the workflow can do; ends when the workflow publishes its abilities below decision
@@ -1028,7 +1028,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### the decision engine asks an engine (`engines.sapodp`) what it can do; ends when the engine contract is a package below decision
 
-- `migkit/ready.py:495` decision -> engines (`engines.sapodp`)
+- `migkit/ready.py:509` decision -> engines (`engines.sapodp`)
 
 ### the decision engine asks an engine (`engines`) what it can do; ends when the engine contract is a package below decision
 

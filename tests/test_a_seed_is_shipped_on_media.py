@@ -495,9 +495,12 @@ def test_the_whole_move_through_the_command_is_two_runs(tmp_path,
 def _parquet_seed(seed, monkeypatch, reads=True):
     from migkit import decide
     if reads:
-        # the target is one that reads Parquet itself
-        monkeypatch.setattr(decide, "READS_PARQUET",
-                            decide.READS_PARQUET + ("sqlite",))
+        # the batch measured smaller held as Parquet
+        real = decide.rows_container
+        monkeypatch.setattr(decide, "rows_container", lambda f, costs=None:
+                            real(dict(f, sample=dict(f["sample"],
+                                                     parquet=1))
+                                 if f.get("sample") else f, costs))
     return seed
 
 
@@ -511,9 +514,11 @@ def test_the_rows_container_is_a_rung_on_the_batch_and_the_targets_loader():
     assert got.path == "pickled rows"
     assert "takes 9 bytes against 4 as pickled rows" in got.reason + str(got.passed), \
         (got.reason, got.passed)
-    # a target that reads Parquet takes it even where it is the larger
+    # no target is handed a part as a file: one that reads Parquet does
+    # not take the larger
     assert decide.rows_container(
-        {"sample": big, "target": "parquet"}).path == "parquet"
+        {"sample": big, "target": "parquet"}).path == "pickled rows"
+    assert not hasattr(decide, "READS_PARQUET")
     got = decide.rows_container({"sample": None, "why": "no rows",
                                  "target": "parquet"})
     assert got.path == "pickled rows" and "no rows" in str(got.passed)

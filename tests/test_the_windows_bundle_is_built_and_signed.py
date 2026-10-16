@@ -6,7 +6,6 @@ to be taken for whole. No install from it has run on Windows: there is no
 such machine here (`tools.WINDOWS_UNPROVED`).
 """
 import re
-import socket
 import subprocess
 
 import pytest
@@ -76,52 +75,92 @@ def test_a_wheel_missing_for_windows_refuses_the_build_and_names_it(
     assert not (out / "second-reader").exists()
     assert not (out / "SHA256SUMS").exists()
     downloads = [a for a in asked if "download" in a]
-    assert downloads and all(
-        "win_amd64" in a and "--only-binary=:all:" in a for a in downloads)
-    assert any("--require-hashes" in a for a in downloads)
+    # each lock's pins fetched alone for win_amd64, a wheel first; a pin
+    # published only as source is built here into a wheel for every
+    # machine or named (`tools._universal`)
+    assert len(downloads) == 2 and all(
+        "win_amd64" in a and "--no-deps" in a and "--prefer-binary" in a
+        and "--require-hashes" in a for a in downloads), downloads
 
 
-def _index_up():
-    try:
-        socket.create_connection(("pypi.org", 443), timeout=5).close()
-        return True
-    except OSError:
-        return False
+def _fake_pip(skip=()):
+    """A pip that reads a lock's markers for the machine it runs on, as pip
+    does, and leaves a wheel for Windows of each pin it takes - none for a
+    name in `skip`, and still says it did its work."""
+    from packaging.markers import Marker
+    asked, real = [], runner.run
+
+    def run(argv, env=None, **kw):
+        if argv[0] != "pip":
+            return real(argv, env, **kw)
+        asked.append(argv)
+        if "download" in argv and "-r" in argv:
+            dest = argv[argv.index("-d") + 1]
+            lock = open(argv[argv.index("-r") + 1]).read()
+            asked.append(lock)
+            for line in lock.splitlines():
+                m = re.match(r"^([A-Za-z0-9_.\-]+)==([^ ;\\]+)\s*(?:;([^\\]+))?",
+                             line)
+                if not m or (m.group(3) and not Marker(
+                        m.group(3).strip()).evaluate()):
+                    continue
+                name = re.sub(r"[-_.]+", "_", m.group(1)).lower()
+                if m.group(1).lower() in skip:
+                    continue
+                tag = "win_amd64" if name in ("cffi", "psycopg_binary") \
+                    else "any"
+                abi = "cp312-cp312" if tag != "any" else "py3-none"
+                open(f"{dest}/{name}-{m.group(2)}-{abi}-{tag}.whl",
+                     "wb").write(b"PK")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    return run, asked
 
 
-@pytest.mark.long
-@pytest.mark.skipif(not _index_up(), reason="the package index is not"
-                    " reachable from here")
+def _for_windows(lock):
+    """The distributions a lock pins that Windows takes, its markers read
+    for Windows."""
+    from packaging.markers import Marker
+    env = tools._marker_env(tools._platform("windows-x86_64"))
+    out = set()
+    for line in lock.read_text().splitlines():
+        m = re.match(r"^([A-Za-z0-9_.\-]+)==[^;\\]*(?:;([^\\]+))?", line)
+        if m and (not m.group(2) or Marker(m.group(2).strip()).evaluate(env)):
+            out.add(re.sub(r"[-_.]+", "-", m.group(1)).lower())
+    return out
+
+
 def test_the_windows_bundle_is_built_from_the_lock_and_signed(
         tmp_path, monkeypatch):
     key, signers = _signer(tmp_path)
     out = tmp_path / "bundle"
     out.mkdir()
     said = []
+    run, asked = _fake_pip()
+    monkeypatch.setattr(tools, "_pip", lambda: ["pip"])
+    monkeypatch.setattr(runner, "run", run)
     target = tools._platform("windows-x86_64")
-    try:
-        tools._bundle_wheels(out, target, said.append)
-    except SystemExit as e:
-        # refused: it names what lacks a wheel and leaves nothing behind
-        assert "win_amd64 of" in str(e), e
-        assert not (out / "wheels").exists()
-        assert not (out / "second-reader").exists()
-        assert not (out / "SHA256SUMS").exists()
-        named = str(e).split("win_amd64 of", 1)[1].split(".")[0].split(",")
-        assert all(n.strip() for n in named), e
-        # the lock pins what has no Windows wheel: the build says so and
-        # stops, which is what this machine can prove
-        pytest.xfail(f"the lock does not resolve for Windows: {e}")
+    tools._bundle_wheels(out, target, said.append)
+    # what pip was handed carries no marker it would read for this machine
+    handed = [a for a in asked if isinstance(a, str)]
+    assert len(handed) == 2 and not any(
+        ";" in line for text in handed for line in text.splitlines()
+        if "==" in line)
+    windows = _for_windows(tools.REQUIREMENTS_LOCK)
+    # what only Windows installs is in it, what only Linux does is not
+    assert {"pywin32-ctypes", "tzdata"} <= windows
+    assert not {"jeepney", "secretstorage"} & windows
     for lock, where in ((tools.REQUIREMENTS_LOCK, "wheels"),
                         (tools.SECOND_READER_LOCK, "second-reader")):
         files = [p.name for p in (out / where).glob("*.whl")]
         got = {_wheel(n)[0] for n in files}
-        lacking = _names(lock) - got
-        assert not lacking, f"{where}: no wheel for {sorted(lacking)}"
+        assert got == _for_windows(lock), (
+            where, sorted(_for_windows(lock) - got),
+            sorted(got - _for_windows(lock)))
         # nothing built for another machine slipped in
         tags = {_wheel(n)[1] for n in files}
         assert tags <= {"any", "win_amd64"}, tags
         assert not list((out / where).glob("*.tar.gz"))
+    assert not (out / "locks").exists()
     monkeypatch.setenv("MIGKIT_BUNDLE_KEY", str(key))
     tools._sign_bundle(out, said.append)
     assert (out / "SHA256SUMS.sig").exists(), said
@@ -137,6 +176,24 @@ def test_the_windows_bundle_is_built_from_the_lock_and_signed(
     with pytest.raises(SystemExit):
         bundle.verified(one)
     assert tools.WINDOWS_UNPROVED == "built; not run on Windows"
+
+
+def test_a_pip_that_says_done_but_leaves_a_pin_out_is_refused_by_name(
+        tmp_path, monkeypatch):
+    """pip leaving pins out and returning 0 (what it does reading the
+    markers for this machine) is not a whole bundle: each pin without a
+    wheel is named and nothing is left to sign."""
+    run, _ = _fake_pip(skip=("pywin32-ctypes", "tzdata"))
+    monkeypatch.setattr(tools, "_pip", lambda: ["pip"])
+    monkeypatch.setattr(runner, "run", run)
+    out = tmp_path / "bundle"
+    out.mkdir()
+    with pytest.raises(SystemExit) as got:
+        tools._bundle_wheels(out, tools._platform("windows-x86_64"),
+                             lambda m: None)
+    assert "pywin32-ctypes" in str(got.value) and "tzdata" in str(got.value)
+    assert not (out / "wheels").exists()
+    assert not (out / "SHA256SUMS").exists()
 
 
 def test_windows_is_declared_built_and_unproved_in_the_state():

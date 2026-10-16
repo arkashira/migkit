@@ -6006,6 +6006,8 @@ def service_follow(facts, costs=None):
 _SERVICE_MODEL = {"analyticdb-mysql": "polardbx", "singlestore": "polardbx",
                   "analyticdb-postgres": "gaussdb", "yugabytedb": "gaussdb",
                   "synapse": None}
+# a service with no class of its own to copy from (`_SERVICE_MODEL` None)
+# takes no neutral way unread: its cells stay not yet
 for _shape, _ways in WAYS.items():
     for _engine, _model in _SERVICE_MODEL.items():
         if _engine in _ways:
@@ -6016,7 +6018,8 @@ for _shape, _ways in WAYS.items():
         elif _got and _got[0] == "yes" and _shape in ("read-only target",
                                                       "writes held"):
             _ways[_engine] = _got
-        elif _shape in ("keyless", "no unique index", "wide key"):
+        elif _model and _shape in ("keyless", "no unique index",
+                                   "wide key"):
             _ways[_engine] = ("yes", "@neutral_batches" if _shape != "wide key"
                               else "@neutral_read")
 # what the wire's contract has and these services were not read for yet
@@ -6024,7 +6027,8 @@ for _engine, _shapes in {
         "analyticdb-postgres": ("large values", "partitioned"),
         "yugabytedb": ("large values", "partitioned"),
         "synapse": ("large values", "partitioned", "read-only target",
-                    "writes held")}.items():
+                    "writes held", "keyless", "no unique index",
+                    "wide key")}.items():
     for _shape in _shapes:
         WAYS[_shape][_engine] = (NOT_YET, "P0-CLOUDS.more")
 del _shape, _ways, _engine, _model, _got, _shapes
@@ -6234,24 +6238,19 @@ def oracle_digest_rungs():
 
 # ---- how a seed's rows are held in its parts (`ship`, backlog DEC1001) ------
 
-#: the targets that read a Parquet file as it is: a part held in Parquet
-#: needs no decoding by a loader there
-READS_PARQUET = ("parquet", "iceberg", "delta", "duckdb", "clickhouse",
-                 "bigquery", "redshift")
-
-
 def rows_container(facts, costs=None):
     """How the rows of a seed's part are held on the carrier where the
     pair has no native format of its own: as Parquet, a file a batch,
     or as the batches' rows pickled. Parquet is taken only where a batch
     of the table's own rows was carried through it and read back as
     the very rows - Arrow's types hold every column exactly - and then
-    where the target reads Parquet itself, or where the batch measured
-    smaller held that way than as pickled rows (the table's row width
-    and shape decide, not a default). `facts`: `sample` ({"parquet",
-    "pickled": bytes of the same batch, compressed as a part is;
-    "rows"}; None: no batch was carried through it), `why` (why not,
-    where none was), `target` (the target's engine)."""
+    where the batch measured smaller held that way than as pickled rows
+    (the table's row width and shape decide, not a default). No target is
+    handed a part as a file: every part is read back into rows, folded
+    and held to its digest at the far end (`ship`), so what the target
+    reads is no reason here. `facts`: `sample` ({"parquet", "pickled":
+    bytes of the same batch, compressed as a part is; "rows"}; None: no
+    batch was carried through it), `why` (why not, where none was)."""
     f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
 
     def smaller(x):
@@ -6272,13 +6271,9 @@ def rows_container(facts, costs=None):
                       " Arrow's types", lambda x: bool(x.get("sample")),
                       lambda x: x.get("why") or "no batch of its rows was"
                       " read to carry through it"),
-                 Need("the target reads Parquet itself, or it holds the"
-                      " rows smaller",
-                      lambda x: x.get("target") in READS_PARQUET
-                      or smaller(x), width)),
+                 Need("the batch held smaller as Parquet", smaller, width)),
              because="its types carry every column of a batch exactly, and"
-                     " the target reads the file as it is or the file is"
-                     " the smaller"),
+                     " the file is the smaller"),
         Rung("pickled rows", "each batch's rows pickled as the source's"
              " reader hands them over", because="the first way that holds")),
         f, costs=costs or None, prove=False)
@@ -6701,7 +6696,7 @@ def free_space_source(facts, costs=None):
 #: PostgreSQL 14, 16 and 17, MySQL 8.4 and 9.4, MariaDB 10.11 to 11.8. A
 #: release outside is one no choice keyed on a version was ever run on.
 VERSIONS_SEEN = {"postgres": ((14,), (17,)),
-                 "mysql": ((8, 0), (9, 4)),
+                 "mysql": ((8, 4), (9, 4)),
                  "mariadb": ((10, 11), (11, 8))}
 
 #: What each engine chooses by its server's version, as (since, what): the

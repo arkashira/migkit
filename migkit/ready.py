@@ -232,11 +232,25 @@ def _releases(eng, dbs):
     out = []
     ask = getattr(eng, "server_release", None)
     for side, who in (("src", "the source"), ("dst", "the target")):
-        try:
-            fam, ver = ask(side, dbs[0]) if ask and dbs else (None, None)
-        except Exception:  # noqa: BLE001 - not read, and said so
+        if not (ask and dbs):
             continue
-        if fam is None or fam not in decide.VERSIONS_SEEN or not ver:
+        try:
+            fam, ver = ask(side, dbs[0])
+        except Exception as e:  # noqa: BLE001 - not read, and said so
+            fam, ver = None, None
+            why = str(e).strip().splitlines()[-1][:120] if str(e) else ""
+        else:
+            why = ""
+        if fam is not None and fam not in decide.VERSIONS_SEEN:
+            continue
+        if not ver:
+            got = decide.version_seen({"family": fam, "version": None})
+            if got.path == "unread":
+                out.append(Item("warn", BEFORE, f"{who}'s release",
+                                f"{got.rung.said}"
+                                + (f" ({why})" if why else ""),
+                                "grant the account the right to read the"
+                                " server's version, then run again"))
             continue
         text = ".".join(map(str, ver))
         got = decide.version_seen({"family": fam, "version": ver})

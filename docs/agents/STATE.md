@@ -68,7 +68,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | snowflake | 16/16 | 12/12 | 56 | - |
 | spanner | 16/16 | 12/12 | 58 | - |
 | sqlite | 16/16 | 12/12 | 43 | - |
-| synapse | 11/16 | 8/12 | 74 | sequences, params, users, statistics, snapshot, large values, partitioned, read-only target, writes held |
+| synapse | 11/16 | 5/12 | 74 | sequences, params, users, statistics, snapshot, keyless, no unique index, wide key, large values, partitioned, read-only target, writes held |
 | teradata | 16/16 | 12/12 | 32 | - |
 | tidb | 16/16 | 12/12 | 15 | - |
 | timestream | 16/16 | 11/12 | 38 | large values |
@@ -198,7 +198,7 @@ Built, unproved - a way the code has on an engine no sandbox here can run; the e
 - msk: built; not run against a real MSK cluster (brand.told, sign-in.iam, sign-in.mechanisms)
 - redis-enterprise: built; not run against a real Redis Enterprise (brand.told)
 - singlestore-helios: built; not run on a real SingleStore Helios workspace (managed.readiness, managed.brand-api)
-- windows: built; not run on Windows (bundle.install, bundle.source-build, bundle.platform-markers)
+- windows: built; not run on Windows (bundle.install, bundle.source-build)
 - yugabyte-aeon: built; not run on a real YugabyteDB Aeon cluster (managed.readiness, managed.brand-api)
 - zfs: built on fakes; not run against a real ZFS dataset (seed.blocks, seed.changed-list, seed.fast-forward)
 
@@ -299,7 +299,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 
 387 upward imports still listed (`docs/agents/LAYERS.md`; the list only shrinks); 0 files no package claims (`docs/agents/INVENTORY.md`).
 
-Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 4290 ordered pairs of 66 engines; 78 shape lacks, 44 capability lacks, 3027 depth lacks in all; fewest kinesis -> postgres (6), most vertica -> synapse (164).
+Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 4290 ordered pairs of 66 engines; 81 shape lacks, 44 capability lacks, 3027 depth lacks in all; fewest kinesis -> postgres (6), most vertica -> synapse (167).
 
 ## Backlog (506 items, `docs/backlog-index.md`)
 

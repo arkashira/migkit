@@ -122,8 +122,11 @@ def test_only_a_release_below_every_version_keyed_choice_is_refused():
     s, t = by["the source's release"], by["the target's release"]
     assert s.level == "fail" and s.gates and "older than 10.0" in s.detail
     assert t.level == "fail" and "older than 8.0.17" in t.detail
-    assert _gate(("mysql", (8, 0, 17)), ("mysql", (8, 4, 3)))[
-        "the source's release"].level == "pass"
+    # 8.0.17 takes every MySQL choice but no lane runs 8.0: built
+    # anyway, said unproved on this run
+    s = _gate(("mysql", (8, 0, 17)), ("mysql", (8, 4, 3)))[
+        "the source's release"]
+    assert s.level == "warn" and "unproved on this run" in s.detail
 
 
 # ---- on the lanes (not run in the ticket: built, owed a lane run) --------
@@ -164,3 +167,101 @@ def test_on_mysql_and_mariadb_the_release_is_held_and_free_space_said(
     assert decide.version_seen({"family": fam, "version": ver}).path == "seen"
     assert eng.free_bytes("dst", s.name) is None
     assert "does not report" in eng.free_choice[("dst", s.name)][1].reason
+
+
+def _provider(monkeypatch, adapter):
+    from migkit import managed
+    monkeypatch.setattr(managed, "api_conf", lambda h, e, s: ("x", {}))
+    monkeypatch.setattr(managed, "adapter", lambda h, e, s: adapter)
+
+
+def test_the_providers_metric_is_read_where_the_server_and_directory_cannot(
+        monkeypatch):
+    from migkit import cloudapi
+    asked = []
+
+    class Watch:
+        def __init__(self, points):
+            self.points = points
+
+        def get_metric_statistics(self, **kw):
+            asked.append(kw)
+            return {"Datapoints": self.points}
+    aws = cloudapi.Aws({"product": "rds", "id": "db1", "region": "r"})
+    monkeypatch.setattr(aws, "_rds", lambda: ("instance", {}))
+    monkeypatch.setattr(aws, "client", lambda s=None: Watch([
+        {"Timestamp": 2, "Minimum": 9 << 30},
+        {"Timestamp": 1, "Minimum": 1}]))
+    _provider(monkeypatch, aws)
+    e = _Eng()
+    got = sizing.free_bytes(e, "dst", "d", lambda: (None, "no right"),
+                            lambda: (None, "not here"))
+    assert got == 9 << 30 and e.free_choice[("dst", "d")][1].path == \
+        "provider"
+    assert asked[0]["MetricName"] == "FreeStorageSpace"
+    assert asked[0]["Dimensions"] == [{"Name": "DBInstanceIdentifier",
+                                       "Value": "db1"}]
+    # an Aurora cluster is read by its volume's bytes left
+    monkeypatch.setattr(aws, "_rds", lambda: ("cluster", {}))
+    aws.free_bytes()
+    assert asked[-1]["MetricName"] == "AuroraVolumeBytesLeftTotal"
+    # a metric with no point: nobody says, and the plan says so
+    monkeypatch.setattr(aws, "client", lambda s=None: Watch([]))
+    e = _Eng()
+    assert sizing.free_bytes(e, "dst", "d", lambda: (None, "no right"),
+                             lambda: (None, "not here")) is None
+    c = e.free_choice[("dst", "d")][1]
+    assert c.path == "none" and "does not say" in str(c.passed) + c.reason
+    assert "free" in cloudapi.Aws.UNPROVED_ITEMS
+
+
+def test_a_cloud_sql_instances_free_space_is_its_quota_less_what_it_uses(
+        monkeypatch):
+    from migkit import cloudapi
+    said = {"bytes_used": 3 << 30, "quota": 10 << 30}
+
+    class Api:
+        def projects(self):
+            return self
+
+        def timeSeries(self):
+            return self
+
+        def list(self, **kw):
+            self.metric = kw["filter"].split("/disk/")[1].split('"')[0]
+            assert '"p:db1"' in kw["filter"]
+            return self
+
+        def execute(self):
+            got = said.get(self.metric)
+            return {"timeSeries": [{"points": [
+                {"value": {"int64Value": str(got)}}]}]} if got else {}
+    gcp = cloudapi.Gcp({"product": "cloudsql", "id": "db1", "region": "r"})
+    monkeypatch.setattr(gcp, "_monitoring", lambda: Api())
+    monkeypatch.setattr(gcp, "_project", lambda: "p")
+    assert gcp.free_bytes() == 7 << 30
+    del said["quota"]
+    assert gcp.free_bytes() is None
+
+
+def test_a_release_not_read_is_said_through_the_rung():
+    class Eng:
+        def server_release(self, side, db):
+            raise RuntimeError("permission denied for function version")
+    got = ready._releases(Eng(), ["d"])
+    assert [i.level for i in got] == ["warn", "warn"]
+    assert "nothing keyed on a version is chosen" in got[0].detail
+    assert "permission denied" in got[0].detail
+
+
+def test_the_releases_seen_are_the_lanes_images():
+    """MySQL runs here on 8.4 and 9.4 (`tests/servers.py`): an 8.0 server
+    is one no version-keyed choice was run on."""
+    assert decide.VERSIONS_SEEN["mysql"] == ((8, 4), (9, 4))
+    assert decide.version_seen({"family": "mysql",
+                                "version": (8, 0, 36)}).rung is None
+
+
+def test_a_service_with_no_class_to_copy_from_takes_no_neutral_way_unread():
+    for shape in ("keyless", "no unique index", "wide key"):
+        assert decide.WAYS[shape]["synapse"][0] == decide.NOT_YET, shape

@@ -2670,25 +2670,38 @@ def _bundle_wheels(out, target, log):
         ok = _step([*pip, "download", "--no-deps", "-d", str(wheels),
                     f"migkit=={__version__}", *pinned_to], quiet,
                    "migkit's own wheel was not fetched")
-    deps = ((["-r", str(REQUIREMENTS_LOCK), "--require-hashes"]
-             if REQUIREMENTS_LOCK.exists() else _requirements()))
     _LAST_SHORT.clear()
+    held = out / "locks"
+    if REQUIREMENTS_LOCK.exists():
+        # the lock's markers read for the bundle's machine, not this one:
+        # pip reads them for where it runs, and would leave out what only
+        # that machine needs
+        lock, names = _lock_for(REQUIREMENTS_LOCK, target, held)
+        deps = ["-r", str(lock), "--require-hashes"]
+    else:
+        names, deps = None, _requirements()
     ok = _wheels_step([*pip, "download", "-d", str(wheels),
-                       *(locked if REQUIREMENTS_LOCK.exists() else
-                         pinned_to), *deps], log,
+                       *(locked if names is not None else pinned_to),
+                       *deps], log,
                       "its dependencies' wheels were not all fetched") and ok
     ok = _universal(wheels, pip, log) and ok
+    ok = _lacking(wheels, names) and ok
     reader = out / "second-reader"
     reader.mkdir(exist_ok=True)
-    what = (["-r", str(SECOND_READER_LOCK), "--require-hashes"]
-            if SECOND_READER_LOCK.exists() else [SECOND_READER_PACKAGE])
+    if SECOND_READER_LOCK.exists():
+        lock, names = _lock_for(SECOND_READER_LOCK, target, held)
+        what = ["-r", str(lock), "--require-hashes"]
+    else:
+        names, what = None, [SECOND_READER_PACKAGE]
     ok = _wheels_step([*pip, "download", "-d", str(reader),
                        *(["--no-deps", "--prefer-binary", *machine]
-                         if SECOND_READER_LOCK.exists() else
+                         if names is not None else
                          ["--only-binary=:all:", *machine]), *what], log,
                       "the second reading's wheels were not all fetched") \
         and ok
     ok = _universal(reader, pip, log) and ok
+    ok = _lacking(reader, names) and ok
+    shutil.rmtree(held, ignore_errors=True)
     if not ok and target and target["system"] == "Windows":
         # a machine that cannot build a wheel from source is not handed a
         # bundle it cannot install from: the build stops, naming what lacks
@@ -2714,8 +2727,81 @@ WINDOWS_UNPROVED = "built; not run on Windows"
 #: (`capabilities._merge_declared`, `DECLARING`) into the state's "built,
 #: unproved" block
 UNPROVED_ON = {"windows": "built; not run on Windows"}
-UNPROVED_ITEMS = {"windows": "bundle.install bundle.source-build"
-                             " bundle.platform-markers"}
+UNPROVED_ITEMS = {"windows": "bundle.install bundle.source-build"}
+
+
+#: the bundle's machine as a requirement's markers read it, by
+#: `_platform`'s system (the Python the bundle is fetched for is the
+#: `--python-version` it asks: 3.12, CPython)
+_MARKERS = {"Windows": {"sys_platform": "win32", "os_name": "nt",
+                        "platform_system": "Windows"},
+            "Linux": {"sys_platform": "linux", "os_name": "posix",
+                      "platform_system": "Linux"},
+            "Darwin": {"sys_platform": "darwin", "os_name": "posix",
+                       "platform_system": "Darwin"}}
+
+
+def _marker_env(target):
+    """The environment a lock's markers are read in for `target` (None:
+    this machine, as pip reads them)."""
+    if not target:
+        return None
+    machine = {("Windows", "x86_64"): "AMD64"}.get(
+        (target["system"], target["machine"]), target["machine"])
+    return {**_MARKERS[target["system"]], "platform_machine": machine,
+            "python_version": "3.12", "python_full_version": "3.12.0",
+            "implementation_name": "cpython",
+            "platform_python_implementation": "CPython"}
+
+
+def _lock_for(lock, target, where):
+    """(the lock as the bundle's machine takes it, the distributions it
+    names): each pin whose markers hold on `target`, written without them
+    into `where`, so pip fetches every one it names and nothing the
+    machine would not install."""
+    import re
+
+    from packaging.markers import Marker
+    env = _marker_env(target)
+    entries, cur = [], []
+    for line in Path(lock).read_text().splitlines():
+        if line.lstrip().startswith("#") or not line.strip():
+            continue
+        if line[:1].isspace() and cur:
+            cur.append(line)
+        else:
+            cur = [line]
+            entries.append(cur)
+    kept, names = [], []
+    for entry in entries:
+        head, _, cont = entry[0].partition("\\")
+        req, _, marker = head.partition(";")
+        if marker.strip() and not Marker(marker.strip()).evaluate(env):
+            continue
+        m = re.match(r"\s*([A-Za-z0-9_.\-]+)", req)
+        names.append(re.sub(r"[-_.]+", "-", m.group(1)).lower())
+        kept.append("\n".join([req.rstrip() + (" \\" if cont or
+                                                 len(entry) > 1 else ""),
+                               *entry[1:]]))
+    where.mkdir(parents=True, exist_ok=True)
+    out = Path(where) / Path(lock).name
+    out.write_text("\n".join(kept) + "\n")
+    return out, names
+
+
+def _lacking(where, names):
+    """True where `where` holds a wheel of every distribution `names`
+    (None: not a lock, nothing to hold it to); each missing one is named
+    (`_LAST_SHORT`), so a short bundle is never taken for whole."""
+    import re
+    if names is None:
+        return True
+    have = {re.sub(r"[-_.]+", "-", p.name.split("-")[0]).lower()
+            for p in Path(where).glob("*.whl")}
+    missing = [n for n in names if n not in have]
+    for n in missing:
+        _LAST_SHORT.append(f"No matching distribution found for {n}")
+    return not missing
 
 
 def _short_of(said):

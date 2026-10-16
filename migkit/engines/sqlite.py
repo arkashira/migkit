@@ -951,6 +951,12 @@ class SQLiteEngine(NeutralCopier, Engine):
         after = None
         conn = self._reader(side)
         try:
+            # the columns by name, not by where each sits: a table made on
+            # the target with the same columns in another order holds the
+            # same rows, and digests the same
+            named = ", ".join('"' + c.replace('"', '""') + '"' for c in sorted(
+                r[1] for r in conn.execute(
+                    f"pragma table_info(\"{t}\")").fetchall())) or "*"
             while True:
                 where = ""
                 args = ()
@@ -961,7 +967,7 @@ class SQLiteEngine(NeutralCopier, Engine):
                     where = f" where {left} > {right}"
                     args = after
                 rows = conn.execute(
-                    f'select *, {cols} from "{t}"{where}'
+                    f'select {named}, {cols} from "{t}"{where}'
                     f" order by {cols} limit {int(self.CHUNK)}",
                     args).fetchall()
                 if not rows:

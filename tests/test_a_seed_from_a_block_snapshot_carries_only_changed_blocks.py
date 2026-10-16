@@ -134,8 +134,12 @@ def test_a_block_damaged_on_read_or_on_the_target_stops_the_seed(tmp_path):
 def test_the_carrier_is_placed_by_the_measured_seconds_against_the_others():
     assert ship.SEEDS["blocks"] is decide.SEED_BLOCKS
     base, snap, _, _ = snapshots()
-    f = blockseed.facts(snap, base, rate=SIZE)  # a block a second
-    assert (f["blocks ok"], f["blocks"]) == (True, 3.0)
+    # a block a second over the link, eight read back a second
+    f = blockseed.facts(snap, base, rate=SIZE, read_rate=8 * SIZE)
+    assert (f["blocks ok"], f["blocks"]) == (True, 4.0)
+    # the read-back not measured: not costed, and said
+    un = blockseed.facts(snap, base, rate=SIZE)
+    assert un["blocks"] is None and "read rate" in un["blocks unmeasured"]
     got = decide.seed_carrier(dict(f, network=8.0, media=20.0, ship=True))
     assert got.path == "blocks"
     # the link measured faster than the blocks
@@ -155,3 +159,41 @@ def test_the_carrier_is_placed_by_the_measured_seconds_against_the_others():
 def test_the_real_snapshot_kinds_are_declared_unproved():
     assert set(blockseed.UNPROVED_ON) == set(blockseed.KINDS)
     assert set(blockseed.UNPROVED_ITEMS) == set(blockseed.KINDS)
+
+
+def test_the_read_back_of_the_whole_volume_is_in_the_block_seeds_cost():
+    """2 TB in 1 GiB blocks, one changed: the link carries it in seconds,
+    but the whole target read back at a slow rate is hours - the seed on
+    media is taken where it is the faster."""
+    gib = 1 << 30
+    snap = {"kind": "ebs", "volume": "v", "snapshot": "s2", "parent": "s1",
+            "block_size": gib, "blocks": 2048, "position": "0/1"}
+    base = dict(snap, snapshot="s1", parent=None)
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        for m, last in ((base, b"\0"), (snap, b"\1")):
+            m["digests"] = f"{d}/{m['snapshot']}"
+            with open(m["digests"], "wb") as f:
+                f.write(b"\0" * blockseed.RECORD * 2047
+                        + last * blockseed.RECORD)
+        assert blockseed.changed(snap, base) == [2047]
+        f = blockseed.facts(snap, base, rate=100 << 20,
+                            read_rate=50 << 20)
+    assert f["blocks"] > 2048 * gib / (50 << 20)
+    got = decide.seed_carrier(dict(f, network=30000.0, media=20000.0,
+                                   ship=True))
+    assert got.path == "media", got.reason
+
+
+def test_the_digests_are_kept_on_disk_and_a_base_past_the_end_refused(
+        tmp_path):
+    base, snap, src, target = snapshots()
+    m = blockseed.manifest("zfs", "tank/pg", "s9", SIZE, src.read, 8,
+                           "0/9", parent="s2", store=tmp_path / "s9.d")
+    assert (tmp_path / "s9.d").stat().st_size == 8 * blockseed.RECORD
+    assert isinstance(m["digests"], str)
+    longer = dict(base, blocks=9)
+    with pytest.raises(blockseed.Refused, match="more than"):
+        blockseed.changed(snap, longer)
+    with pytest.raises(blockseed.Refused, match="more than"):
+        blockseed.verify(snap, target.read, target_blocks=9)

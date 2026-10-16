@@ -854,6 +854,32 @@ class Aws(Adapter):
 
     # what the product is --------------------------------------------------
 
+    #: free storage read from the metric service, on fakes only
+    UNPROVED_ITEMS = {"free": "free.provider-metric"}
+
+    def free_bytes(self):
+        """RDS's free storage as its metric service has it: an instance's
+        FreeStorageSpace, an Aurora cluster's AuroraVolumeBytesLeftTotal -
+        the newest point of the past hour, at the metric's own minute;
+        None where it has none or the product is not RDS's (backlog
+        7.free: built, unproved on a real service)."""
+        import datetime
+        if self.product != "rds":
+            return None
+        kind, _ = self._rds()
+        name, dim = (("AuroraVolumeBytesLeftTotal", "DBClusterIdentifier")
+                     if kind == "cluster" else
+                     ("FreeStorageSpace", "DBInstanceIdentifier"))
+        now = datetime.datetime.now(datetime.timezone.utc)
+        got = self.client("cloudwatch").get_metric_statistics(
+            Namespace="AWS/RDS", MetricName=name,
+            Dimensions=[{"Name": dim, "Value": self.id}],
+            StartTime=now - datetime.timedelta(hours=1), EndTime=now,
+            Period=60, Statistics=["Minimum"])
+        points = sorted(got.get("Datapoints") or [],
+                        key=lambda p: p["Timestamp"])
+        return int(points[-1]["Minimum"]) if points else None
+
     def _rds(self):
         """("cluster" | "instance", its description), as `cloudseed`
         reads a source: a cluster first, then an instance."""
@@ -1791,6 +1817,47 @@ class Gcp(Adapter):
                                         credentials=self.credentials()[0],
                                         cache_discovery=False)
         return self._api
+
+    #: free storage read from the metric service, on fakes only
+    UNPROVED_ITEMS = {"free": "free.provider-metric"}
+
+    def _monitoring(self):
+        from googleapiclient import discovery
+        return discovery.build("monitoring", "v3",
+                               credentials=self.credentials()[0],
+                               cache_discovery=False)
+
+    def free_bytes(self):
+        """A Cloud SQL instance's free storage: its disk quota less the
+        bytes used, each the newest point of the past hour of its metric;
+        None where either has none or the product is not Cloud SQL
+        (backlog 7.free: built, unproved on a real service)."""
+        import datetime
+        if self.product != "cloudsql":
+            return None
+        api = self._monitoring()
+        now = datetime.datetime.now(datetime.timezone.utc)
+
+        def stamp(t):
+            return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        def newest(metric):
+            got = api.projects().timeSeries().list(
+                name=f"projects/{self._project()}",
+                filter=f'metric.type="cloudsql.googleapis.com/database/disk/'
+                       f'{metric}" AND resource.labels.database_id='
+                       f'"{self._project()}:{self.id}"',
+                interval_startTime=stamp(now - datetime.timedelta(hours=1)),
+                interval_endTime=stamp(now)).execute()
+            for series in got.get("timeSeries") or []:
+                for point in series.get("points") or []:  # newest first
+                    v = point.get("value") or {}
+                    got = v.get("int64Value", v.get("doubleValue"))
+                    if got is not None:
+                        return int(float(got))
+            return None
+        used, quota = newest("bytes_used"), newest("quota")
+        return None if used is None or quota is None else quota - used
 
     def _call(self, path, **kw):
         node = self.api()

@@ -10,8 +10,10 @@ copy over the link by `decide.seed_carrier` from what each would take.
 
 A snapshot is described by its manifest (`manifest`): its volume, its
 parent snapshot, the block size, every block's digest and the position.
-What changed is the blocks whose digests differ from the parent's
-(`changed`); a list the snapshot kind gives of its own is checked against
+Its digests are kept on disk, one record a block, and read in step a
+record at a time (`_digests`): a volume's size never decides what is held
+in memory. What changed is the blocks whose digests differ from the
+parent's (`changed`); a list the snapshot kind gives of its own is checked against
 them and refused where it misses one, so a stale block is never left
 behind. Each block is held to its digest as it is read, written, read back
 and checkpointed only then (`carry`); a resume writes again what was not
@@ -52,12 +54,35 @@ def digest(data):
     return hashlib.sha256(bytes(data)).hexdigest()
 
 
+#: the bytes of one block's digest record (sha256)
+RECORD = hashlib.sha256().digest_size
+
+
+def _digests(m):
+    """Each block's digest of manifest `m`, in order, read from its file
+    one record at a time."""
+    with open(m["digests"], "rb") as f:
+        while True:
+            got = f.read(RECORD)
+            if not got:
+                return
+            yield got.hex()
+
+
+def _digest_of(m, i):
+    with open(m["digests"], "rb") as f:
+        f.seek(int(i) * RECORD)
+        return f.read(RECORD).hex()
+
+
 def manifest(kind, volume, snapshot, block_size, read_block, blocks,
-             position, parent=None):
+             position, parent=None, store=None):
     """The manifest of `snapshot` of `volume`: every one of its `blocks`
     blocks of `block_size` bytes read through `read_block(i)` and digested,
     with the source's `position` recorded at the snapshot and the
-    snapshot it follows (`parent`)."""
+    snapshot it follows (`parent`). The digests go to `store` (a file;
+    None: a file of the system's temporary directory) as they are taken,
+    never held together in memory."""
     if kind not in KINDS:
         raise Refused(f"a {kind} snapshot is not one a seed reads: "
                       + ", ".join(sorted(KINDS)))
@@ -65,16 +90,21 @@ def manifest(kind, volume, snapshot, block_size, read_block, blocks,
         raise Refused(f"snapshot {snapshot} of {volume} records no position"
                       " of the source: the follow could not start from it,"
                       " so it seeds nothing")
-    digests = {}
-    for i in range(int(blocks)):
-        data = read_block(i)
-        if len(data) != int(block_size):
-            raise Refused(f"block {i} of snapshot {snapshot} reads"
-                          f" {len(data)} bytes, not {block_size}")
-        digests[str(i)] = digest(data)
+    import os
+    import tempfile
+    if store is None:
+        fd, store = tempfile.mkstemp(prefix=f"{snapshot}.", suffix=".digests")
+        os.close(fd)
+    with open(store, "wb") as f:
+        for i in range(int(blocks)):
+            data = read_block(i)
+            if len(data) != int(block_size):
+                raise Refused(f"block {i} of snapshot {snapshot} reads"
+                              f" {len(data)} bytes, not {block_size}")
+            f.write(hashlib.sha256(bytes(data)).digest())
     return {"kind": kind, "volume": volume, "snapshot": snapshot,
             "parent": parent, "block_size": int(block_size),
-            "blocks": int(blocks), "digests": digests,
+            "blocks": int(blocks), "digests": str(store),
             "position": position}
 
 
@@ -97,8 +127,15 @@ def changed(snap, base, listed=None):
                       f" {snap.get('parent')}, not the target's"
                       f" {base['snapshot']}: the blocks between them are"
                       " not known, so the whole volume is the seed")
-    out = [i for i in range(snap["blocks"])
-           if base["digests"].get(str(i)) != snap["digests"][str(i)]]
+    if base["blocks"] > snap["blocks"]:
+        raise Refused(f"the target's snapshot {base['snapshot']} holds"
+                      f" {base['blocks']} blocks, more than the"
+                      f" {snap['blocks']} of {snap['snapshot']}: what lies"
+                      " past its end would stay on the target, so the"
+                      " whole volume is the seed")
+    old = _digests(base)
+    out = [i for i, want in enumerate(_digests(snap))
+           if next(old, None) != want]
     if listed is not None:
         missed = sorted(set(out) - {int(i) for i in listed})
         if missed:
@@ -145,7 +182,7 @@ def carry(snap, base, read_block, write_block, read_target, state_path,
     for i in todo:
         if i in done:
             continue
-        want = snap["digests"][str(i)]
+        want = _digest_of(snap, i)
         data = read_block(i)
         if digest(data) != want:
             raise Refused(f"block {i} read from snapshot {snap['snapshot']}"
@@ -162,15 +199,22 @@ def carry(snap, base, read_block, write_block, read_target, state_path,
         durable.write_json(state_path, state)
         out.blocks += 1
         out.bytes += len(data)
-    verify(snap, read_target)
+    verify(snap, read_target, base["blocks"])
     return out
 
 
-def verify(snap, read_target):
+def verify(snap, read_target, target_blocks=None):
     """Every block of the target held to the snapshot's digest; the first
-    that differs is refused by its number."""
-    for i in range(snap["blocks"]):
-        if digest(read_target(i)) != snap["digests"][str(i)]:
+    that differs is refused by its number, and a target holding more
+    blocks than the snapshot (`target_blocks`) is refused: its blocks past
+    the end are no snapshot's."""
+    if target_blocks is not None and int(target_blocks) > snap["blocks"]:
+        raise Refused(f"the target holds {target_blocks} blocks, more than"
+                      f" the {snap['blocks']} of snapshot"
+                      f" {snap['snapshot']}: the follow is not started on"
+                      " it")
+    for i, want in enumerate(_digests(snap)):
+        if digest(read_target(i)) != want:
             raise Refused(f"block {i} on the target is not snapshot"
                           f" {snap['snapshot']}'s: the target was written"
                           " outside the seed, so the follow is not started"
@@ -185,14 +229,23 @@ def fast_forward(carried, follow):
     return follow(carried.position)
 
 
-def facts(snap, base, rate, listed=None):
+def facts(snap, base, rate, listed=None, read_rate=None):
     """What `decide.seed_carrier` reads of a block seed: whether one can be
-    carried and why not, and the seconds its changed blocks take at the
-    measured `rate` (bytes a second; None where nothing measured)."""
+    carried and why not, and the seconds it takes - its changed blocks at
+    the measured link `rate` and then every block of the target read back
+    at the target's measured `read_rate` (`verify`; bytes a second). Either
+    not measured: no seconds, and `blocks unmeasured` says which."""
     try:
         todo = changed(snap, base, listed)
     except Refused as e:
         return {"blocks ok": str(e), "blocks": None}
     size = len(todo) * snap["block_size"]
+    whole = snap["blocks"] * snap["block_size"]
+    lacking = [w for w, r in (("the link's rate", rate),
+                              ("the target's read rate", read_rate)) if not r]
     return {"blocks ok": True, "blocks bytes": size,
-            "blocks": size / rate if rate else None}
+            "blocks read back": whole,
+            "blocks unmeasured": (" and ".join(lacking) + " not measured:"
+                                  " the block seed is not costed"
+                                  if lacking else None),
+            "blocks": None if lacking else size / rate + whole / read_rate}

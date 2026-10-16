@@ -1935,7 +1935,11 @@ def sampled(eng, db, table, columns, key, size, seed=None, dst=None,
     mine = eng.neutral_rows_by_key("src", db, table, columns, key, drawn)
     theirs = dst.neutral_rows_by_key("dst", dst_db, dst_table, columns, key,
                                      drawn)
-    classes = [c for _, c in columns]
+    # each column by its class, the one reading of a declared type
+    # (`canon.type_class`): a column given by its declared type folds as
+    # the class it is
+    classes = [c if c in canon.CLASSES else canon.type_class(
+        eng.CANON_ENGINE, c) for _, c in columns]
 
     def text(row):
         return canon.fold_rows(classes, [row]) if row is not None else None
