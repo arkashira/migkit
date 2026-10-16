@@ -3655,7 +3655,7 @@ _BAD_DECLARATIONS = []
 #: open-source engine's module, or a machine no sandbox here is (Windows,
 #: `tools`). Each declares `UNPROVED_ON` and
 #: `UNPROVED_ITEMS` as {who: words}, read literally as an engine's are
-DECLARING = ("cloud_readiness.py", "variants.py", "tools.py")
+DECLARING = ("cloud_readiness.py", "variants.py", "tools.py", "blockseed.py")
 #: {who: (the reason its module gives, its cells)} of those modules, for
 #: the state's "built, unproved" block (`tools/gen_codemap.py`)
 UNPROVED_ELSEWHERE = {}
