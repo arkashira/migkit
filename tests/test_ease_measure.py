@@ -82,3 +82,39 @@ def test_every_independent_pair_profile_is_measured_without_program_names():
     assert {key for key, p in PROFILES.items() if p.roles == ("src", "dst") and not p.tls} <= {a for a, b in pairs if a == b}
     text = "\n".join(ease.pair_label(a, b) for a, b in pairs).lower()
     assert not [name for name in TOOLS if name in text]
+
+
+def test_the_harness_runs_are_kept_with_their_timing_and_only_a_whole_one_is_verified():
+    lines = [json.dumps({"scenario": "healthy", "engine": "postgres", "completed": True,
+                         "seconds": 13.0, "questions": 0}),
+             json.dumps({"scenario": "healthy", "engine": "mysql", "completed": False,
+                         "seconds": 7.5, "questions": 1}),
+             json.dumps({"scenario": "unrecoverable", "engine": "mysql", "completed": False,
+                         "seconds": 3.9}), ""]
+    rows = ease.harness_rows(lines)
+    assert [(r["pair"], r["status"], r["verified_seconds"], r["elapsed_seconds"], r["questions"])
+            for r in rows] == [
+        ("PostgreSQL to PostgreSQL, migrate from a minimal hop file", "verified", 13.0, 13.0, 0),
+        ("MySQL to MySQL, migrate from a minimal hop file", "failed", None, 7.5, 1)]
+
+
+def test_the_comparison_table_is_written_from_the_lines_and_the_next_run_reads_it_back(tmp_path):
+    from tools import measures_table
+    from migkit import autonomous
+    doc = tmp_path / "page.md"
+    cols = len(autonomous.MEASURED) + 1
+    doc.write_text("| Scenario | Engine |" + " x |" * cols + "\n"
+                   "| healthy | PostgreSQL |" + " to be measured |" * cols + "\n"
+                   "| healthy | MySQL |" + " to be measured |" * cols + "\n")
+    line = {"scenario": "healthy", "engine": "postgres", "inputs": 6, "interventions": 0,
+            "completed": True, "recovered": None, "retry_waste": 0, "seconds": 12.5,
+            "forecast_error": "no forecast said", "workers": 4, "questions": 0}
+    out = tmp_path / "m.jsonl"
+    out.write_text(json.dumps(line) + "\n")
+    assert measures_table.main([str(out), "--doc", str(doc)]) == 0
+    got = doc.read_text().splitlines()
+    assert got[1] == ("| healthy | PostgreSQL | 6 | 0 | yes | none needed | 0 | 12.5"
+                      " | no forecast said | 4 | 0 | to be measured |")
+    # a row no run measured keeps its cells; a second pass changes nothing
+    assert got[2].count("to be measured") == cols
+    assert not measures_table.write(out.read_text().splitlines(), doc)

@@ -2,64 +2,22 @@
   "date": "2026-10-16",
   "results": [
     {
-      "pair": "PostgreSQL (profile 0) to PostgreSQL (profile 0)",
-      "status": "not measured: local sandbox stopped"
+      "pair": "PostgreSQL to PostgreSQL, migrate from a minimal hop file",
+      "status": "verified",
+      "verified_seconds": 13.81,
+      "elapsed_seconds": 13.81,
+      "operator_config_lines": null,
+      "questions": 0,
+      "action_messages": null
     },
     {
-      "pair": "MySQL (profile 5) to MySQL (profile 5)",
-      "status": "not measured: local sandbox stopped"
-    },
-    {
-      "pair": "MySQL (profile 7) to MySQL (profile 7)",
-      "status": "not measured: local sandbox stopped"
-    },
-    {
-      "pair": "MySQL (profile 9) to MySQL (profile 9)",
-      "status": "not measured: local sandbox stopped"
-    },
-    {
-      "pair": "MySQL (profile 11) to MySQL (profile 11)",
-      "status": "not measured: local sandbox stopped"
-    },
-    {
-      "pair": "MySQL (profile 14) to MySQL (profile 14)",
-      "status": "not measured: local sandbox stopped"
-    },
-    {
-      "pair": "MongoDB (profile 16) to MongoDB (profile 16)",
-      "status": "not measured: local sandbox stopped"
-    },
-    {
-      "pair": "redis (profile 18) to redis (profile 18)",
-      "status": "not measured: local sandbox stopped"
-    },
-    {
-      "pair": "kafka (profile 21) to kafka (profile 21)",
-      "status": "not measured: local sandbox stopped"
-    },
-    {
-      "pair": "kafka (profile 23) to kafka (profile 23)",
-      "status": "not measured: local sandbox stopped"
-    },
-    {
-      "pair": "cassandra (profile 25) to cassandra (profile 25)",
-      "status": "not measured: local sandbox stopped"
-    },
-    {
-      "pair": "clickhouse (profile 27) to clickhouse (profile 27)",
-      "status": "not measured: local sandbox stopped"
-    },
-    {
-      "pair": "opensearch (profile 29) to opensearch (profile 29)",
-      "status": "not measured: local sandbox stopped"
-    },
-    {
-      "pair": "MySQL (profile 5) to PostgreSQL (profile 0)",
-      "status": "not measured: local sandbox stopped"
-    },
-    {
-      "pair": "PostgreSQL (profile 0) to MySQL (profile 5)",
-      "status": "not measured: local sandbox stopped"
+      "pair": "MySQL to MySQL, migrate from a minimal hop file",
+      "status": "verified",
+      "verified_seconds": 24.18,
+      "elapsed_seconds": 24.18,
+      "operator_config_lines": null,
+      "questions": 0,
+      "action_messages": null
     }
   ]
 }

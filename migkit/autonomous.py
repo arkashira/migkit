@@ -1133,11 +1133,18 @@ def evidence(path, last=50):
 SCENARIOS = {"healthy": "healthy",
              "recoverable in the run": "fault mid-copy, recovered in the run",
              "recoverable by a run again": "crash mid-copy, run again",
-             "unrecoverable": "refused target (unrecoverable)"}
+             "unrecoverable": "refused target (unrecoverable)",
+             "baseline, workers pinned to 1": "baseline, workers pinned to 1",
+             "interrupted three times": "interrupted three times, run again",
+             "a value above the packet size":
+                 "a value above the target's packet size",
+             "injected defects": "injected defects, then the check",
+             "asymmetric capacity": "target capped below its source"}
 ENGINES = {"mysql": "MySQL", "postgres": "PostgreSQL"}
 #: the measured columns, in the table's order after scenario and engine
 MEASURED = ("inputs", "interventions", "completed", "recovered",
-            "retry_waste", "seconds")
+            "retry_waste", "seconds", "forecast_error", "workers",
+            "questions")
 
 
 def _cell(key, v):

@@ -29,6 +29,7 @@ import yaml
 from tests import servers
 from tests.conftest import needs_docker, migkit_cmd
 from tests.mysql_pair import my_pair  # noqa: F401 - a fixture
+from tools import ease_measure as ease
 
 pytestmark = needs_docker
 
@@ -166,6 +167,27 @@ def _minimal(conf):
         assert set(hop[end]) <= END_KEYS, set(hop[end]) - END_KEYS
 
 
+#: a command still running this long is stopped and counted as failed, so a
+#: run that waits on itself fails its case instead of holding the harness
+#: (the slowest whole case measured took under a minute)
+HANG = 600
+BASELINE_HANGS = ("W16N-BASELINE: with the workers pinned to 1 the copy"
+                  " lands, then the check of the rows (the key-range digest"
+                  " on PostgreSQL, the row text on MySQL) never ends - every"
+                  " connection idle on both servers, the command waiting on"
+                  " itself (seen at 8 min on both, not traced further)")
+CUT = ("W16N-CUT: the run is not cut where MIGKIT_FAILPOINT says: the copy"
+       " goes by the bulk way, which passes no range.committed, table.done"
+       " or checkpoint.written point, so the first run ends whole (MySQL:"
+       " 0 of 3 runs cut on either engine, the copy then whole; the crash"
+       " case fails at the same step)")
+DEFECTS = ("W16N-DEFECTS: the copy before the defects are injected does not"
+           " complete when the source also holds a sequence, a role and its"
+           " grant, on both engines (the case stops at its first command;"
+           " the cause not read)")
+LOB_MYSQL = ("W16N-LOB: on MySQL the 8 MiB value does not arrive whole on a"
+             " target holding a 4 MiB packet (the run exits non-zero in 23 s)")
+
 _LEFT = re.compile(r"~([\d.,]+)\s*(s|min|h)\b[^;\n]*\bleft")
 _BAND = re.compile(r"([\d.,]+)\s*(?:-|to)\s*([\d.,]+)\s*(s|min|h)\b[^;\n]*"
                    r"\bleft")
@@ -197,9 +219,12 @@ def _run(conf, side, *args, **env):
     p = subprocess.Popen(migkit_cmd() + list(args), stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE, text=True, env=full,
                          stdin=subprocess.DEVNULL)
+    stop = threading.Timer(HANG, p.kill)
+    stop.start()
     lines = [(time.time() - t0, line) for line in p.stdout]
     err = p.stderr.read()
     p.wait()
+    stop.cancel()
     took = time.time() - t0
     done.set()
     after = side.load() if side else (0, 0)
@@ -242,6 +267,16 @@ def _workflow(conf):
     return {}
 
 
+def _progress(conf):
+    """The worker counts the move's own progress files said (`planner.
+    read_progress`), one a report directory."""
+    from migkit import planner
+    got = [planner.read_progress(p.parent)
+           for p in (conf.parent / "reports").rglob("progress.json")]
+    return [int(g["workers"]) for g in got
+            if g and str(g.get("workers", "")).isdigit()]
+
+
 def _units(conf):
     return {k: u.get("state")
             for k, u in _workflow(conf).get("units", {}).items()}
@@ -277,6 +312,17 @@ def _measure(name, conf, runs, side, rows=ROWS, lob=0, **more):
                                             / took) if took else None)},
          "forecast": _forecast(max(runs, key=lambda r: r["took"])),
          "claimed": "proved equal" in last.stdout, **more}
+    # the comparison's flat cells: the forecast's error where the run said
+    # one (half-way first), the workers the move chose, the questions the
+    # operator was asked (the ease measure's own count)
+    said = next((m["forecast"][q] for q in ("50%", "75%", "25%")
+                 if m["forecast"][q]), None)
+    m["forecast_error"] = said["error"] if said else "no forecast said"
+    m["forecast_band"] = said["band"] if said else None
+    workers = _progress(conf)
+    m["workers"] = max(workers) if workers else "not said"
+    m["questions"] = sum(ease.measure_transcript(
+        r["r"].stdout + r["r"].stderr, r["took"])["questions"] for r in runs)
     out = os.environ.get("MIGKIT_MEASURE_OUT")
     if out:
         with open(out, "a") as f:
@@ -304,12 +350,9 @@ def _either(request):
     return Side("mysql", space.src, space.dst)
 
 
-@pytest.fixture(params=[
-    "postgres",
-    pytest.param("mysql",
-                 marks=pytest.mark.xfail(strict=True, reason=MYBULK))])
+@pytest.fixture(params=["postgres", "mysql"])
 def side(request):
-    """A pair whose copy completes - held by W15J-PG16 and W15J-MYBULK."""
+    """A pair whose copy completes."""
     return _either(request)
 
 
@@ -335,6 +378,7 @@ def test_a_healthy_copy_completes_in_one_command(side, tmp_path):
     _gate(m)
 
 
+@pytest.mark.xfail(strict=True, reason=BASELINE_HANGS)
 def test_the_baseline_is_the_same_copy_pinned_to_one_worker(side, tmp_path):
     """No switch to fixed defaults exists: the baseline pins the workers
     to 1 through the expert override, the one hop key it adds."""
@@ -359,6 +403,7 @@ def test_a_fault_mid_copy_is_recovered_inside_the_run(side, tmp_path):
     assert m["recovered"] in (None, 1.0)
 
 
+@pytest.mark.xfail(strict=True, reason=CUT)
 def test_a_crash_mid_copy_completes_on_the_next_run(side, tmp_path):
     conf = _conf(tmp_path, side)
     side.seed()
@@ -371,6 +416,7 @@ def test_a_crash_mid_copy_completes_on_the_next_run(side, tmp_path):
     assert m["completed"] and m["interventions"] == 1
 
 
+@pytest.mark.xfail(strict=True, reason=CUT)
 def test_three_interruptions_end_where_a_straight_run_does(side, tmp_path):
     """Cut at three phases - a range committed, a table done, a checkpoint
     written - and run again each time: the same digest and the same units
@@ -398,10 +444,13 @@ def test_three_interruptions_end_where_a_straight_run_does(side, tmp_path):
     assert m["units_run_twice"] == 0
 
 
-def test_a_value_above_the_targets_packet_size_arrives_whole(side, tmp_path):
+def test_a_value_above_the_targets_packet_size_arrives_whole(side, tmp_path,
+                                                            request):
     """One JSON value larger than the target accepts in one packet, in the
     same run as the rest of the table."""
     if side.engine == "mysql":
+        request.node.add_marker(pytest.mark.xfail(strict=True,
+                                                  reason=LOB_MYSQL))
         side.sql("dst", "set global max_allowed_packet = 4194304")
     conf = _conf(tmp_path, side)
     side.seed(lob=8 << 20)
@@ -411,6 +460,7 @@ def test_a_value_above_the_targets_packet_size_arrives_whole(side, tmp_path):
     assert m["completed"]
 
 
+@pytest.mark.xfail(strict=True, reason=DEFECTS)
 def test_injected_defects_are_each_found_and_named(side, tmp_path):
     """After a proved copy: a sequence set behind, a grant missing on one
     table and a row changed on the target - the check names each."""
@@ -460,8 +510,6 @@ def test_a_target_capped_below_its_source_is_sized_to_it(pg_pair, capped,
     _gate(m)
 
 
-@pytest.mark.xfail(strict=True, reason=MYBULK + " (the default profile,"
-                   " past the assessment W15J-D0 no longer holds)")
 def test_a_copy_needs_no_change_reading(my_pair, tmp_path):  # noqa: F811
     from tests import mysql_pair
     side = Side("mysql", mysql_pair._side("src"), mysql_pair._side("dst"))

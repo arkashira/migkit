@@ -6,7 +6,7 @@ Grounded in the existing research; nothing here is new reading:
 [GG] `mechanisms-goldengate-qlik-hvr-ibm-shareplex-2026-09-28.md`.
 Each row says the established mechanism, migkit's equivalent as
 `module.function`, or the gap. No row claims migkit is better: that needs
-the measured scenarios at the end, which are written and not yet run.
+the measured scenarios at the end on a managed service too, which is not run.
 
 | Mechanism | Established products | migkit | Gap |
 |---|---|---|---|
@@ -23,32 +23,51 @@ the measured scenarios at the end, which are written and not yet run.
 ## Measured scenarios
 
 `tests/test_autonomous_scenarios.py` (sandbox, MySQL and PostgreSQL, 20000
-rows) measures each scenario the same way and writes one JSON line a run
-to `MIGKIT_MEASURE_OUT`: inputs (arguments of the first command),
-interventions (runs the operator had to start again), completed (exit 0
-and every key once on the target), recovered (recoveries whose
-postcondition held, of all), retry waste (recoveries that failed again),
-seconds. `autonomous.comparison` fills this table from those lines. The
-inputs are the arguments of the first command (`migrate --hop t --goal copy
---go`: 6), the same for every scenario, so they are written; the cells below are
-written from the run of 2026-10-16 (docker sandbox: mysql-rowmeta pair,
-mysql 8.4.11; pg pair, postgres 16): no copy completed on either engine -
-board notes W15J-PG16 and W15J-MYBULK, strict xfails in the harness -
-so a row's "no" is that run's measured outcome; a row no run reached says
-"to be measured"; a
-managed service column needs the same scenario on equal scope and
-resources and is not claimed.
+rows) measures each scenario the same way and writes one JSON line a case
+to `MIGKIT_MEASURE_OUT`: inputs (arguments of the first command:
+`migrate --hop t --goal copy --go`, 6, from a hop file holding the two
+addresses, the credentials and the databases only), interventions (runs
+the operator had to start again), completed (exit 0, every key once on the
+target and the digest of every value equal to the source's), recovered
+(recoveries whose postcondition held, of all), retry waste (recoveries
+that failed again), seconds (every run of the case, end to end, through
+the installed command), forecast error (|when the run said a time left +
+what it said - the time the run took| / the time it took, half-way first;
+"no forecast said" where no progress line stated one), workers (the most
+the move's own progress said it ran at once; "not said" where no progress
+file was left), questions (lines of the run asking the operator, the ease
+measure's own count). The baseline is the same copy with the workers
+pinned to 1 through the expert override (no switch to fixed defaults
+exists), its row beside the healthy one. A managed service column needs
+the same scenario on equal scope and resources and is not claimed.
 
-| Scenario | Engine | Inputs | Interventions | Completed | Recovered | Retry waste | Seconds | Managed service |
-|---|---|---|---|---|---|---|---|---|
-| healthy | MySQL | 6 | 0 | no | 0% | 1 | 7.58 | to be measured |
-| healthy | PostgreSQL | 6 | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured |
-| fault mid-copy, recovered in the run | MySQL | 6 | 0 | no | 0% | 1 | 7.15 | to be measured |
-| fault mid-copy, recovered in the run | PostgreSQL | 6 | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured |
-| crash mid-copy, run again | MySQL | 6 | 1 | no | 0% | 2 | 10.47 | to be measured |
-| crash mid-copy, run again | PostgreSQL | 6 | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured |
-| refused target (unrecoverable) | MySQL | 6 | 0 | no | none needed | 0 | 3.95 | to be measured |
-| refused target (unrecoverable) | PostgreSQL | 6 | 0 | no | none needed | 0 | 62.64 | to be measured |
+The table is written by the generator, never by hand; the next run
+rewrites it the same way:
+
+    MIGKIT_MEASURE_OUT=/private/tmp/migkit-W16N-measures.jsonl python -m pytest tests/test_autonomous_scenarios.py
+    python tools/measures_table.py /private/tmp/migkit-W16N-measures.jsonl
+
+The cells below are the run of 2026-10-16 (docker sandbox: the pg pair, postgres 16, and the pg-capped target; the mysql-rowmeta pair, mysql 8.4.11): healthy copies, a fault recovered inside the run, a value above the packet size on PostgreSQL, the capped target and the refused target end as the cells say. No run stated a forecast and no move left a worker count, so those cells say so. The baseline pinned to one worker never ended (stopped at 600 s by the harness; it hung in the row check after the copy, so its seconds are the stop, not a copy time). The crash and interruption cases were never cut: the bulk way passes none of the failpoints, so the interruption rows (0 of 3 runs cut on either engine) are straight runs, not resumed ones. A row the run did not reach (its case stopped before its measure) still says to be measured.
+
+| Scenario | Engine | Inputs | Interventions | Completed | Recovered | Retry waste | Seconds | Forecast error | Workers | Questions | Managed service |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| healthy | MySQL | 6 | 0 | yes | none needed | 0 | 24.18 | no forecast said | not said | 0 | to be measured |
+| healthy | PostgreSQL | 6 | 0 | yes | none needed | 0 | 13.81 | no forecast said | not said | 0 | to be measured |
+| baseline, workers pinned to 1 | MySQL | 6 | 0 | no | none needed | 0 | 497.04 | no forecast said | not said | 0 | to be measured |
+| baseline, workers pinned to 1 | PostgreSQL | 6 | 0 | no | none needed | 0 | 515.31 | no forecast said | not said | 0 | to be measured |
+| fault mid-copy, recovered in the run | MySQL | 6 | 0 | yes | none needed | 0 | 58.49 | no forecast said | not said | 0 | to be measured |
+| fault mid-copy, recovered in the run | PostgreSQL | 6 | 0 | yes | none needed | 0 | 58.3 | no forecast said | not said | 0 | to be measured |
+| crash mid-copy, run again | MySQL | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured |
+| crash mid-copy, run again | PostgreSQL | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured |
+| interrupted three times, run again | MySQL | 6 | 3 | yes | none needed | 0 | 63.37 | no forecast said | not said | 0 | to be measured |
+| interrupted three times, run again | PostgreSQL | 6 | 3 | yes | none needed | 0 | 60.57 | no forecast said | not said | 0 | to be measured |
+| a value above the target's packet size | MySQL | 6 | 0 | no | none needed | 0 | 23.35 | no forecast said | not said | 0 | to be measured |
+| a value above the target's packet size | PostgreSQL | 6 | 0 | yes | none needed | 0 | 41.82 | no forecast said | not said | 0 | to be measured |
+| injected defects, then the check | MySQL | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured |
+| injected defects, then the check | PostgreSQL | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured |
+| refused target (unrecoverable) | MySQL | 6 | 0 | no | none needed | 0 | 24.93 | no forecast said | not said | 0 | to be measured |
+| refused target (unrecoverable) | PostgreSQL | 6 | 0 | no | 0% | 1 | 7.01 | no forecast said | not said | 0 | to be measured |
+| target capped below its source | PostgreSQL | 6 | 0 | yes | none needed | 0 | 46.21 | no forecast said | not said | 0 | to be measured |
 
 The recovery choices themselves are proved on fakes in
 `tests/test_autonomous_workflow.py`: reconcile before a repeat, a write

@@ -38,11 +38,14 @@ def verified(steps, verdict, rows):
 
 
 def colima_running():
-    try:
-        return subprocess.run(["colima", "status"], capture_output=True,
-                              timeout=20).returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        return False
+    """Whether the docker sandbox answers - whichever runtime serves it."""
+    for probe in (["docker", "info"], ["colima", "status"]):
+        try:
+            if subprocess.run(probe, capture_output=True, timeout=20).returncode == 0:
+                return True
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+    return False
 
 
 def pairs():
@@ -220,15 +223,45 @@ def write_reports(rows, directory, date):
     return stem
 
 
-def main():
+def harness_rows(lines):
+    """The scenario harness's healthy runs (`MIGKIT_MEASURE_OUT`, one JSON
+    line a case of tests/test_autonomous_scenarios.py) as rows of this
+    report: the same timing - time to a verified move from a hop file of
+    two addresses, their credentials and the databases - kept beside the
+    address-only runs. A run that did not end whole has no verified time."""
+    names = {"postgres": "PostgreSQL", "mysql": "MySQL"}
+    rows = []
+    for line in lines:
+        m = json.loads(line) if line.strip() else {}
+        if m.get("scenario") != "healthy":
+            continue
+        engine = names.get(m.get("engine"), m.get("engine"))
+        rows.append({
+            "pair": f"{engine} to {engine}, migrate from a minimal hop file",
+            "status": "verified" if m.get("completed") else "failed",
+            "verified_seconds": m.get("seconds") if m.get("completed") else None,
+            "elapsed_seconds": m.get("seconds"),
+            "operator_config_lines": None, "questions": m.get("questions"),
+            "action_messages": None})
+    return rows
+
+
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=ROOT / "docs/research")
     parser.add_argument("--timeout", type=float, default=600)
-    args = parser.parse_args()
+    parser.add_argument("--pairs", default="",
+                        help="source:target profile keys, comma separated (all by default)")
+    parser.add_argument("--measures", type=Path, action="append", default=[],
+                        help="the scenario harness's lines of the same run")
+    args = parser.parse_args(argv)
     sys.path.insert(0, str(ROOT))
     running = colima_running()
     rows = []
+    wanted = {tuple(p.split(":")) for p in args.pairs.split(",") if p}
     for source, target in pairs():
+        if wanted and (source, target) not in wanted:
+            continue
         if not running:
             rows.append({"pair": pair_label(source, target), "status": "not measured: local sandbox stopped"})
             continue
@@ -236,6 +269,8 @@ def main():
             rows.append(measure_pair(source, target, args.timeout))
         except Exception:
             rows.append({"pair": pair_label(source, target), "status": "failed: sandbox setup or evidence unavailable"})
+    rows += harness_rows([line for f in args.measures
+                          for line in f.read_text().splitlines()])
     stem = write_reports(rows, args.output, datetime.date.today().isoformat())
     print(f"Ease measurements: {stem.name}.md and {stem.name}.json")
     return 0 if all(r["status"] == "verified" for r in rows) else 1
