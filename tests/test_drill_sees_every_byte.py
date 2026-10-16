@@ -56,11 +56,12 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
 SRC, DST = 15531, 15532
-NAMES = {SRC: "migkit-test-inv-src", DST: "migkit-test-inv-dst"}
+NAMES = {SRC: servers.name(servers.PREFIX + "-inv-src"), DST: servers.name(servers.PREFIX + "-inv-dst")}
 
 #: (key, what the source holds, what the target holds). Every pair differs
 #: in bytes; every pair but the last looks identical printed.

@@ -23,10 +23,11 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
-MY, PORT = "migkit-test-pass-my", 16184
+MY, PORT = servers.name(servers.PREFIX + "-pass-my"), servers.private_port(0)
 ROWS = 40_000
 
 

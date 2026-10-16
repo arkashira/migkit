@@ -13,10 +13,11 @@ import time
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
-MG, PORT, SECRET = "migkit-test-mongo-auth", 15800, "CHANGE_ME-pw-77"
+MG, PORT, SECRET = servers.name(servers.PREFIX + "-mongo-auth"), servers.private_port(0), "CHANGE_ME-pw-77"
 
 
 def test_a_signed_in_move_with_no_password_on_any_command_line(tmp_path,

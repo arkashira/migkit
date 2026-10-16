@@ -17,10 +17,11 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
-MA, MA_PORT = "migkit-test-rung-maria", 15963
+MA, MA_PORT = servers.name(servers.PREFIX + "-rung-maria"), servers.private_port(0)
 
 
 def _connect(user="root", password="test", db="app"):

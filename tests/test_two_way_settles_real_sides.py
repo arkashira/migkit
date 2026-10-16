@@ -19,11 +19,12 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers as lanes
 
 pytestmark = needs_docker
 
-MY, MY_PORT = "migkit-test-cdr-my", 16390
-PG, PG_PORT = "migkit-test-cdr-pg", 16391
+MY, MY_PORT = lanes.name(lanes.PREFIX + "-cdr-my"), lanes.private_port(0)
+PG, PG_PORT = lanes.name(lanes.PREFIX + "-cdr-pg"), lanes.private_port(1)
 
 TABLE_MY = ("create table acct (id int primary key, note varchar(40) not"
             " null, owner varchar(40) not null, balance int not null,"

@@ -10,6 +10,7 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [
@@ -18,8 +19,8 @@ PROVES = [
     ("verify.repair-undo", "mysql"),
 ]
 
-SRC, DST = "migkit-test-grantfix-src", "migkit-test-grantfix-dst"
-SRC_PORT, DST_PORT = 13471, 13472
+SRC, DST = servers.name(servers.PREFIX + "-grantfix-src"), servers.name(servers.PREFIX + "-grantfix-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

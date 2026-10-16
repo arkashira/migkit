@@ -17,10 +17,11 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import psql
+from tests import servers
 
 pytestmark = [pytest.mark.docker]
 
-MY, MY_PORT = "migkit-test-bisect-my", 15842
+MY, MY_PORT = servers.name(servers.PREFIX + "-bisect-my"), servers.private_port(0)
 
 
 def _docker():

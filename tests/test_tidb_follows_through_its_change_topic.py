@@ -21,6 +21,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers as lanes
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [
@@ -34,8 +35,8 @@ PROVES = [
 
 pytestmark = needs_docker
 
-TIDB, TIDB_PORT = "migkit-test-tidb", 16340
-KAFKA, KAFKA_PORT = "migkit-test-changes-kafka", 16347
+TIDB, TIDB_PORT = lanes.name(lanes.PREFIX + "-tidb"), lanes.private_port(0)
+KAFKA, KAFKA_PORT = lanes.name(lanes.PREFIX + "-changes-kafka"), lanes.private_port(1)
 TOPIC = "ticdc-shop"
 
 

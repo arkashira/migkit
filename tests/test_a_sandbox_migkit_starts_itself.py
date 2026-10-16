@@ -10,12 +10,13 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers as lanes
 
 pytestmark = [pytest.mark.docker]
 
-MY, PG = "migkit-test-code-my", "migkit-test-code-pg"
-MY_PORT, PG_PORT = 16080, 16081
-AUTO, AUTO_PORTS = "migkit-test-code-auto", [16084, 16085]
+MY, PG = lanes.name(lanes.PREFIX + "-code-my"), lanes.name(lanes.PREFIX + "-code-pg")
+MY_PORT, PG_PORT = lanes.private_port(0), lanes.private_port(1)
+AUTO, AUTO_PORTS = lanes.name(lanes.PREFIX + "-code-auto"), [lanes.private_port(2), lanes.private_port(3)]
 
 
 def _sh(*a, **kw):

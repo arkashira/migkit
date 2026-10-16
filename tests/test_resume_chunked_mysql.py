@@ -10,9 +10,10 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
-SRC, DST = "migkit-test-mysqlchunk-src", "migkit-test-mysqlchunk-dst"
-SRC_PORT, DST_PORT = 13404, 13405
+SRC, DST = servers.name(servers.PREFIX + "-mysqlchunk-src"), servers.name(servers.PREFIX + "-mysqlchunk-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

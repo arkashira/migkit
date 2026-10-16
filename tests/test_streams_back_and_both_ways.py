@@ -21,9 +21,10 @@ import pytest
 from click.testing import CliRunner
 
 from tests.conftest import needs_docker
+from tests import servers
 
-NET = "migkit-test-rev-net"
-A, B = ("migkit-test-rev-a", 15807), ("migkit-test-rev-b", 15808)
+NET = servers.name(servers.PREFIX + "-rev-net")
+A, B = (servers.name(servers.PREFIX + "-rev-a"), servers.private_port(0)), (servers.name(servers.PREFIX + "-rev-b"), servers.private_port(1))
 
 
 def _sql(name, sql):

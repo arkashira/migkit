@@ -17,9 +17,10 @@ from click.testing import CliRunner
 from migkit import archive, sourcechange
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
-SRC, DST = ("migkit-test-archive-src", 16468), ("migkit-test-archive-dst",
-                                               16469)
+SRC, DST = (servers.name(servers.PREFIX + "-archive-src"), servers.private_port(0)), (servers.name(servers.PREFIX + "-archive-dst"),
+                                               servers.private_port(1))
 
 
 def _hop(opts=None, goal="archive"):

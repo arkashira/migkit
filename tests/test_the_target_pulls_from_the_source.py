@@ -20,12 +20,13 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
 ROOT = Path(__file__).resolve().parent.parent
-PROXY, API, SRC_LISTEN, DST_LISTEN = ("migkit-test-inst-toxi", 16230, 16231,
-                                      16232)
+PROXY, API, SRC_LISTEN, DST_LISTEN = (servers.name(servers.PREFIX + "-inst-toxi"), servers.private_port(0), servers.private_port(1),
+                                      servers.private_port(2))
 
 
 def _api(method, path, body=None):
@@ -59,8 +60,8 @@ def proxy(pg_pair):
         for _ in range(30):
             try:
                 for name, listen, box in (
-                        ("source", SRC_LISTEN, "migkit-test-pg-src"),
-                        ("target", DST_LISTEN, "migkit-test-pg-dst")):
+                        ("source", SRC_LISTEN, servers.name(servers.PREFIX + "-pg-src")),
+                        ("target", DST_LISTEN, servers.name(servers.PREFIX + "-pg-dst"))):
                     _api("POST", "/proxies",
                          {"name": name, "listen": f"0.0.0.0:{listen}",
                           "upstream": f"{_ip(box)}:5432"})
@@ -209,7 +210,7 @@ def test_beside_the_target_migkit_copies_the_rows_itself(pg_pair, proxy,
     enough, and the plan says why the servers do not pull."""
     _prepare(pg_pair)
     _hop(tmp_path, pg_pair,
-         f"{{source: '{_ip('migkit-test-pg-src')}:5432'}}")
+         f"{{source: '{_ip(servers.name(servers.PREFIX + '-pg-src'))}:5432'}}")
     plan = _migkit(tmp_path, "move", "pull", "--mode", "full")
     assert plan.returncode == 0, plan.stdout + plan.stderr
     assert "the rows go through this machine: this machine is" in \
@@ -225,7 +226,7 @@ def test_the_target_pulls_through_a_foreign_server(pg_pair, proxy,
     _prepare(pg_pair)
     _far(True)
     _hop(tmp_path, pg_pair,
-         f"{{source: '{_ip('migkit-test-pg-src')}:5432'}}", far=True)
+         f"{{source: '{_ip(servers.name(servers.PREFIX + '-pg-src'))}:5432'}}", far=True)
     try:
         _pulled(pg_pair, tmp_path)
     finally:
@@ -258,7 +259,7 @@ def test_the_target_copies_through_a_temporary_subscription(pg_pair, proxy,
                                                             tmp_path):
     _prepare(pg_pair)
     _hop(tmp_path, pg_pair,
-         f"{{source: '{_ip('migkit-test-pg-src')}:5432'}}")
+         f"{{source: '{_ip(servers.name(servers.PREFIX + '-pg-src'))}:5432'}}")
     got = _migkit(tmp_path, "move", "pull", "--mode", "full", "--go",
                   MIGKIT_MOVER="pgsubscribe")
     assert got.returncode == 0, got.stdout + got.stderr

@@ -15,11 +15,12 @@ import time
 import pytest
 
 from tests.conftest import needs_docker
+from tests import servers as lanes
 
 pytestmark = needs_docker
 
-MY = ("migkit-test-fork-my84", 16402, "mysql:8.4")
-MARIA = ("migkit-test-fork-maria1011", 16403, "mariadb:10.11")
+MY = (lanes.name(lanes.PREFIX + "-fork-my84"), lanes.private_port(0), "mysql:8.4")
+MARIA = (lanes.name(lanes.PREFIX + "-fork-maria1011"), lanes.private_port(1), "mariadb:10.11")
 
 
 def sql(name, client, text):

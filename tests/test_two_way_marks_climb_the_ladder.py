@@ -21,14 +21,15 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import _wait_tcp, needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("cutover.two-way", ("postgres", "mysql"))]
 
 pytestmark = needs_docker
 
-MY, MY_PORT = "migkit-test-rung-my", 15962
-PG, PG_PORT = "migkit-test-rung-pg", 15965
+MY, MY_PORT = servers.name(servers.PREFIX + "-rung-my"), servers.private_port(0)
+PG, PG_PORT = servers.name(servers.PREFIX + "-rung-pg"), servers.private_port(1)
 ORIGINS = ("select pg_replication_origin_drop(roname) from"
            " pg_replication_origin where roname like 'migkit\\_twoway\\_%'")
 

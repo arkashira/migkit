@@ -18,6 +18,7 @@ import sqlite3
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("move.table-copy", "sqlite")]
@@ -225,8 +226,8 @@ def test_a_checkpoint_from_a_copy_by_pages_goes_on_by_them(tmp_path,
 
 # --- MySQL to MySQL ---------------------------------------------------------
 
-MY_SRC, MY_DST = "migkit-test-vd-my-src", "migkit-test-vd-my-dst"
-MY_PORTS = {MY_SRC: 16272, MY_DST: 16273}
+MY_SRC, MY_DST = servers.name(servers.PREFIX + "-vd-my-src"), servers.name(servers.PREFIX + "-vd-my-dst")
+MY_PORTS = {MY_SRC: servers.private_port(0), MY_DST: servers.private_port(1)}
 
 
 def _my(name, sql):

@@ -22,11 +22,12 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
-CLUSTERS = {"src": ("migkit-test-avro-src", 15893, 15895),
-            "dst": ("migkit-test-avro-dst", 15894, 15896)}
+CLUSTERS = {"src": (servers.name(servers.PREFIX + "-avro-src"), servers.private_port(0), servers.private_port(1)),
+            "dst": (servers.name(servers.PREFIX + "-avro-dst"), servers.private_port(2), servers.private_port(3))}
 
 
 def _wait(port, timeout=90):

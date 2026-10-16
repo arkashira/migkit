@@ -20,6 +20,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [
@@ -32,7 +33,7 @@ PROVES = [
 
 pytestmark = needs_docker
 
-EMU, PORT = "migkit-test-cosmos", 16345
+EMU, PORT = servers.name(servers.PREFIX + "-cosmos"), servers.private_port(0)
 IMAGE = "mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-preview"
 #: the key every Cosmos DB emulator takes, published with it
 EMULATOR_KEY = ("C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mG"

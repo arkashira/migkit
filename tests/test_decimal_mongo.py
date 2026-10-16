@@ -32,11 +32,12 @@ import pytest
 from migkit import canon
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
-MG = "migkit-test-dec-mg"
-MG_PORT = 27090
+MG = servers.name(servers.PREFIX + "-dec-mg")
+MG_PORT = servers.private_port(0)
 AWKWARD = 'a:b["x"]'
 VALUES = ("1.5000", "0.0001", "12345678901234.5678", "-0.5000", "0.0000")
 

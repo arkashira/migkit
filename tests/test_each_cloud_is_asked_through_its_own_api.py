@@ -30,6 +30,7 @@ import pytest
 
 from migkit import cloudapi
 from migkit.cloudapi import NotOffered, RestorePoint
+from tests import servers
 
 #: every product each provider's adapter answers for
 PRODUCTS = {
@@ -3086,7 +3087,7 @@ def _jwt():
     import jwt
     now = int(time.time())
     return jwt.encode({"iat": now, "exp": now + 3600},
-                      "migkit-test-key-long-enough-for-hs256-0123",
+                      servers.name(servers.PREFIX + "-key-long-enough-for-hs256-0123"),
                       algorithm="HS256")
 
 

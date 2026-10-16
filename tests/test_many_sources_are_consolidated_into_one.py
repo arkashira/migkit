@@ -16,9 +16,10 @@ from click.testing import CliRunner
 from migkit import consolidate
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
-SRC, DST = ("migkit-test-consolidate-src", 16464), (
-    "migkit-test-consolidate-dst", 16465)
+SRC, DST = (servers.name(servers.PREFIX + "-consolidate-src"), servers.private_port(0)), (
+    servers.name(servers.PREFIX + "-consolidate-dst"), servers.private_port(1))
 
 
 def _hop(name="a", dbs=("x",), opts=None, host="10.0.0.9"):

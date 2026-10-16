@@ -14,6 +14,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("verify.users", "cassandra"), ("cutover.rollback", "cassandra")]
@@ -23,8 +24,8 @@ pytestmark = needs_docker
 #: the login the cassandra image starts with, the same text as its user
 IMAGE_LOGIN = "cassandra"
 
-SRC, DST = ("migkit-test-csauth-src", 15931), ("migkit-test-csauth-dst",
-                                               15932)
+SRC, DST = (servers.name(servers.PREFIX + "-csauth-src"), servers.private_port(0)), (servers.name(servers.PREFIX + "-csauth-dst"),
+                                               servers.private_port(1))
 AUTH = ("sed -i 's/^authenticator:.*/authenticator: PasswordAuthenticator/;"
         " s/^authorizer:.*/authorizer: CassandraAuthorizer/'"
         " /etc/cassandra/cassandra.yaml && exec docker-entrypoint.sh"

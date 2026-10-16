@@ -15,9 +15,10 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
-PG, MY = "migkit-test-pgcdc-pg", "migkit-test-pgcdc-my"
-PG_PORT, MY_PORT = 15457, 13357
+PG, MY = servers.name(servers.PREFIX + "-pgcdc-pg"), servers.name(servers.PREFIX + "-pgcdc-my")
+PG_PORT, MY_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():
@@ -252,13 +253,13 @@ def test_a_slot_made_with_another_plugin_is_refused(pair):
 def test_a_server_without_logical_wal_is_refused_with_the_setting(pair):
     """Nothing client-side can make the WAL carry row images it was never
     told to carry, so the message is the setting rather than a workaround."""
-    other = "migkit-test-pgcdc-min"
+    other = servers.name(servers.PREFIX + "-pgcdc-min")
     subprocess.run(["docker", "rm", "-f", "-v", other], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", other, "-e",
-                    "POSTGRES_PASSWORD=test", "-p", "15456:5432",
+                    "POSTGRES_PASSWORD=test", "-p", f"{servers.private_port(2)}:5432",
                     "postgres:16"], check=True, capture_output=True)
     try:
-        assert _wait(15456)
+        assert _wait(servers.private_port(2))
         for _ in range(40):
             if pg_sql("select 1", "postgres", other).returncode == 0:
                 break
@@ -270,7 +271,7 @@ def test_a_server_without_logical_wal_is_refused_with_the_setting(pair):
         assert pg_sql("create database cx", "postgres", other).returncode == 0
 
         from migkit.engines.postgres import PostgresEngine
-        eng = PostgresEngine(_hop("pgcdc", "postgres", 15456,
+        eng = PostgresEngine(_hop("pgcdc", "postgres", servers.private_port(2),
                                   "postgres", "test"))
         with pytest.raises(SystemExit) as e:
             eng.neutral_changes("src", "cx")

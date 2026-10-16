@@ -20,11 +20,12 @@ from click.testing import CliRunner
 
 from migkit import carriers, ship
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
 SRC, DST = "migkit-ship-pg-src", "migkit-ship-pg-dst"
-PORT = {SRC: 16410, DST: 16411}
+PORT = {SRC: servers.private_port(0), DST: servers.private_port(1)}
 
 
 def _psql(name, sql, db="app"):

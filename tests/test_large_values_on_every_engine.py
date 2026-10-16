@@ -25,6 +25,7 @@ from migkit.engines import engine_named
 from tests import large_values_rig as rig
 from tests.cap_pairs import remove
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [
@@ -56,8 +57,8 @@ def _yaml(engine, src, dst, db, extra=""):
 
 # --- Redis -----------------------------------------------------------------
 
-REDIS = {"src": ("migkit-test-lv-redis-src", 16370),
-         "dst": ("migkit-test-lv-redis-dst", 16371)}
+REDIS = {"src": (servers.name(servers.PREFIX + "-lv-redis-src"), servers.private_port(2)),
+         "dst": (servers.name(servers.PREFIX + "-lv-redis-dst"), servers.private_port(3))}
 
 
 @pytest.fixture
@@ -147,8 +148,8 @@ def test_redis_keys_past_a_piece_are_carried_and_compared_in_pieces(
 
 # --- MongoDB ---------------------------------------------------------------
 
-MONGO = {"src": ("migkit-test-lv-mongo-src", 16372),
-         "dst": ("migkit-test-lv-mongo-dst", 16373)}
+MONGO = {"src": (servers.name(servers.PREFIX + "-lv-mongo-src"), servers.private_port(4)),
+         "dst": (servers.name(servers.PREFIX + "-lv-mongo-dst"), servers.private_port(5))}
 
 
 @pytest.fixture
@@ -209,8 +210,8 @@ def test_mongodb_documents_at_their_limit_and_a_gridfs_file(mongo_pair):
 
 # --- Kafka -----------------------------------------------------------------
 
-KAFKA = {"src": ("migkit-test-lv-kafka-src", 16374),
-         "dst": ("migkit-test-lv-kafka-dst", 16375)}
+KAFKA = {"src": (servers.name(servers.PREFIX + "-lv-kafka-src"), servers.private_port(6)),
+         "dst": (servers.name(servers.PREFIX + "-lv-kafka-dst"), servers.private_port(7))}
 
 
 @pytest.fixture
@@ -343,7 +344,7 @@ def test_a_message_the_target_takes_no_more_of_stops_the_copy(kafka_pair):
 
 # --- ClickHouse ------------------------------------------------------------
 
-CH = ("migkit-test-lv-clickhouse", 16376)
+CH = (servers.name(servers.PREFIX + "-lv-clickhouse"), servers.private_port(0))
 
 
 def _ch():
@@ -408,7 +409,7 @@ def test_clickhouse_strings_twice_a_batch(clickhouse):
 
 # --- OpenSearch ------------------------------------------------------------
 
-OS = ("migkit-test-lv-opensearch", 16377)
+OS = (servers.name(servers.PREFIX + "-lv-opensearch"), servers.private_port(1))
 
 
 def _os(method, path, body=None):

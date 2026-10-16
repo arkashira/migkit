@@ -10,10 +10,11 @@ import time
 import pytest
 
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
-SRC, DST = ("migkit-test-perf-mysrc", 15805), ("migkit-test-perf-mydst", 15806)
+SRC, DST = (servers.name(servers.PREFIX + "-perf-mysrc"), servers.private_port(0)), (servers.name(servers.PREFIX + "-perf-mydst"), servers.private_port(1))
 
 
 def _sql(name, sql, db=None):

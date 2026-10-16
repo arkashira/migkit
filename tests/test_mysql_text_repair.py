@@ -13,10 +13,11 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers
 
 pytestmark = pytest.mark.docker
 
-MY, PORT = "migkit-test-mymoji", 15773
+MY, PORT = servers.name(servers.PREFIX + "-mymoji"), servers.private_port(0)
 
 
 def _docker():

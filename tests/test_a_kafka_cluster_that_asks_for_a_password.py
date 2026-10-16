@@ -17,10 +17,11 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
-RP, PORT = "migkit-test-sasl", 15846
+RP, PORT = servers.name(servers.PREFIX + "-sasl"), servers.private_port(0)
 
 
 def _wait(port, timeout=90):

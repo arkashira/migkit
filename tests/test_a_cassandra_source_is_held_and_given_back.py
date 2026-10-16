@@ -13,13 +13,14 @@ import pytest
 from migkit import freeze
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("cutover.freeze", "cassandra")]
 
 pytestmark = needs_docker
 
-NAME, PORT, PW = "migkit-test-hold-cassandra", 16352, "CHANGE_ME-root"
+NAME, PORT, PW = servers.name(servers.PREFIX + "-hold-cassandra"), servers.private_port(0), "CHANGE_ME-root"
 
 
 def _session(user="cassandra", password=PW):

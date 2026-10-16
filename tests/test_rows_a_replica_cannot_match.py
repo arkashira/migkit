@@ -11,6 +11,7 @@ import time
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
@@ -28,7 +29,7 @@ def test_the_replica_really_stops_on_such_a_table(pg_pair):
     src_ip = subprocess.run(
         ["docker", "inspect", "-f",
          "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
-         "migkit-test-pg-src"], capture_output=True, text=True).stdout.strip()
+         servers.name(servers.PREFIX + "-pg-src")], capture_output=True, text=True).stdout.strip()
     for port in (pg_pair["src"], pg_pair["dst"]):
         psql(port, "create table public.doc (body json, n int)")
     psql(pg_pair["src"], "alter table public.doc replica identity full;"
@@ -47,7 +48,7 @@ def test_the_replica_really_stops_on_such_a_table(pg_pair):
             time.sleep(1)
         psql(pg_pair["src"], "update public.doc set n = 2")
         time.sleep(6)
-        logs = subprocess.run(["docker", "logs", "migkit-test-pg-dst"],
+        logs = subprocess.run(["docker", "logs", servers.name(servers.PREFIX + "-pg-dst")],
                               capture_output=True, text=True)
         text = logs.stdout + logs.stderr
         assert "could not identify an equality operator for type json" \

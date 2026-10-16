@@ -12,9 +12,10 @@ import time
 import pytest
 
 from migkit.locks import MODES, SEVERITY, classify
+from tests import servers
 
-NAME = "migkit-test-locks"
-PORT = 15484
+NAME = servers.name(servers.PREFIX + "-locks")
+PORT = servers.private_port(0)
 
 
 def _docker():

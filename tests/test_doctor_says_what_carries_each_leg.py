@@ -14,8 +14,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
-PG, PORT = "migkit-test-pgssl", 15933
+PG, PORT = servers.name(servers.PREFIX + "-pgssl"), servers.private_port(0)
 
 
 class _Said:
@@ -131,7 +132,7 @@ def test_a_certificate_asked_for_is_checked(ssl_server, tmp_path):
         PostgresEngine(hop).leg_encryption("src", "postgres")
 
 
-MY, MY_PORT = "migkit-test-myssl", 15934
+MY, MY_PORT = servers.name(servers.PREFIX + "-myssl"), servers.private_port(1)
 
 
 @needs_docker

@@ -31,6 +31,7 @@ import pytest
 from migkit import movers
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
@@ -93,7 +94,7 @@ def test_the_trigger_really_does_rewrite_an_unguarded_load(stamped):
     that the trigger was never firing."""
     got = subprocess.run(
         ["docker", "exec", "-i", "-e", "PGPASSWORD=test",
-         "migkit-test-pg-dst", "psql", "-U", "postgres", "-c",
+         servers.name(servers.PREFIX + "-pg-dst"), "psql", "-U", "postgres", "-c",
          "copy public.notes (id, body, updated_at) from stdin"],
         input="9\tc\t2003-03-03 00:00:00+00\n", capture_output=True,
         text=True)

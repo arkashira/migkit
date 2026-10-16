@@ -17,11 +17,12 @@ import pytest
 from migkit import ship
 from tests.conftest import needs_docker
 from tests.test_a_seed_is_shipped_on_media import _files, _keys, _rows
+from tests import servers
 
 pytestmark = needs_docker
 
 BLOB, GCS = "migkit-ship-blob", "migkit-ship-gcs"
-BLOB_PORT, GCS_PORT = 16414, 16415
+BLOB_PORT, GCS_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _up(port, most=120):

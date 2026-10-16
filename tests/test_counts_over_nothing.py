@@ -35,11 +35,12 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
 SRC, DST = 15527, 15528
-NAMES = {SRC: "migkit-test-cnt-src", DST: "migkit-test-cnt-dst"}
+NAMES = {SRC: servers.name(servers.PREFIX + "-cnt-src"), DST: servers.name(servers.PREFIX + "-cnt-dst")}
 
 SEED = """
 create table sales (id int primary key, amt numeric);

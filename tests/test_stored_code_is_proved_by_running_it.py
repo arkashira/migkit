@@ -18,15 +18,16 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers as lanes
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("schema.routines", "mysql")]
 
 pytestmark = [pytest.mark.docker]
 
-MY, PG = "migkit-test-code-my", "migkit-test-code-pg"
-SB_MY, SB_PG = "migkit-test-code-sbmy", "migkit-test-code-sbpg"
-MY_PORT, PG_PORT, SB_MY_PORT, SB_PG_PORT = 16080, 16081, 16082, 16083
+MY, PG = lanes.name(lanes.PREFIX + "-code-my"), lanes.name(lanes.PREFIX + "-code-pg")
+SB_MY, SB_PG = lanes.name(lanes.PREFIX + "-code-sbmy"), lanes.name(lanes.PREFIX + "-code-sbpg")
+MY_PORT, PG_PORT, SB_MY_PORT, SB_PG_PORT = lanes.private_port(0), lanes.private_port(1), lanes.private_port(2), lanes.private_port(3)
 #: small servers: four of them run at once for these tests
 #: the target's PostgreSQL: 17 has `to_oct`, the fix a person makes for
 #: MySQL's `OCT` below

@@ -37,6 +37,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import psql
+from tests import servers
 
 KEYS = ["plain", "back\\slash", "has\ttab", "line\nbreak", '"quoted"']
 
@@ -101,8 +102,8 @@ def test_a_file_of_keys_is_read_by_length_not_by_line():
 
 # ---- mysql -----------------------------------------------------------
 
-MY1, MY2 = "migkit-test-teeth-my1", "migkit-test-teeth-my2"
-MY1_PORT, MY2_PORT = 13395, 13396
+MY1, MY2 = servers.name(servers.PREFIX + "-teeth-my1"), servers.name(servers.PREFIX + "-teeth-my2")
+MY1_PORT, MY2_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _mysql(container, sql):
@@ -217,8 +218,8 @@ def test_the_printed_sql_path_stands_aside_for_keys_it_cannot_quote():
 
 # ---- redis -----------------------------------------------------------
 
-RD1, RD2 = "migkit-test-teeth-rd1", "migkit-test-teeth-rd2"
-RD1_PORT, RD2_PORT = 16445, 16446
+RD1, RD2 = servers.name(servers.PREFIX + "-teeth-rd1"), servers.name(servers.PREFIX + "-teeth-rd2")
+RD1_PORT, RD2_PORT = servers.private_port(2), servers.private_port(3)
 
 
 @pytest.fixture(scope="module")

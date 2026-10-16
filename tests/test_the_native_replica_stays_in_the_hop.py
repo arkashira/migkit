@@ -21,10 +21,11 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers
 
-NET = "migkit-test-replscope-net"
-SRC, DST = "migkit-test-replscope-src", "migkit-test-replscope-dst"
-SRC_PORT, DST_PORT = 15723, 15724
+NET = servers.name(servers.PREFIX + "-replscope-net")
+SRC, DST = servers.name(servers.PREFIX + "-replscope-src"), servers.name(servers.PREFIX + "-replscope-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

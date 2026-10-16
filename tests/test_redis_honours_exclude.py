@@ -15,9 +15,10 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers
 
-SRC, DST = "migkit-test-rex-src", "migkit-test-rex-dst"
-SRC_PORT, DST_PORT = 15653, 15654
+SRC, DST = servers.name(servers.PREFIX + "-rex-src"), servers.name(servers.PREFIX + "-rex-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

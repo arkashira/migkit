@@ -17,6 +17,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("scope.row-filter", ("postgres", "mysql"))]
@@ -119,8 +120,8 @@ def test_pg_rows_on_the_target_outside_the_filter_are_said(pg_pair,
 
 # ---- MySQL, on a pair of its own ----
 
-SRC, DST = "migkit-test-rowfilter-src", "migkit-test-rowfilter-dst"
-SRC_PORT, DST_PORT = 13491, 13492
+SRC, DST = servers.name(servers.PREFIX + "-rowfilter-src"), servers.name(servers.PREFIX + "-rowfilter-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _my(name, sql):

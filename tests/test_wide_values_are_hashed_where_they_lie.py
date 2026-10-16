@@ -20,6 +20,7 @@ import pytest
 
 from migkit import canon, render, rowtext
 from migkit.config import Endpoint, Hop
+from tests import servers as lanes
 
 
 def test_a_wide_value_is_its_length_and_md5():
@@ -101,9 +102,9 @@ def test_a_table_of_wide_rows_is_digested_by_fewer_workers(monkeypatch):
 
 # --- on servers ---------------------------------------------------------
 
-PG_SRC, PG_DST, MY = (("migkit-test-vd-wide-src", 16276),
-                      ("migkit-test-vd-wide-dst", 16277),
-                      ("migkit-test-vd-wide-my", 16278))
+PG_SRC, PG_DST, MY = ((lanes.name(lanes.PREFIX + "-vd-wide-src"), lanes.private_port(0)),
+                      (lanes.name(lanes.PREFIX + "-vd-wide-dst"), lanes.private_port(1)),
+                      (lanes.name(lanes.PREFIX + "-vd-wide-my"), lanes.private_port(2)))
 
 
 def _docker():

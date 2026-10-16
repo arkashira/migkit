@@ -17,12 +17,13 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import _wait_tcp, needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
-NAMES = {"src": "migkit-test-pass-crash-src",
-         "dst": "migkit-test-pass-crash-dst"}
-PORTS = {"src": 16182, "dst": 16183}
+NAMES = {"src": servers.name(servers.PREFIX + "-pass-crash-src"),
+         "dst": servers.name(servers.PREFIX + "-pass-crash-dst")}
+PORTS = {"src": servers.private_port(0), "dst": servers.private_port(1)}
 
 
 def _sql(side, sql):

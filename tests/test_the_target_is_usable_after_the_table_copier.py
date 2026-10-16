@@ -25,6 +25,7 @@ import pytest
 from click.testing import CliRunner
 
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("cutover.counters", "hetero")]
@@ -83,7 +84,7 @@ def test_postgres_own_copier_carries_the_sequence(pg_pair, pg_tables,
                                " oid = 'public.t'::regclass")) >= 3
 
 
-MY, MY_PORT = "migkit-test-settle-my", 15759
+MY, MY_PORT = servers.name(servers.PREFIX + "-settle-my"), servers.private_port(0)
 
 
 def my(sql):

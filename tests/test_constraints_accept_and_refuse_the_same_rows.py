@@ -25,6 +25,7 @@ from migkit.storedcode import constraints, harness
 from migkit.storedcode.constraints import Column, equivalent
 from migkit.storedcode.harness import Outcome, Watched
 from tests.conftest import needs_docker
+from tests import servers as lanes
 
 # ---- the static half: two sides' CHECKs in SQL's three values --------------
 
@@ -353,9 +354,9 @@ def test_one_row_the_source_refuses_and_the_loosened_target_takes(stand_in):
 
 # ---- on real servers --------------------------------------------------------
 
-MY, PG = "migkit-test-cons-my", "migkit-test-cons-pg"
-SB_MY, SB_PG = "migkit-test-cons-sbmy", "migkit-test-cons-sbpg"
-MY_PORT, PG_PORT, SB_MY_PORT, SB_PG_PORT = 16294, 16295, 16296, 16297
+MY, PG = lanes.name(lanes.PREFIX + "-cons-my"), lanes.name(lanes.PREFIX + "-cons-pg")
+SB_MY, SB_PG = lanes.name(lanes.PREFIX + "-cons-sbmy"), lanes.name(lanes.PREFIX + "-cons-sbpg")
+MY_PORT, PG_PORT, SB_MY_PORT, SB_PG_PORT = lanes.private_port(0), lanes.private_port(1), lanes.private_port(2), lanes.private_port(3)
 PG_MAJOR = 17
 #: small servers: four run at once here
 MY_SMALL = ["--log-bin-trust-function-creators=1",

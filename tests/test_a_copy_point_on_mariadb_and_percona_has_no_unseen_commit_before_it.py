@@ -11,6 +11,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
@@ -35,7 +36,7 @@ SERVERS = {
 def _sql(name, sql):
     cfg = SERVERS[name]
     got = subprocess.run(
-        ["docker", "exec", "-i", f"migkit-test-cp-{name}", cfg["client"],
+        ["docker", "exec", "-i", servers.name(f"{servers.PREFIX}-cp-{name}"), cfg["client"],
          "-uroot", "-ptest", "-N", "-B"], input=sql, capture_output=True,
         text=True)
     assert got.returncode == 0, got.stderr
@@ -45,7 +46,7 @@ def _sql(name, sql):
 @pytest.fixture(params=sorted(SERVERS), scope="module")
 def server(request):
     name, cfg = request.param, SERVERS[request.param]
-    box = f"migkit-test-cp-{name}"
+    box = servers.name(f"{servers.PREFIX}-cp-{name}")
     subprocess.run(["docker", "rm", "-f", "-v", box], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", box, "-e",
                     f"{cfg['env']}=test", "-p",

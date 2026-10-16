@@ -18,13 +18,14 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import psql
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("schema.create", "dynamodb"), ("move.table-copy", "dynamodb")]
 
 pytestmark = [pytest.mark.docker]
 
-DDB, DDB_PORT = "migkit-test-dynamodb", 15834
+DDB, DDB_PORT = servers.name(servers.PREFIX + "-dynamodb"), servers.private_port(0)
 
 
 def _docker():

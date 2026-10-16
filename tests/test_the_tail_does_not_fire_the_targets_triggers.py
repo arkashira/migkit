@@ -24,12 +24,13 @@ import threading
 import time
 
 import pytest
+from tests import servers as lanes
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("move.load-window", "hetero")]
 
-PG, MY = "migkit-test-trigtail-pg", "migkit-test-trigtail-my"
-PG_PORT, MY_PORT = 15750, 15751
+PG, MY = lanes.name(lanes.PREFIX + "-trigtail-pg"), lanes.name(lanes.PREFIX + "-trigtail-my")
+PG_PORT, MY_PORT = lanes.private_port(0), lanes.private_port(1)
 
 
 def _docker():

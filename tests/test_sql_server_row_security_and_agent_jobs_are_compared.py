@@ -98,7 +98,7 @@ def _edge(slot, label):
     """A SQL Server edge edition on the lane and `sql(db, *queries)` to ask
     it; the container is removed after."""
     import pymssql
-    name, port = servers.name(f"migkit-test-mssql-{label}"), \
+    name, port = servers.name(f"{servers.PREFIX}-mssql-{label}"), \
         servers.private_port(slot)
     pw = servers.STRONG
     subprocess.run(["docker", "rm", "-f", "-v", name], capture_output=True)

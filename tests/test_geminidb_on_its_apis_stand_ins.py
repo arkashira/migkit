@@ -13,6 +13,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 PROVES = [
     ("move.table-copy", "geminidb-redis"),
@@ -20,8 +21,8 @@ PROVES = [
 
 pytestmark = needs_docker
 
-SRC, SRC_PORT = "migkit-test-gemini-src", 16450
-DST, DST_PORT = "migkit-test-gemini-dst", 16451
+SRC, SRC_PORT = servers.name(servers.PREFIX + "-gemini-src"), servers.private_port(0)
+DST, DST_PORT = servers.name(servers.PREFIX + "-gemini-dst"), servers.private_port(1)
 
 
 def _wait(port, timeout=60):

@@ -17,8 +17,9 @@ import pytest
 from click.testing import CliRunner
 
 from tests.conftest import needs_docker
+from tests import servers
 
-SRC, DST = ("migkit-test-ready-src", 16336), ("migkit-test-ready-dst", 16337)
+SRC, DST = (servers.name(servers.PREFIX + "-ready-src"), servers.private_port(0)), (servers.name(servers.PREFIX + "-ready-dst"), servers.private_port(1))
 
 
 def _hop(goal="copy", options=None, name="h"):

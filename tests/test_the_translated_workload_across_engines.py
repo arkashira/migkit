@@ -20,8 +20,9 @@ import time
 import pytest
 
 from tests.conftest import needs_docker
+from tests import servers
 
-MY, PG = ("migkit-test-xwork-my", 16332), ("migkit-test-xwork-pg", 16333)
+MY, PG = (servers.name(servers.PREFIX + "-xwork-my"), servers.private_port(0)), (servers.name(servers.PREFIX + "-xwork-pg"), servers.private_port(1))
 
 
 # --- answers, as values two engines agree on ------------------------------------

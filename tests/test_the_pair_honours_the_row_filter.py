@@ -24,6 +24,7 @@ import pytest
 from click.testing import CliRunner
 
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("scope.row-filter", ("sqlite", "hetero"))]
@@ -90,7 +91,7 @@ def test_the_copy_and_the_check_read_through_the_filter(lite):
     assert got.exit_code != 0 and "orders" in said, said
 
 
-MY, MY_PORT = "migkit-test-pairfilter-my", 15761
+MY, MY_PORT = servers.name(servers.PREFIX + "-pairfilter-my"), servers.private_port(0)
 
 
 def my(sql):

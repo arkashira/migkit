@@ -15,14 +15,15 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("cutover.drain", "mongodb")]
 
 pytestmark = [pytest.mark.docker]
 
-MG, PG = "migkit-test-xmongo-mg", "migkit-test-xmongo-pg"
-MG_PORT, PG_PORT = 15742, 15743
+MG, PG = servers.name(servers.PREFIX + "-xmongo-mg"), servers.name(servers.PREFIX + "-xmongo-pg")
+MG_PORT, PG_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

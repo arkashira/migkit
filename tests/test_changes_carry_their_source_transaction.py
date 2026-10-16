@@ -17,6 +17,7 @@ import pytest
 from migkit import canon
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 
 def test_a_transactions_last_change_is_marked_at_its_commit():
@@ -80,7 +81,7 @@ def test_postgresql_changes_say_where_a_transaction_ends(pg_pair):
         psql(port, f"select pg_drop_replication_slot('{eng.slot_name()}')")
 
 
-MY, MY_PORT = "migkit-test-0f-my", 16005
+MY, MY_PORT = servers.name(servers.PREFIX + "-0f-my"), servers.private_port(0)
 
 
 def _my(sql):

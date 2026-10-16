@@ -15,9 +15,10 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
-SRC, DST = "migkit-test-collide-src", "migkit-test-collide-dst"
-SRC_PORT, DST_PORT = 13481, 13482
+SRC, DST = servers.name(servers.PREFIX + "-collide-src"), servers.name(servers.PREFIX + "-collide-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

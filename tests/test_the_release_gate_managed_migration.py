@@ -53,12 +53,13 @@ import yaml
 from click.testing import CliRunner
 
 from tests import cutover_harness as harness
+from tests import servers
 
 pytestmark = [pytest.mark.docker, pytest.mark.release_gate]
 
-NET = "migkit-test-gate-net"
-PORTS = {"postgres": (16430, 16431), "mysql": (16432, 16433),
-         "mongodb": (16434, 16435)}
+NET = servers.name(servers.PREFIX + "-gate-net")
+PORTS = {"postgres": (servers.private_port(0), servers.private_port(1)), "mysql": (servers.private_port(2), servers.private_port(3)),
+         "mongodb": (servers.private_port(4), servers.private_port(5))}
 #: the services the sides are named as: a managed engine on one cloud into
 #: the same engine on another
 SERVICES = {"postgres": (("aws", "rds"), ("tencent", "tencentdb")),
@@ -82,8 +83,8 @@ if not _docker():
 
 
 def _names(engine):
-    return (f"migkit-test-gate-{engine[:2]}-src",
-            f"migkit-test-gate-{engine[:2]}-dst")
+    return (servers.name(f"{servers.PREFIX}-gate-{engine[:2]}-src"),
+            servers.name(f"{servers.PREFIX}-gate-{engine[:2]}-dst"))
 
 
 def _remove(engine):

@@ -14,10 +14,11 @@ import pytest
 from click.testing import CliRunner
 
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
-MY, MY_PORT = "migkit-test-zerodate-my", 15766
+MY, MY_PORT = servers.name(servers.PREFIX + "-zerodate-my"), servers.private_port(0)
 
 
 def my(sql):

@@ -10,9 +10,10 @@ import subprocess
 import time
 
 import pytest
+from tests import servers as lanes
 
-MONGO, PG = "migkit-test-mmv", "migkit-test-mmv-pg"
-MONGO_PORT, PG_PORT = 27073, 15469
+MONGO, PG = lanes.name(lanes.PREFIX + "-mmv"), lanes.name(lanes.PREFIX + "-mmv-pg")
+MONGO_PORT, PG_PORT = lanes.private_port(0), lanes.private_port(1)
 
 # document 3 holds nulls; document 4 simply has no `name`, `ratio` or `flag`
 SEED = """

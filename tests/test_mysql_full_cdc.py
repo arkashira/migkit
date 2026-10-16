@@ -18,10 +18,11 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
 pytestmark = [pytest.mark.docker]
 
-MY, PORT = "migkit-test-myfcdc", 15685
+MY, PORT = servers.name(servers.PREFIX + "-myfcdc"), servers.private_port(0)
 
 
 def _docker():

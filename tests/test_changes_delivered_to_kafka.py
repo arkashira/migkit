@@ -20,10 +20,11 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
-RP, RP_PORT = "migkit-test-deliver-rp", 15795
+RP, RP_PORT = servers.name(servers.PREFIX + "-deliver-rp"), servers.private_port(0)
 
 
 def _wait(port, timeout=90):

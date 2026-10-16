@@ -12,12 +12,13 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("assess.handwork", "postgres")]
 
-SRC, DST = "migkit-test-hwpg-src", "migkit-test-hwpg-dst"
-SRC_PORT, DST_PORT = 15495, 15496
+SRC, DST = servers.name(servers.PREFIX + "-hwpg-src"), servers.name(servers.PREFIX + "-hwpg-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

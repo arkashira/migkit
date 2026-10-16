@@ -20,11 +20,12 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
 ROOT = Path(__file__).resolve().parent.parent
-PROXY, API, LISTEN = "migkit-test-toxi", 15881, 15882
+PROXY, API, LISTEN = servers.name(servers.PREFIX + "-toxi"), servers.private_port(0), servers.private_port(1)
 
 
 def _api(method, path, body=None):
@@ -48,7 +49,7 @@ def proxy(pg_pair):
         ip = subprocess.run(["docker", "inspect", "-f",
                              "{{range .NetworkSettings.Networks}}"
                              "{{.IPAddress}}{{end}}",
-                             "migkit-test-pg-dst"],
+                             servers.name(servers.PREFIX + "-pg-dst")],
                             capture_output=True, text=True).stdout.strip()
         for _ in range(30):
             try:
@@ -151,7 +152,7 @@ def test_a_link_that_holds_and_passes_nothing_is_given_up_on(pg_pair, proxy,
         end = time.time() + 120
         while time.time() < end:
             got = subprocess.run(
-                ["docker", "exec", "migkit-test-pg-dst", "psql", "-U",
+                ["docker", "exec", servers.name(servers.PREFIX + "-pg-dst"), "psql", "-U",
                  "postgres", "-tAc", "select coalesce(max(tuples_processed),"
                  " 0) from pg_stat_progress_copy"],
                 capture_output=True, text=True).stdout.strip()

@@ -31,11 +31,12 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
-PORT = 15555
-NAME = "migkit-test-snap"
+PORT = servers.private_port(0)
+NAME = servers.name(servers.PREFIX + "-snap")
 
 
 @pytest.fixture(scope="module")

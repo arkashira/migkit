@@ -22,13 +22,14 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import _wait_tcp, needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("move.table-copy", "redshift")]
 
 pytestmark = needs_docker
 
-PG, PG_PORT = "migkit-test-wh-pg", 16152
+PG, PG_PORT = servers.name(servers.PREFIX + "-wh-pg"), servers.private_port(0)
 
 SHIMS = """
 create function strtol(t text, base int) returns bigint language sql

@@ -16,9 +16,10 @@ from click.testing import CliRunner
 
 from migkit import charsets
 from tests.conftest import needs_docker
+from tests import servers
 
-SRC, DST = ("migkit-test-charset-src", 16460), ("migkit-test-charset-dst",
-                                               16461)
+SRC, DST = (servers.name(servers.PREFIX + "-charset-src"), servers.private_port(0)), (servers.name(servers.PREFIX + "-charset-dst"),
+                                               servers.private_port(1))
 
 
 # --- what each character set holds ---------------------------------------------

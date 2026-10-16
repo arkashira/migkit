@@ -15,9 +15,10 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
-NAME = "migkit-test-collide-pg"
-PORT = 15473
+NAME = servers.name(servers.PREFIX + "-collide-pg")
+PORT = servers.private_port(0)
 
 
 def _docker():

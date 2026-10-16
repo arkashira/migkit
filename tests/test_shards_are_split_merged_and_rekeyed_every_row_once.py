@@ -23,9 +23,10 @@ from hypothesis import strategies as st
 from migkit import reshard
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
-SRC, DST = ("migkit-test-reshard-src", 16530), ("migkit-test-reshard-dst",
-                                               16531)
+SRC, DST = (servers.name(servers.PREFIX + "-reshard-src"), servers.private_port(0)), (servers.name(servers.PREFIX + "-reshard-dst"),
+                                               servers.private_port(1))
 
 
 def _hop(name, opts=None, host="10.0.0.1", target="10.0.0.9", db_map=None,

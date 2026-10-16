@@ -16,13 +16,14 @@ import time
 import pytest
 
 from migkit import variants as v
+from tests import servers as lanes
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("assess.brands", ("mongodb", "kafka"))]
 
-MG, RP, AK = ("migkit-test-brand-mg", "migkit-test-brand-rp",
-              "migkit-test-brand-ak")
-MG_PORT, RP_PORT, AK_PORT = 27065, 9096, 9095
+MG, RP, AK = (lanes.name(lanes.PREFIX + "-brand-mg"), lanes.name(lanes.PREFIX + "-brand-rp"),
+              lanes.name(lanes.PREFIX + "-brand-ak"))
+MG_PORT, RP_PORT, AK_PORT = lanes.private_port(0), lanes.private_port(1), lanes.private_port(2)
 
 
 def _docker():

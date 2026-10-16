@@ -15,12 +15,13 @@ import time
 import pytest
 
 from tests.conftest import needs_docker
+from tests import servers as lanes
 
 pytestmark = needs_docker
 
-SRC = ("migkit-test-fork-redis-json", 16404,
+SRC = (lanes.name(lanes.PREFIX + "-fork-redis-json"), lanes.private_port(0),
        "redis/redis-stack-server:7.4.0-v1")
-DST = ("migkit-test-fork-valkey", 16405, "valkey/valkey:8")
+DST = (lanes.name(lanes.PREFIX + "-fork-valkey"), lanes.private_port(1), "valkey/valkey:8")
 
 
 @pytest.fixture(scope="module")

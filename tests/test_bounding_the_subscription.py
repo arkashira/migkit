@@ -32,10 +32,11 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 SRC, DST = 15591, 15592
-NS, ND = "migkit-test-bound-src", "migkit-test-bound-dst"
-NET_A, NET_B = "migkit-test-bound-a", "migkit-test-bound-b"
+NS, ND = servers.name(servers.PREFIX + "-bound-src"), servers.name(servers.PREFIX + "-bound-dst")
+NET_A, NET_B = servers.name(servers.PREFIX + "-bound-a"), servers.name(servers.PREFIX + "-bound-b")
 
 
 def _hop(tmp_path, host="127.0.0.1", port=SRC, name="unreach"):

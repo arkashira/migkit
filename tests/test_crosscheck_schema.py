@@ -41,9 +41,10 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 SRC, DST = 15595, 15596
-NS, ND = "migkit-test-cschema-src", "migkit-test-cschema-dst"
+NS, ND = servers.name(servers.PREFIX + "-cschema-src"), servers.name(servers.PREFIX + "-cschema-dst")
 
 CLEAN = ("INFO   compare.c:593  [SOURCE] table: 2, index: 3\n"
          "INFO   compare.c:631  pgcopydb schema inspection is successful\n")

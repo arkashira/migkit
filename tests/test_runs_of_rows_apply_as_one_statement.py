@@ -15,6 +15,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 
 def _lite(tmp_path):
@@ -253,7 +254,7 @@ def test_postgres_sends_a_statement_a_run_not_a_row(pg_pair, monkeypatch):
         _one(port, "drop table if exists public.s")
 
 
-MY, MY_PORT = "migkit-test-runs-my", 15780
+MY, MY_PORT = servers.name(servers.PREFIX + "-runs-my"), servers.private_port(0)
 
 
 def my(sql):

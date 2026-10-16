@@ -15,9 +15,10 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
-NAME = "migkit-test-colorder"
-PORT = 15491
+NAME = servers.name(servers.PREFIX + "-colorder")
+PORT = servers.private_port(0)
 
 
 def _docker():

@@ -20,6 +20,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 PROVES = [
     ("move.table-copy", "gaussdb"),
@@ -31,7 +32,7 @@ PROVES = [
 
 pytestmark = needs_docker
 
-NAME, PORT = "migkit-test-gaussdb", 16454
+NAME, PORT = servers.name(servers.PREFIX + "-gaussdb"), servers.private_port(0)
 IMAGE = "opengauss/opengauss:5.0.0"
 SANDBOX_PASS = "Migkit@1234"
 DATA = "/var/lib/opengauss/data"

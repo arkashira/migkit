@@ -18,13 +18,14 @@ import pytest
 from migkit import freeze
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("cutover.freeze", "kafka")]
 
 pytestmark = needs_docker
 
-NAME, PORT = "migkit-test-hold-kafka", 16353
+NAME, PORT = servers.name(servers.PREFIX + "-hold-kafka"), servers.private_port(0)
 
 
 @pytest.fixture(scope="module")

@@ -22,7 +22,7 @@ PROVES = [("schema.create", "parquet"), ("move.table-copy", "parquet")]
 
 pytestmark = [pytest.mark.docker]
 
-S3, S3_PORT = "migkit-test-parquet-s3", 15825
+S3, S3_PORT = store.name(store.PREFIX + "-parquet-s3"), store.private_port(0)
 
 
 def _docker():

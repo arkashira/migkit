@@ -9,6 +9,7 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [
@@ -17,8 +18,8 @@ PROVES = [
     ("verify.value.precision", "mysql"),
 ]
 
-SRC, DST = "migkit-test-myparity-src", "migkit-test-myparity-dst"
-SRC_PORT, DST_PORT = 13406, 13407
+SRC, DST = servers.name(servers.PREFIX + "-myparity-src"), servers.name(servers.PREFIX + "-myparity-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

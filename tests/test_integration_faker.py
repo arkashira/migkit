@@ -9,6 +9,7 @@ import textwrap
 
 from tests import datagen
 from tests.conftest import needs_docker, psql, migkit_cmd
+from tests import servers
 
 pytestmark = needs_docker
 
@@ -35,7 +36,7 @@ def _conf(tmp_path, ports):
 
 
 def _load(port, rows):
-    container = f"migkit-test-pg-{'src' if port == 55432 else 'dst'}"
+    container = servers.name(f"{servers.PREFIX}-pg-{'src' if port == 55432 else 'dst'}")
     body = datagen.pg_copy_body(rows)
     with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False) as f:
         f.write(body)

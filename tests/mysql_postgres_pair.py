@@ -4,9 +4,10 @@ after it, on the host ports given to these tests."""
 import socket
 import subprocess
 import time
+from tests import servers
 
-MY, PG = "migkit-test-xe-my", "migkit-test-xe-pg"
-MY_PORT, PG_PORT = 16190, 16191
+MY, PG = servers.name(servers.PREFIX + "-xe-my"), servers.name(servers.PREFIX + "-xe-pg")
+MY_PORT, PG_PORT = servers.private_port(18), servers.private_port(19)
 
 
 def docker():

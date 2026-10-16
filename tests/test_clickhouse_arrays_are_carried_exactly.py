@@ -20,11 +20,12 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 from tests.typepair import Checkpoint
+from tests import servers as lanes
 
 pytestmark = needs_docker
 
-CH, PG = "migkit-test-ty2-ch", "migkit-test-ty2-hpg"
-CH_PORT, PG_PORT = 16216, 16217
+CH, PG = lanes.name(lanes.PREFIX + "-ty2-ch"), lanes.name(lanes.PREFIX + "-ty2-hpg")
+CH_PORT, PG_PORT = lanes.private_port(0), lanes.private_port(1)
 
 SEED = """
 create table t (id int primary key, a bigint[] not null, s text[] not null,

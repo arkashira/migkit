@@ -21,11 +21,12 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import verdict
 from tests.test_the_report_does_not_name_its_tools import TOOLS
+from tests import servers
 
 READER = os.environ.get("MIGKIT_SECOND_READER_PYTHON") or str(
     Path(sys.prefix).parent / ".venv-dvt" / "bin" / "python")
-MY, MY_PORT = "migkit-test-dvt-xmy", 16042
-PG, PG_PORT = "migkit-test-dvt-xpg", 16043
+MY, MY_PORT = servers.name(servers.PREFIX + "-dvt-xmy"), servers.private_port(0)
+PG, PG_PORT = servers.name(servers.PREFIX + "-dvt-xpg"), servers.private_port(1)
 LEAKS = TOOLS + ("dvt", "data-validation", "data_validation")
 ROWS = 25_000
 

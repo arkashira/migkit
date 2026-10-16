@@ -16,6 +16,7 @@ import pytest
 from migkit import canon, logddl, pgslot
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 
 @pytest.mark.parametrize("query, schema, want", [
@@ -134,7 +135,7 @@ def test_a_mysql_ddl_is_kept_to_the_tail_s_own_database():
                        {}) == []
 
 
-MY, MY_PORT = "migkit-test-livetail-ddl-my", 16260
+MY, MY_PORT = servers.name(servers.PREFIX + "-livetail-ddl-my"), servers.private_port(0)
 
 
 def _my(sql):

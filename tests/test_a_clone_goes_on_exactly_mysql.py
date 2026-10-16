@@ -17,10 +17,11 @@ import time
 
 import pytest
 from click.testing import CliRunner
+from tests import servers
 
-NET = "migkit-test-phys-mynet"
-SRC, DST = "migkit-test-phys-mysrc", "migkit-test-phys-mydst"
-SRC_PORT, DST_PORT = 16122, 16123
+NET = servers.name(servers.PREFIX + "-phys-mynet")
+SRC, DST = servers.name(servers.PREFIX + "-phys-mysrc"), servers.name(servers.PREFIX + "-phys-mydst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 ARGS = ["--gtid-mode=ON", "--enforce-gtid-consistency=ON",
         "--binlog-row-metadata=FULL", "--plugin-load-add=mysql_clone.so"]
 

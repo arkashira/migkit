@@ -19,11 +19,12 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
 ROOT = Path(__file__).resolve().parent.parent
-PG, PORT = "migkit-test-mtu-pg", 15889
+PG, PORT = servers.name(servers.PREFIX + "-mtu-pg"), servers.private_port(0)
 
 
 @pytest.fixture(scope="module")

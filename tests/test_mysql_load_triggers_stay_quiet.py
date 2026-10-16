@@ -16,14 +16,15 @@ import pytest
 from click.testing import CliRunner
 
 from migkit import movers
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("move.load-window", "mysql")]
 
 pytestmark = [pytest.mark.docker]
 
-SRC, DST = "migkit-test-mytrig-src", "migkit-test-mytrig-dst"
-SRC_PORT, DST_PORT = 15746, 15747
+SRC, DST = servers.name(servers.PREFIX + "-mytrig-src"), servers.name(servers.PREFIX + "-mytrig-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

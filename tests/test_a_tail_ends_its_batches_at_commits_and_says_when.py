@@ -22,6 +22,7 @@ from migkit import canon, tailctl
 from migkit.config import Endpoint, Hop
 from migkit.engines.hetero import HeteroEngine
 from tests.conftest import needs_docker
+from tests import servers
 
 
 def _c(i, end=False, at=None):
@@ -65,7 +66,7 @@ def test_the_beat_says_when_the_source_committed(tmp_path):
     assert 'migkit_tail_set_aside_bytes{hop="h",db="db"} 120' in got
 
 
-MY, PORT = "migkit-test-livetail-commit-my", 16263
+MY, PORT = servers.name(servers.PREFIX + "-livetail-commit-my"), servers.private_port(0)
 
 
 def _my(sql):

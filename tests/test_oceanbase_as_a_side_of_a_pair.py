@@ -17,6 +17,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 PROVES = [
     ("move.table-copy", "oceanbase"),
@@ -25,7 +26,7 @@ PROVES = [
 
 pytestmark = [needs_docker, pytest.mark.vm]
 
-NAME, PORT = "migkit-test-oceanbase", 16455
+NAME, PORT = servers.name(servers.PREFIX + "-oceanbase"), servers.private_port(0)
 IMAGE = "oceanbase/oceanbase-ce:latest"
 
 

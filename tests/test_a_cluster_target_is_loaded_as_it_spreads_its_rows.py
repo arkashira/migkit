@@ -23,11 +23,12 @@ from migkit import decide, reshard
 from migkit.config import Endpoint, Hop
 from migkit.engines.base import Spread
 from tests.conftest import needs_docker
+from tests import servers
 
 PROVES = [("move.spread", "postgres"), ("move.spread", "hetero")]
 
-SRC, DST = ("migkit-test-spread-src", 16532), ("migkit-test-spread-citus",
-                                              16533)
+SRC, DST = (servers.name(servers.PREFIX + "-spread-src"), servers.private_port(0)), (servers.name(servers.PREFIX + "-spread-citus"),
+                                              servers.private_port(1))
 
 
 # --- MongoDB's chunks ----------------------------------------------------------------

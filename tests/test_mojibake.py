@@ -29,6 +29,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
@@ -205,8 +206,8 @@ def test_the_verdict_needs_no_server(tmp_path):
 
 # ---- mysql, so this is not a postgres-only capability ------------------
 
-MY = "migkit-test-moji-my"
-MY_PORT = 13403
+MY = servers.name(servers.PREFIX + "-moji-my")
+MY_PORT = servers.private_port(0)
 
 
 @pytest.fixture(scope="module")

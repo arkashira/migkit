@@ -11,12 +11,13 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers as lanes
 
 pytestmark = [pytest.mark.docker]
 
-PG, MY = "migkit-test-code-pg", "migkit-test-code-my"
-SB_PG, SB_MY = "migkit-test-code-sbpg", "migkit-test-code-sbmy"
-PG_PORT, MY_PORT, SB_PG_PORT, SB_MY_PORT = 16081, 16080, 16083, 16082
+PG, MY = lanes.name(lanes.PREFIX + "-code-pg"), lanes.name(lanes.PREFIX + "-code-my")
+SB_PG, SB_MY = lanes.name(lanes.PREFIX + "-code-sbpg"), lanes.name(lanes.PREFIX + "-code-sbmy")
+PG_PORT, MY_PORT, SB_PG_PORT, SB_MY_PORT = lanes.private_port(0), lanes.private_port(1), lanes.private_port(2), lanes.private_port(3)
 MY_SMALL = ["--innodb-buffer-pool-size=16M", "--performance-schema=OFF",
             "--log-bin-trust-function-creators=1"]
 

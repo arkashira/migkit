@@ -15,6 +15,7 @@ import pytest
 from click.testing import CliRunner
 
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("scope.listings", "mysql")]
@@ -64,7 +65,7 @@ def test_postgres_leaves_the_excluded_table_alone(pg_hop, pg_pair):
     assert "audit" not in said, said
 
 
-MY, MY_PORT = "migkit-test-schemaex-my", 15757
+MY, MY_PORT = servers.name(servers.PREFIX + "-schemaex-my"), servers.private_port(0)
 
 
 def my(sql):

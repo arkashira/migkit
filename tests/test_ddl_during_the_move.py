@@ -9,6 +9,7 @@ the copy runs.
 import sqlite3
 
 import pytest
+from tests import servers
 
 
 @pytest.fixture
@@ -137,7 +138,7 @@ def test_mysql_reads_its_whole_column_catalogue_in_one_query():
     from migkit import drift
     from migkit.config import Endpoint, Hop
     from migkit.engines.mysql import MySQLEngine
-    name, port = "migkit-test-ddl-my", 15667
+    name, port = servers.name(servers.PREFIX + "-ddl-my"), servers.private_port(0)
 
     def my(sql):
         got = subprocess.run(["docker", "exec", "-i", name, "mysql",

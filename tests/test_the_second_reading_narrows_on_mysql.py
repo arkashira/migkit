@@ -19,11 +19,12 @@ from migkit import second_reader as sr
 from migkit.config import Endpoint, Hop
 from tests.conftest import verdict
 from tests.test_the_report_does_not_name_its_tools import TOOLS
+from tests import servers
 
 READER = os.environ.get("MIGKIT_SECOND_READER_PYTHON") or str(
     Path(sys.prefix).parent / ".venv-dvt" / "bin" / "python")
-NAMES = {"src": ("migkit-test-dvt-my-src", 16040),
-         "dst": ("migkit-test-dvt-my-dst", 16041)}
+NAMES = {"src": (servers.name(servers.PREFIX + "-dvt-my-src"), servers.private_port(0)),
+         "dst": (servers.name(servers.PREFIX + "-dvt-my-dst"), servers.private_port(1))}
 LEAKS = TOOLS + ("dvt", "data-validation", "data_validation")
 
 

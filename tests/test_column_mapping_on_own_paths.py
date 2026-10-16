@@ -25,6 +25,7 @@ from click.testing import CliRunner
 
 from migkit import movers
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
@@ -185,7 +186,7 @@ def test_the_delta_loop_compares_through_the_mapping(pg_hop, pg_pair,
     eng.delta_teardown("postgres")
 
 
-MY, MY_PORT = "migkit-test-colmap-my", 15754
+MY, MY_PORT = servers.name(servers.PREFIX + "-colmap-my"), servers.private_port(0)
 
 
 def my(sql):

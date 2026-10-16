@@ -16,13 +16,14 @@ import pytest
 from migkit import freeze
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("cutover.freeze", "redis")]
 
 pytestmark = needs_docker
 
-NAME, PORT, PW = "migkit-test-hold-redis", 16350, "CHANGE_ME-src"
+NAME, PORT, PW = servers.name(servers.PREFIX + "-hold-redis"), servers.private_port(0), "CHANGE_ME-src"
 
 
 def _up(port):

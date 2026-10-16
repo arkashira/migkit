@@ -41,11 +41,12 @@ import time
 import pytest
 
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
 SRC, DST = 15533, 15534
-NAMES = {SRC: "migkit-test-nar-src", DST: "migkit-test-nar-dst"}
+NAMES = {SRC: servers.name(servers.PREFIX + "-nar-src"), DST: servers.name(servers.PREFIX + "-nar-dst")}
 
 
 def q(port, sql):

@@ -16,9 +16,10 @@ import time
 import pytest
 
 from migkit import canon
+from tests import servers
 
-MY, PG = "migkit-test-neutral-my", "migkit-test-neutral-pg"
-MY_PORT, PG_PORT = 13385, 15485
+MY, PG = servers.name(servers.PREFIX + "-neutral-my"), servers.name(servers.PREFIX + "-neutral-pg")
+MY_PORT, PG_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

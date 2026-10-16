@@ -15,11 +15,12 @@ import pytest
 
 from migkit import planner
 from migkit.config import Endpoint, Hop
+from tests import servers as lanes
 
 pytestmark = [pytest.mark.docker]
 
-PG, MY = "migkit-test-room-pg", "migkit-test-room-my"
-PG_PORT, MY_PORT = 15822, 15823
+PG, MY = lanes.name(lanes.PREFIX + "-room-pg"), lanes.name(lanes.PREFIX + "-room-my")
+PG_PORT, MY_PORT = lanes.private_port(0), lanes.private_port(1)
 
 
 def _docker():

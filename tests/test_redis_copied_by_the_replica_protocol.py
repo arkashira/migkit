@@ -17,6 +17,7 @@ import pytest
 from migkit.config import Endpoint, Hop
 from migkit.util import which
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("move.bulk", "redis")]
@@ -25,8 +26,8 @@ pytestmark = [needs_docker, pytest.mark.skipif(
     not which("redis-shake"), reason="the replica-protocol copy is not"
                                      " installed here")]
 
-SRC, DST = "migkit-test-rshake-src", "migkit-test-rshake-dst"
-SRC_PORT, DST_PORT = 16286, 16287
+SRC, DST = servers.name(servers.PREFIX + "-rshake-src"), servers.name(servers.PREFIX + "-rshake-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _wait(port, timeout=60):

@@ -20,9 +20,10 @@ import pytest
 from migkit import movers
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
-SRC, DST = "migkit-test-mytools-src", "migkit-test-mytools-dst"
-SRC_PORT, DST_PORT = 16110, 16111
+SRC, DST = servers.name(servers.PREFIX + "-mytools-src"), servers.name(servers.PREFIX + "-mytools-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 USER, SECRET = "mover", "not-a-real-secret-42"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 

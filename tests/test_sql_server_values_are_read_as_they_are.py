@@ -16,13 +16,14 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import mssql_run, needs_docker, psql
 from tests.typepair import Checkpoint
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("schema.create", "mssql")]
 
 pytestmark = needs_docker
 
-MS, PORT, PW = "migkit-test-f0t-ms", 16065, "Migkit-Test-9x!"
+MS, PORT, PW = servers.name(servers.PREFIX + "-f0t-ms"), servers.private_port(0), "Migkit-Test-9x!"
 
 
 def _sql(db, *statements):

@@ -21,12 +21,13 @@ from decimal import Decimal
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("move.table-copy", "mongodb")]
 
-SRC, DST = "migkit-test-mcp-src", "migkit-test-mcp-dst"
-SRC_PORT, DST_PORT = 15814, 15815
+SRC, DST = servers.name(servers.PREFIX + "-mcp-src"), servers.name(servers.PREFIX + "-mcp-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

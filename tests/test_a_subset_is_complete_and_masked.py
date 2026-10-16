@@ -21,9 +21,10 @@ import pytest
 from click.testing import CliRunner
 
 from tests.conftest import needs_docker
+from tests import servers
 
-SRC, DST = ("migkit-test-subset-src", 16334), ("migkit-test-subset-dst",
-                                               16335)
+SRC, DST = (servers.name(servers.PREFIX + "-subset-src"), servers.private_port(0)), (servers.name(servers.PREFIX + "-subset-dst"),
+                                               servers.private_port(1))
 
 
 # --- the rules, without a server -------------------------------------------------

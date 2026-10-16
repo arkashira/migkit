@@ -22,6 +22,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [
@@ -33,8 +34,8 @@ PROVES = [
 
 pytestmark = needs_docker
 
-SRC, DST = "migkit-test-follow-src", "migkit-test-follow-dst"
-SRC_PORT, DST_PORT = 15854, 15855
+SRC, DST = servers.name(servers.PREFIX + "-follow-src"), servers.name(servers.PREFIX + "-follow-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _wait(port, timeout=90):
@@ -153,7 +154,7 @@ def test_the_tail_goes_on_from_the_copy_and_the_fence_passes(brokers,
     try:
         time.sleep(3)
         _produce("events", 100, 50)
-        _produce("events", 150, 10, transactional_id="migkit-test-tx")
+        _produce("events", 150, 10, transactional_id=servers.name(servers.PREFIX + "-tx"))
         at = eng.src_lsn("cluster")
         got["fence"] = eng.fence_wait("cluster", at, timeout=90)
     finally:

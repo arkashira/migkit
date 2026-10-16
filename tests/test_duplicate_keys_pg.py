@@ -31,11 +31,12 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
 SRC, DST = 15524, 15525
-NAMES = {SRC: "migkit-test-dup-src", DST: "migkit-test-dup-dst"}
+NAMES = {SRC: servers.name(servers.PREFIX + "-dup-src"), DST: servers.name(servers.PREFIX + "-dup-dst")}
 WHY = "the sort order an index was built under has changed"
 
 

@@ -18,6 +18,7 @@ import pytest
 
 from migkit import cloud_readiness as cr
 from migkit import cloudapi
+from tests import servers
 
 moto = pytest.importorskip("moto")
 
@@ -42,14 +43,14 @@ def _instance(ec2, rds, name, cidr, port_from="10.0.0.0/24", snapshot=True):
     sg = ec2.create_security_group(GroupName=name, Description="db",
                                    VpcId=vpc)["GroupId"]
     ec2.authorize_security_group_ingress(GroupId=sg, IpPermissions=[{
-        "IpProtocol": "tcp", "FromPort": 5432, "ToPort": 5432,
+        "IpProtocol": "tcp", "FromPort": servers.private_port(0), "ToPort": servers.private_port(0),
         "IpRanges": [{"CidrIp": port_from}]}])
     rds.create_db_subnet_group(DBSubnetGroupName=name,
                                DBSubnetGroupDescription="db",
                                SubnetIds=[sub["SubnetId"]])
     rds.create_db_instance(DBInstanceIdentifier=name, Engine="postgres",
                            DBInstanceClass="db.t3.micro", MasterUsername="u",
-                           MasterUserPassword="CHANGE_ME1", Port=5432,
+                           MasterUserPassword="CHANGE_ME1", Port=servers.private_port(0),
                            AllocatedStorage=20, DBSubnetGroupName=name,
                            VpcSecurityGroupIds=[sg])
     if snapshot:
@@ -94,9 +95,9 @@ def test_a_clean_pair_passes(aws, monkeypatch):
     _instance(*aws, "src", "10.0.0.0/25")
     _instance(*aws, "dst", "10.0.0.128/25")
     src, dst = _net("src"), _net("dst")
-    assert src.cidrs == ("10.0.0.0/25",) and src.port == 5432
+    assert src.cidrs == ("10.0.0.0/25",) and src.port == servers.private_port(0)
     assert src.subnets[0][1] > 0 and src.rules[0][1:] == ("10.0.0.0/24",
-                                                         5432, 5432)
+                                                         servers.private_port(0), servers.private_port(0))
     assert any(p.ready for p in src.restore_points)
     ec2 = aws[0]
     pcx = ec2.create_vpc_peering_connection(VpcId=src.network,
@@ -170,7 +171,7 @@ def test_google_and_azure_answers_are_audited():
                               "scheduledMaintenance": {
                                   "startTime": "2026-10-16T04:00:00Z"}})
     net = cloudapi.network(gcp)
-    net.port = 5432
+    net.port = servers.private_port(0)
     got = _fails(cr.audit(net, None, {"source": ("198.51.100.7",)}, NOW))
     assert "2026-10-16T04:00:00" in got["the source's pending maintenance"][0]
     assert "198.51.100.7" in got["the source's security groups"][0]
@@ -184,7 +185,7 @@ def test_google_and_azure_answers_are_audited():
         _op=lambda what, *a: [SimpleNamespace(start_ip_address="10.0.0.0",
                                               end_ip_address="10.0.0.255")])
     net = cloudapi.network(az)
-    net.port = 5432
+    net.port = servers.private_port(0)
     got = cr.audit(net, None, {"source": ("10.0.0.4",)}, NOW)
     assert not _fails(got) and any("not read" in g[2] for g in got)
 
@@ -193,7 +194,7 @@ def test_assess_says_the_cloud_side(monkeypatch):
     from migkit import cutover, egress, machine, managed, ready
     net = cloudapi.Network("aws", "src", network="vpc-1",
                            cidrs=("10.0.0.0/25",), subnets=(("s", 0),),
-                           rules=(), port=5432, pending=(),
+                           rules=(), port=servers.private_port(0), pending=(),
                            restore_points=(), restore_kind="snapshot")
     monkeypatch.setattr(managed, "api_conf", lambda h, e, w: (
         ("aws", {}) if w == "src" else (None, "owner's")))
@@ -207,8 +208,8 @@ def test_assess_says_the_cloud_side(monkeypatch):
     monkeypatch.setattr(cutover, "summary", lambda *a: ("pass", "ok"))
     monkeypatch.delenv("MIGKIT_EGRESS", raising=False)
     hop = SimpleNamespace(name="h", options={},
-                          source=SimpleNamespace(host="10.0.0.5", port=5432),
-                          target=SimpleNamespace(host="10.0.0.6", port=5432))
+                          source=SimpleNamespace(host="10.0.0.5", port=servers.private_port(0)),
+                          target=SimpleNamespace(host="10.0.0.6", port=servers.private_port(0)))
     got = {i.what: i for i in ready.items(hop, None, assessed=[])}
     assert got["the source's subnets"].level == "fail"
     assert got["the source's security groups"].fix.startswith(

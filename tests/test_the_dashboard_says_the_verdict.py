@@ -27,6 +27,7 @@ import pytest
 import yaml
 
 from migkit.config import Endpoint, Hop
+from tests import servers
 
 ROOT = Path(__file__).resolve().parents[1]
 LBL = 'hop="h",engine="mysql"'
@@ -448,7 +449,7 @@ def test_the_shipped_deployment_can_be_scraped_and_only_from_here():
     compose = yaml.safe_load((ROOT / "deploy" / "docker-compose.yml")
                              .read_text())
     view = compose["services"]["migkit-ui"]
-    assert view["ports"] == ["127.0.0.1:8899:8899"], view
+    assert view["ports"] == [f"127.0.0.1:{servers.private_port(0)}:8899"], view
     env = view["environment"]
     assert env["MIGKIT_UI_BIND"] == "0.0.0.0"
     assert "MIGKIT_METRICS_TOKEN" in env and ":?" in \

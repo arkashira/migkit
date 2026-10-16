@@ -19,11 +19,12 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import mssql_run, needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("move.table-copy", "mssql"), ("move.bulk", "mssql")]
 
-MS, PORT, PW = "migkit-test-ms-bulk", 16131, "CHANGE_ME-Bulk-9x!"
+MS, PORT, PW = servers.name(servers.PREFIX + "-ms-bulk"), servers.private_port(0), "CHANGE_ME-Bulk-9x!"
 
 TYPES = ("id int identity(5,3) primary key,"
          " v varchar(20) collate Latin1_General_CI_AS null,"

@@ -14,11 +14,12 @@ import time
 import pytest
 
 from tests.conftest import needs_docker
+from tests import servers as lanes
 
 pytestmark = needs_docker
 
-SRC = ("migkit-test-down-pg-src", 16400, "postgres:17")
-DST = ("migkit-test-down-pg-dst", 16401, "postgres:14")
+SRC = (lanes.name(lanes.PREFIX + "-down-pg-src"), lanes.private_port(0), "postgres:17")
+DST = (lanes.name(lanes.PREFIX + "-down-pg-dst"), lanes.private_port(1), "postgres:14")
 
 
 def psql(name, db, sql):

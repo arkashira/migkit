@@ -10,9 +10,10 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
-SRC, DST = "migkit-test-mongorange-src", "migkit-test-mongorange-dst"
-SRC_PORT, DST_PORT = 15487, 15488
+SRC, DST = servers.name(servers.PREFIX + "-mongorange-src"), servers.name(servers.PREFIX + "-mongorange-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

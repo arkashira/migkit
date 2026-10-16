@@ -26,6 +26,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers as lanes
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [
@@ -37,9 +38,9 @@ PROVES = [
 
 pytestmark = needs_docker
 
-SRC, DST, OLD = ("migkit-test-rrepl-src", "migkit-test-rrepl-dst",
-                 "migkit-test-rrepl-old")
-SRC_PORT, DST_PORT, OLD_PORT = 15847, 15848, 15849
+SRC, DST, OLD = (lanes.name(lanes.PREFIX + "-rrepl-src"), lanes.name(lanes.PREFIX + "-rrepl-dst"),
+                 lanes.name(lanes.PREFIX + "-rrepl-old"))
+SRC_PORT, DST_PORT, OLD_PORT = lanes.private_port(0), lanes.private_port(1), lanes.private_port(2)
 SRC_PW, DST_PW = "CHANGE_ME-src", "CHANGE_ME-dst"
 
 

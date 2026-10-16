@@ -13,6 +13,7 @@ import pytest
 
 from migkit import decide, twoway
 from migkit.engines import redis as R
+from tests import servers
 
 
 def ln(n):
@@ -222,13 +223,13 @@ def test_a_cluster_is_followed_one_stream_a_shard(monkeypatch):
     eng.__dict__["_is_cluster"] = {"src": True}
     Node = type("N", (), {})
     a, b = Node(), Node()
-    a.host, a.port, b.host, b.port = "10.0.0.1", 7000, "10.0.0.2", 7000
+    a.host, a.port, b.host, b.port = "10.0.0.1", servers.private_port(0), "10.0.0.2", servers.private_port(0)
     cache = {0: [a], 1: [a], 8192: [b]}
     rc = type("RC", (), {"nodes_manager": type("NM", (), {
         "slots_cache": cache})()})()
     monkeypatch.setattr(R.RedisEngine, "_keys", lambda self, *a, **k: rc)
-    assert [s[:3] for s in eng._shards()] == [("0", "10.0.0.1", 7000),
-                                               ("8192", "10.0.0.2", 7000)]
+    assert [s[:3] for s in eng._shards()] == [("0", "10.0.0.1", servers.private_port(0)),
+                                               ("8192", "10.0.0.2", servers.private_port(0))]
     monkeypatch.setattr(R.RedisEngine, "_node_client",
                         lambda self, h, p, decode=True: (h, p))
     monkeypatch.setattr(R.RedisEngine, "live_way",

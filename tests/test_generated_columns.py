@@ -33,6 +33,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
@@ -178,8 +179,8 @@ def test_engines_without_the_concept_claim_nothing(tmp_path):
 
 # ---- mysql, which refuses the same thing in its own words ---------------
 
-MY = "migkit-test-gen-my"
-MY_PORT = 13403
+MY = servers.name(servers.PREFIX + "-gen-my")
+MY_PORT = servers.private_port(0)
 
 
 @pytest.fixture(scope="module")

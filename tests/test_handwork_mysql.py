@@ -13,12 +13,13 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("assess.handwork", "mysql")]
 
-SRC, DST = "migkit-test-handwork-src", "migkit-test-handwork-dst"
-SRC_PORT, DST_PORT = 13495, 13496
+SRC, DST = servers.name(servers.PREFIX + "-handwork-src"), servers.name(servers.PREFIX + "-handwork-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

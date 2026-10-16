@@ -16,9 +16,10 @@ from click.testing import CliRunner
 from migkit import split
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
-SRC, DST = ("migkit-test-split-src", 16466), ("migkit-test-split-dst",
-                                             16467)
+SRC, DST = (servers.name(servers.PREFIX + "-split-src"), servers.private_port(0)), (servers.name(servers.PREFIX + "-split-dst"),
+                                             servers.private_port(1))
 
 
 def _part(name, where=None, exclude=(), opts=None, host="10.0.0.1"):

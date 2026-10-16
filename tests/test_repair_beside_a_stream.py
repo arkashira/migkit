@@ -20,13 +20,14 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("cutover.pause-replication", "postgres")]
 
 pytestmark = needs_docker
 
-MG, MG_PORT = "migkit-test-rstream-mg", 15698
+MG, MG_PORT = servers.name(servers.PREFIX + "-rstream-mg"), servers.private_port(0)
 
 
 def mongosh(script, db="cx"):
@@ -149,7 +150,7 @@ def test_replication_it_does_not_drive_stops_the_repair(pg_pair, tmp_path,
     src_ip = subprocess.run(
         ["docker", "inspect", "-f",
          "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
-         "migkit-test-pg-src"], capture_output=True, text=True).stdout.strip()
+         servers.name(servers.PREFIX + "-pg-src")], capture_output=True, text=True).stdout.strip()
     psql(pg_pair["src"], "create table public.t (id int primary key, v int);"
                          " create publication rs_pub for table public.t")
     psql(pg_pair["dst"], "create table public.t (id int primary key, v int)")
@@ -194,7 +195,7 @@ def test_migkits_own_subscription_is_paused_and_resumed(pg_pair, tmp_path,
     src_ip = subprocess.run(
         ["docker", "inspect", "-f",
          "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
-         "migkit-test-pg-src"], capture_output=True, text=True).stdout.strip()
+         servers.name(servers.PREFIX + "-pg-src")], capture_output=True, text=True).stdout.strip()
     hop = Hop(name="rsown", engine="postgres",
               source=Endpoint(host="127.0.0.1", port=pg_pair["src"],
                               user="postgres", password="test"),

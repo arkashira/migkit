@@ -15,12 +15,13 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
 ROOT = Path(__file__).resolve().parent.parent
-STANDBY, PROXY, API, LISTEN = ("migkit-test-standby", "migkit-test-toxi-src",
-                               15884, 15885)
+STANDBY, PROXY, API, LISTEN = (servers.name(servers.PREFIX + "-standby"), servers.name(servers.PREFIX + "-toxi-src"),
+                               servers.private_port(0), servers.private_port(1))
 
 
 def _ip(name):
@@ -56,11 +57,11 @@ def standby(pg_pair):
         analyze""")
     assert got.returncode == 0, got.stderr
     # the primary takes a copy for its standby from any address
-    subprocess.run(["docker", "exec", "migkit-test-pg-src", "sh", "-c",
+    subprocess.run(["docker", "exec", servers.name(servers.PREFIX + "-pg-src"), "sh", "-c",
                     "echo 'host replication all all scram-sha-256' >>"
                     " /var/lib/postgresql/data/pg_hba.conf"], check=True)
     psql(pg_pair["src"], "select pg_reload_conf()")
-    primary = _ip("migkit-test-pg-src")
+    primary = _ip(servers.name(servers.PREFIX + "-pg-src"))
     for name in (STANDBY, PROXY):
         subprocess.run(["docker", "rm", "-f", "-v", name],
                        capture_output=True)

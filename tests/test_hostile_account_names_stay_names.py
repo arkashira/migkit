@@ -16,6 +16,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("verify.users", ("postgres", "mysql"))]
@@ -269,10 +270,10 @@ def _down(names_ports):
         subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
 
 
-PG = (("migkit-test-hostile-pg-src", 16470),
-      ("migkit-test-hostile-pg-dst", 16471))
-MY = (("migkit-test-hostile-my-src", 16472),
-      ("migkit-test-hostile-my-dst", 16473))
+PG = ((servers.name(servers.PREFIX + "-hostile-pg-src"), servers.private_port(0)),
+      (servers.name(servers.PREFIX + "-hostile-pg-dst"), servers.private_port(1)))
+MY = ((servers.name(servers.PREFIX + "-hostile-my-src"), servers.private_port(2)),
+      (servers.name(servers.PREFIX + "-hostile-my-dst"), servers.private_port(3)))
 
 
 def _pg(port, user="postgres", password="CHANGE_ME-pg", db="postgres"):

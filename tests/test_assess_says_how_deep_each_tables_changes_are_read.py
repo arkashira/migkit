@@ -9,6 +9,7 @@ import pytest
 from migkit import changedepth
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 
 def test_mysql_depth_follows_the_log_settings_and_the_key():
@@ -44,7 +45,7 @@ def test_the_lines_group_tables_by_depth_and_name_the_fix():
     assert "2 tables" in got[0][1] and "1 table" in got[1][1]
 
 
-MY, MY_PORT = "migkit-test-lt-r1-my", 16581
+MY, MY_PORT = servers.name(servers.PREFIX + "-lt-r1-my"), servers.private_port(0)
 
 
 @pytest.fixture(scope="module")

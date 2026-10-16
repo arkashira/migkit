@@ -21,6 +21,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [
@@ -31,7 +32,7 @@ PROVES = [
 
 pytestmark = needs_docker
 
-OS, PORT = "migkit-test-eng-os", 16012
+OS, PORT = servers.name(servers.PREFIX + "-eng-os"), servers.private_port(0)
 
 
 def _http(method, path, body=None, ndjson=False, ok=(200, 201)):

@@ -15,10 +15,11 @@ import pytest
 from click.testing import CliRunner
 
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
-SRC, DST = ("migkit-test-perf-src", 15803), ("migkit-test-perf-dst", 15804)
+SRC, DST = (servers.name(servers.PREFIX + "-perf-src"), servers.private_port(0)), (servers.name(servers.PREFIX + "-perf-dst"), servers.private_port(1))
 SEED = ("create table public.t (id int primary key, k int, pad text);"
         " insert into public.t select g, g % 50000, repeat('x', 60)"
         " from generate_series(1, 300000) g;"

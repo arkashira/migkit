@@ -37,11 +37,12 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
 SRC, DST = 15529, 15530
-NAMES = {SRC: "migkit-test-mjr-src", DST: "migkit-test-mjr-dst"}
+NAMES = {SRC: servers.name(servers.PREFIX + "-mjr-src"), DST: servers.name(servers.PREFIX + "-mjr-dst")}
 
 #: What an application sending UTF-8 through a latin1 connection stored,
 #: beside text that is simply accented and correct. Written as a round trip

@@ -18,6 +18,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 PROVES = [
     ("move.table-copy", "neptune"),
@@ -26,9 +27,9 @@ PROVES = [
 pytestmark = needs_docker
 
 GREMLIN = "tinkerpop/gremlin-server:3.7.3"
-SRC, SRC_PORT = "migkit-test-neptune-src", 16459
-DST, DST_PORT = "migkit-test-neptune-dst", 16458
-FUSEKI, FUSEKI_PORT = "migkit-test-neptune-rdf", 16450
+SRC, SRC_PORT = servers.name(servers.PREFIX + "-neptune-src"), servers.private_port(0)
+DST, DST_PORT = servers.name(servers.PREFIX + "-neptune-dst"), servers.private_port(1)
+FUSEKI, FUSEKI_PORT = servers.name(servers.PREFIX + "-neptune-rdf"), servers.private_port(2)
 FUSEKI_IMAGE = "stain/jena-fuseki:latest"
 
 

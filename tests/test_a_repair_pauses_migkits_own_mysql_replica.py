@@ -23,15 +23,16 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("assess.writers", "mysql"), ("cutover.pause-replication", "mysql")]
 
 pytestmark = pytest.mark.docker
 
-NET = "migkit-test-mypause-net"
-SRC, DST = "migkit-test-mypause-src", "migkit-test-mypause-dst"
-SRC_PORT, DST_PORT = 15768, 15769
+NET = servers.name(servers.PREFIX + "-mypause-net")
+SRC, DST = servers.name(servers.PREFIX + "-mypause-src"), servers.name(servers.PREFIX + "-mypause-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 GTID = ["--gtid-mode=ON", "--enforce-gtid-consistency=ON", "--log-bin"]
 
 

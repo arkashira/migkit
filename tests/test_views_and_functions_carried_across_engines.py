@@ -17,14 +17,15 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("schema.views", "mysql")]
 
 pytestmark = [pytest.mark.docker]
 
-MY, PG = "migkit-test-code-my", "migkit-test-code-pg"
-MY_PORT, PG_PORT = 16080, 16081
+MY, PG = servers.name(servers.PREFIX + "-code-my"), servers.name(servers.PREFIX + "-code-pg")
+MY_PORT, PG_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

@@ -11,12 +11,13 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("schema.create", "mysql"), ("move.create-missing", "hetero")]
 
-PG, MY = "migkit-test-cr-pg", "migkit-test-cr-my"
-PG_PORT, MY_PORT = 15467, 13367
+PG, MY = servers.name(servers.PREFIX + "-cr-pg"), servers.name(servers.PREFIX + "-cr-my")
+PG_PORT, MY_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

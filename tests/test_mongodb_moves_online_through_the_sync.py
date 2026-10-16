@@ -27,8 +27,9 @@ import pytest
 from migkit import movers
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
-SRC, DST = ("migkit-test-sync-src", 15801), ("migkit-test-sync-dst", 15802)
+SRC, DST = (servers.name(servers.PREFIX + "-sync-src"), servers.private_port(0)), (servers.name(servers.PREFIX + "-sync-dst"), servers.private_port(1))
 
 
 def _sh(name, port, db, js):

@@ -16,12 +16,13 @@ import time
 
 import pytest
 from click.testing import CliRunner
+from tests import servers as lanes
 
-NET = "migkit-test-upg-net"
-SRC, OLD, NEW = ("migkit-test-upg-src", "migkit-test-upg-dst16",
-                 "migkit-test-upg-dst17")
-V16, V17 = "migkit-test-upg-v16", "migkit-test-upg-v17"
-SRC_PORT, DST_PORT = 16330, 16331
+NET = lanes.name(lanes.PREFIX + "-upg-net")
+SRC, OLD, NEW = (lanes.name(lanes.PREFIX + "-upg-src"), lanes.name(lanes.PREFIX + "-upg-dst16"),
+                 lanes.name(lanes.PREFIX + "-upg-dst17"))
+V16, V17 = lanes.name(lanes.PREFIX + "-upg-v16"), lanes.name(lanes.PREFIX + "-upg-v17")
+SRC_PORT, DST_PORT = lanes.private_port(0), lanes.private_port(1)
 IMAGE = "tianon/postgres-upgrade:16-to-17"
 
 

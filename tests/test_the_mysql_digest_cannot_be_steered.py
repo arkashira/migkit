@@ -23,10 +23,11 @@ import zlib
 import pytest
 
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
-MY, PORT = "migkit-test-f0v-mysql", 16052
+MY, PORT = servers.name(servers.PREFIX + "-f0v-mysql"), servers.private_port(0)
 
 
 def _mysql(sql, db="mysql"):

@@ -15,11 +15,12 @@ import time
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("assess.capacity", "mongodb")]
 
-MG, MG_PORT = "migkit-test-room-free", 15796
+MG, MG_PORT = servers.name(servers.PREFIX + "-room-free"), servers.private_port(0)
 
 
 def test_the_line_says_free_space_and_when_it_is_short():

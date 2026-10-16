@@ -16,6 +16,7 @@ import pytest
 from migkit import logddl
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 
 def test_the_statements_that_name_one_table_are_read():
@@ -38,7 +39,7 @@ def test_what_changes_rows_by_a_way_the_text_does_not_name_is_unread():
         assert logddl.dml(q, "app") == ([], False), q
 
 
-MY, MY_PORT = "migkit-test-lt-r8-my", 16584
+MY, MY_PORT = servers.name(servers.PREFIX + "-lt-r8-my"), servers.private_port(0)
 
 
 def _my(sql):

@@ -23,9 +23,10 @@ import pytest
 
 from migkit import canon
 from migkit.config import Endpoint, Hop
+from tests import servers
 
-MY, MG = "migkit-test-bk-my", "migkit-test-bk-mg"
-MY_PORT, MG_PORT = 13381, 27088
+MY, MG = servers.name(servers.PREFIX + "-bk-my"), servers.name(servers.PREFIX + "-bk-mg")
+MY_PORT, MG_PORT = servers.private_port(0), servers.private_port(1)
 
 # a quote, a colon and brackets in the key, because the key travels into a
 # query and into the canonical text, and both have been broken by punctuation

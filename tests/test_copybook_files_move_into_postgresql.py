@@ -22,10 +22,11 @@ from migkit import copybook as cb
 from migkit.config import Endpoint, Hop
 from tests import copybook_corpus as C
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
-PG, PORT = "migkit-test-mf-pg", 16160
+PG, PORT = servers.name(servers.PREFIX + "-mf-pg"), servers.private_port(0)
 
 
 def _psql(sql, db="postgres"):

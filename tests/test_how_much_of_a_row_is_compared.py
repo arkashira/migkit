@@ -35,11 +35,12 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
 SRC, DST = 15541, 15542
-NAMES = {SRC: "migkit-test-cmp-src", DST: "migkit-test-cmp-dst"}
+NAMES = {SRC: servers.name(servers.PREFIX + "-cmp-src"), DST: servers.name(servers.PREFIX + "-cmp-dst")}
 
 WIDE = """
 create extension if not exists hstore;

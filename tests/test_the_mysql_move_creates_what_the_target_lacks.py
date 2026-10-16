@@ -15,13 +15,14 @@ import pytest
 from click.testing import CliRunner
 
 from migkit import movers
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("move.create-missing", "mysql")]
 
 pytestmark = [pytest.mark.docker]
 
-MY, PORT = "migkit-test-mycreate", 15709
+MY, PORT = servers.name(servers.PREFIX + "-mycreate"), servers.private_port(0)
 
 
 def _docker():

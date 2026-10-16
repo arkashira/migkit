@@ -15,11 +15,12 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
 ROOT = Path(__file__).resolve().parent.parent
-BASTION, SSH_PORT = "migkit-test-bastion", 15886
+BASTION, SSH_PORT = servers.name(servers.PREFIX + "-bastion"), servers.private_port(0)
 
 FORWARDER = r"""
 import socket, sys, threading
@@ -112,7 +113,7 @@ def _hop(tmp, pg_pair, tunnel, workers=""):
         "hops:\n  far:\n    engine: postgres\n"
         f"    source: {{host: 127.0.0.1, port: {pg_pair['src']},"
         " user: postgres, password: test}\n"
-        f"    target:\n      host: {_ip('migkit-test-pg-dst')}\n"
+        f"    target:\n      host: {_ip(servers.name(servers.PREFIX + '-pg-dst'))}\n"
         "      port: 5432\n      user: postgres\n      password: test\n"
         f"      tunnel: {tunnel}\n    databases: [postgres]\n" + workers)
 
@@ -224,7 +225,7 @@ def test_a_far_bastion_is_crossed_by_several_connections(pg_pair, bastion,
     spec = {"ssh": "127.0.0.1", "port": SSH_PORT, "user": "migkit",
             "key": str(bastion / "id"),
             "known_hosts": str(bastion / "known")}
-    ep = Endpoint(host=_ip("migkit-test-pg-dst"), port=5432,
+    ep = Endpoint(host=_ip(servers.name(servers.PREFIX + "-pg-dst")), port=5432,
                   user="postgres", password="test",
                   options={"tunnel": spec})
     hop = Hop(name="far", engine="postgres",
@@ -274,7 +275,7 @@ def test_rows_are_read_beside_the_source_and_cross_compressed(
     spec = {"ssh": "127.0.0.1", "port": SSH_PORT, "user": "migkit",
             "key": str(bastion / "id"),
             "known_hosts": str(bastion / "known")}
-    src = Endpoint(host=_ip("migkit-test-pg-src"), port=5432,
+    src = Endpoint(host=_ip(servers.name(servers.PREFIX + "-pg-src")), port=5432,
                    user="postgres", password="test",
                    options={"tunnel": spec})
     hop = Hop(name="relay", engine="postgres", source=src,

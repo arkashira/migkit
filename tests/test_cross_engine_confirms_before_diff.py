@@ -21,14 +21,15 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("verify.confirm", "hetero")]
 
 pytestmark = [pytest.mark.docker]
 
-MY, PG = "migkit-test-xconfirm-my", "migkit-test-xconfirm-pg"
-MY_PORT, PG_PORT = 15731, 15732
+MY, PG = servers.name(servers.PREFIX + "-xconfirm-my"), servers.name(servers.PREFIX + "-xconfirm-pg")
+MY_PORT, PG_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

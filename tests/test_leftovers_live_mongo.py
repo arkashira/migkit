@@ -13,9 +13,10 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
-NAME = "migkit-test-leftover-mg"
-PORT = 15457
+NAME = servers.name(servers.PREFIX + "-leftover-mg")
+PORT = servers.private_port(0)
 
 
 def _docker():

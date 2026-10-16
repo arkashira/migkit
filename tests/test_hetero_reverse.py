@@ -11,9 +11,10 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
-PG, MY = "migkit-test-rev-pg", "migkit-test-rev-my"
-PG_PORT, MY_PORT = 15483, 13383
+PG, MY = servers.name(servers.PREFIX + "-rev-pg"), servers.name(servers.PREFIX + "-rev-my")
+PG_PORT, MY_PORT = servers.private_port(0), servers.private_port(1)
 
 DDL_PG = """create table shape (
     id bigint primary key, name varchar(50), amount numeric(12,4),

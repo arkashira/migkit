@@ -16,6 +16,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 PROVES = [
     ("move.table-copy", "keyspaces"),
@@ -24,7 +25,7 @@ PROVES = [
 
 pytestmark = needs_docker
 
-NAME, PORT = "migkit-test-keyspaces", 16458
+NAME, PORT = servers.name(servers.PREFIX + "-keyspaces"), servers.private_port(0)
 IMAGE = "cassandra:4.1"
 CQL_PASS = "cassandra"
 

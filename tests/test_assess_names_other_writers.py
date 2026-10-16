@@ -11,6 +11,7 @@ import subprocess
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("assess.writers", "postgres")]
@@ -36,7 +37,7 @@ def test_a_subscription_on_the_target_fails_it(pg_pair, tmp_path):
     src_ip = subprocess.run(
         ["docker", "inspect", "-f",
          "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
-         "migkit-test-pg-src"], capture_output=True, text=True).stdout.strip()
+         servers.name(servers.PREFIX + "-pg-src")], capture_output=True, text=True).stdout.strip()
     psql(pg_pair["src"], "create table public.t (id int primary key);"
                          " create publication ow_pub for table public.t")
     psql(pg_pair["dst"], "create table public.t (id int primary key)")

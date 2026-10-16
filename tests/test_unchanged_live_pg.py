@@ -9,9 +9,10 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
-NAME = "migkit-test-marker"
-PORT = 15443
+NAME = servers.name(servers.PREFIX + "-marker")
+PORT = servers.private_port(0)
 
 
 def _docker():

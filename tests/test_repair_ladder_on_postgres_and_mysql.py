@@ -17,6 +17,7 @@ import pytest
 from migkit import costmodel, repairlog, repairways
 from migkit.config import Endpoint, Hop
 from migkit.repairways import RANGES, RELOAD, ROWS
+from tests import servers
 
 pytestmark = pytest.mark.docker
 
@@ -30,10 +31,10 @@ def own_knowledge(tmp_path, monkeypatch):
     yield
     costmodel._KNOWLEDGE.clear()
 
-PG = {"src": ("migkit-test-rl-pg-src", 16380),
-      "dst": ("migkit-test-rl-pg-dst", 16381)}
-MY = {"src": ("migkit-test-rl-my-src", 16382),
-      "dst": ("migkit-test-rl-my-dst", 16383)}
+PG = {"src": (servers.name(servers.PREFIX + "-rl-pg-src"), servers.private_port(0)),
+      "dst": (servers.name(servers.PREFIX + "-rl-pg-dst"), servers.private_port(1))}
+MY = {"src": (servers.name(servers.PREFIX + "-rl-my-src"), servers.private_port(2)),
+      "dst": (servers.name(servers.PREFIX + "-rl-my-dst"), servers.private_port(3))}
 
 
 def _docker():

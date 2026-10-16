@@ -15,6 +15,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
@@ -85,8 +86,8 @@ def test_pg_rows_outside_the_row_filter_stay(pg_pair, tmp_path):
     assert _pg_ids(pg_pair["dst"]) == "0,1,2,91"
 
 
-SRC, DST = "migkit-test-strays-src", "migkit-test-strays-dst"
-SRC_PORT, DST_PORT = 15657, 15658
+SRC, DST = servers.name(servers.PREFIX + "-strays-src"), servers.name(servers.PREFIX + "-strays-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _my(name, sql):

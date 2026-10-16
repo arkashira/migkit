@@ -20,14 +20,15 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("verify.users", "opensearch")]
 
 pytestmark = needs_docker
 
-SRC = ("migkit-test-eng-os-src", 16013)
-DST = ("migkit-test-eng-os-dst", 16014)
+SRC = (servers.name(servers.PREFIX + "-eng-os-src"), servers.private_port(0))
+DST = (servers.name(servers.PREFIX + "-eng-os-dst"), servers.private_port(1))
 ADMIN = "CHANGE_ME-Os9!admin-Qx"
 ANA = "CHANGE_ME-ana-Pw7!zq"
 API = "/_plugins/_security/api"

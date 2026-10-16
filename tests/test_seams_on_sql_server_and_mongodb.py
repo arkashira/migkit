@@ -16,6 +16,7 @@ import pytest
 from migkit import canon
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 
 def _hop(engine):
@@ -127,7 +128,7 @@ def test_a_collection_event_is_a_ddl_at_its_place():
     assert "drop" in eng.DDL_STOPS
 
 
-MONGO, MONGO_PORT = "migkit-test-livetail-seam-mongo", 16262
+MONGO, MONGO_PORT = servers.name(servers.PREFIX + "-livetail-seam-mongo"), servers.private_port(0)
 
 
 @pytest.fixture(scope="module")

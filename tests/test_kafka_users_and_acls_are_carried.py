@@ -18,13 +18,14 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("verify.users", "kafka")]
 
 pytestmark = needs_docker
 
-SRC, DST = ("migkit-test-kacl-src", 15911), ("migkit-test-kacl-dst", 15912)
+SRC, DST = (servers.name(servers.PREFIX + "-kacl-src"), servers.private_port(0)), (servers.name(servers.PREFIX + "-kacl-dst"), servers.private_port(1))
 ADMIN = ("--user", "migkit", "--password", "CHANGE_ME-sasl",
          "--sasl-mechanism", "SCRAM-SHA-256")
 

@@ -14,9 +14,10 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
-NAME = "migkit-test-diffkind"
-PORT = 15482
+NAME = servers.name(servers.PREFIX + "-diffkind")
+PORT = servers.private_port(0)
 
 
 def _docker():

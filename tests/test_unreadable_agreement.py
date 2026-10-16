@@ -27,9 +27,10 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers
 
-MG = "migkit-test-auth-mg"
-MG_PORT = 27078
+MG = servers.name(servers.PREFIX + "-auth-mg")
+MG_PORT = servers.private_port(0)
 USER, PASSWORD = "root", "secret"
 
 

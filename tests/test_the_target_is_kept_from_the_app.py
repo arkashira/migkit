@@ -15,6 +15,7 @@ import time
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("cutover.read-only-target", ("postgres", "mysql"))]
@@ -55,7 +56,7 @@ def _engine(pg_pair, tmp_path, **options):
 
 def _as(pg_pair, role, sql):
     got = subprocess.run(
-        ["docker", "exec", "-e", "PGPASSWORD=CHANGE_ME", "migkit-test-pg-dst",
+        ["docker", "exec", "-e", "PGPASSWORD=CHANGE_ME", servers.name(servers.PREFIX + "-pg-dst"),
          "psql", "-h", "127.0.0.1", "-U", role, "-d", "postgres", "-At",
          "-c", sql], capture_output=True, text=True)
     return got.returncode, (got.stdout + got.stderr).strip()
@@ -70,7 +71,7 @@ def test_every_kind_of_role_is_stopped_and_given_back(pg_pair, tmp_path):
     # a session of the owner, connected before the freeze
     held = subprocess.Popen(
         ["docker", "exec", "-e", "PGPASSWORD=CHANGE_ME",
-         "migkit-test-pg-dst", "psql", "-h", "127.0.0.1", "-U", "owner_app",
+         servers.name(servers.PREFIX + "-pg-dst"), "psql", "-h", "127.0.0.1", "-U", "owner_app",
          "-d", "postgres", "-c", "select pg_sleep(20)"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(2)
@@ -173,7 +174,7 @@ def test_an_engine_without_it_refuses_before_copying(tmp_path, monkeypatch):
     assert copied == []
 
 
-MY, MY_PORT = "migkit-test-frz-my", 15697
+MY, MY_PORT = servers.name(servers.PREFIX + "-frz-my"), servers.private_port(0)
 
 
 def _my(sql, user="root", password="test"):

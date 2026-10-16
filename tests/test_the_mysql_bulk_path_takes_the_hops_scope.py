@@ -20,14 +20,15 @@ import pytest
 from migkit import movers
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("scope.names", "mysql")]
 
 pytestmark = needs_docker
 
-SRC, DST = "migkit-test-myscope-src", "migkit-test-myscope-dst"
-SRC_PORT, DST_PORT = 13493, 13494
+SRC, DST = servers.name(servers.PREFIX + "-myscope-src"), servers.name(servers.PREFIX + "-myscope-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 have_tools = pytest.mark.skipif(
     not (shutil.which("mydumper", path=movers.tool_env()["PATH"])

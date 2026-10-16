@@ -22,6 +22,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers as lanes
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [
@@ -34,8 +35,8 @@ PROVES = [
 
 pytestmark = needs_docker
 
-NET = "migkit-test-eng-net"
-SRC, DST = ("migkit-test-eng-ch-src", 16010), ("migkit-test-eng-ch-dst", 16011)
+NET = lanes.name(lanes.PREFIX + "-eng-net")
+SRC, DST = (lanes.name(lanes.PREFIX + "-eng-ch-src"), lanes.private_port(0)), (lanes.name(lanes.PREFIX + "-eng-ch-dst"), lanes.private_port(1))
 FROM_TARGET = f"{SRC[0]}:9000"
 HELD = "each partition's fingerprint equal on both servers"
 

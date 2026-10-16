@@ -20,11 +20,12 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
 SRC, DST = 16270, 16271
-NAMES = {SRC: "migkit-test-vd-lo-src", DST: "migkit-test-vd-lo-dst"}
+NAMES = {SRC: servers.name(servers.PREFIX + "-vd-lo-src"), DST: servers.name(servers.PREFIX + "-vd-lo-dst")}
 
 
 def q(port, sql):

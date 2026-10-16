@@ -21,6 +21,7 @@ import pytest
 import migkit.config as cfg
 from migkit import cloudapi, decide, egress, tunnel
 from migkit.redact import Redactor
+from tests import servers
 
 CANARY = "ya29.CANARY-token-never-said-0123456789abcdef"
 
@@ -232,7 +233,7 @@ def test_the_forwarder_is_decided_from_what_is_installed_and_answers():
 
 def test_the_line_an_operator_reads_names_no_program():
     class Ep:
-        host, port, options = "10.0.0.5", 5432, {}
+        host, port, options = "10.0.0.5", servers.private_port(0), {}
     with pytest.raises(SystemExit) as e:
         tunnel.forwarder(Ep(), {"ssm": "i-0abc"}, "source",
                          facts=_facts(["ssm"]))
@@ -248,26 +249,26 @@ def test_the_line_an_operator_reads_names_no_program():
 
 def test_each_forwarder_runs_its_documented_command_line():
     ssm = tunnel.cloud_argv({"cloud": "ssm", "ssm": "i-0abc",
-                             "region": "ap-southeast-1"}, "10.0.0.5", 5432,
+                             "region": "ap-southeast-1"}, "10.0.0.5", servers.private_port(0),
                             40001)
     assert "AWS-StartPortForwardingSessionToRemoteHost" in ssm
     assert "host=10.0.0.5,portNumber=5432,localPortNumber=40001" in ssm
     iap = tunnel.cloud_argv({"cloud": "iap", "iap": "db-vm", "zone": "z1"},
-                            "10.0.0.5", 5432, 40001)
+                            "10.0.0.5", servers.private_port(0), 40001)
     assert "--local-host-port=127.0.0.1:40001" in iap and "--zone=z1" in iap
 
     class Ep:
         options = {"auth": "cloudsql_iam"}
     sql = tunnel.cloud_argv({"cloud": "cloudsql", "cloudsql": "p:r:i"},
-                            "10.0.0.5", 5432, 40001, Ep())
+                            "10.0.0.5", servers.private_port(0), 40001, Ep())
     assert sql[-1] == "p:r:i" and "--private-ip" in sql \
         and "--auto-iam-authn" in sql
     assert "--private-ip" not in tunnel.cloud_argv(
-        {"cloud": "cloudsql", "cloudsql": "p:r:i"}, "1.2.3.4", 5432,
+        {"cloud": "cloudsql", "cloudsql": "p:r:i"}, "1.2.3.4", servers.private_port(0),
         40001)
     bastion = tunnel.cloud_argv({"cloud": "bastion", "bastion": "b",
                                  "resource_group": "rg", "target": "/vm"},
-                                "10.0.0.5", 5432, 40001)
+                                "10.0.0.5", servers.private_port(0), 40001)
     assert bastion[bastion.index("--resource-port") + 1] == "5432"
 
 
@@ -275,7 +276,7 @@ def test_a_closed_egress_opens_no_forwarder(monkeypatch):
     monkeypatch.setenv("MIGKIT_EGRESS", "none")
 
     class Ep:
-        host, port = "10.0.0.5", 5432
+        host, port = "10.0.0.5", servers.private_port(0)
         options = {"tunnel": {"ssm": "i-0abc"}}
 
     class Hop:

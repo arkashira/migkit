@@ -247,7 +247,7 @@ def test_the_lsn_notations_read_alike():
 @needs_docker
 def test_the_sandbox_reads_its_live_log_back_as_changes():
     import pymssql
-    name, port = servers.name("migkit-test-mssql-log"), servers.private_port(7)
+    name, port = servers.name(servers.PREFIX + "-mssql-log"), servers.private_port(7)
     pw = servers.STRONG
     subprocess.run(["docker", "rm", "-f", "-v", name], capture_output=True)
     subprocess.run(mssql_run(name, port, pw), check=True,

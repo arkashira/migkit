@@ -21,6 +21,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 PROVES = [
     ("move.table-copy", "spanner"),
@@ -32,7 +33,7 @@ PROVES = [
 
 pytestmark = needs_docker
 
-EMU, PORT = "migkit-test-spanner", 16450
+EMU, PORT = servers.name(servers.PREFIX + "-spanner"), servers.private_port(0)
 IMAGE = "gcr.io/cloud-spanner-emulator/emulator:latest"
 PROJECT, INSTANCE = "migkit-test", "inst"
 UTC = datetime.timezone.utc

@@ -18,14 +18,15 @@ import time
 import pytest
 
 from tests.conftest import MSSQL_IMAGE, needs_docker
+from tests import servers as lanes
 
 pytestmark = [needs_docker, pytest.mark.skipif(
     "azure-sql-edge" in MSSQL_IMAGE,
     reason="the editions are SQL Server 2022's: the x86 VM runs them")]
 
-SRC = ("migkit-test-edition-src", 16408, "Developer")
-DST = ("migkit-test-edition-dst", 16409, "Express")
-VOLUME = "migkit-test-edition-backup"
+SRC = (lanes.name(lanes.PREFIX + "-edition-src"), lanes.private_port(0), "Developer")
+DST = (lanes.name(lanes.PREFIX + "-edition-dst"), lanes.private_port(1), "Express")
+VOLUME = lanes.name(lanes.PREFIX + "-edition-backup")
 BACKUP = "/var/opt/mssql/backup"
 PASSWORD = "CHANGE_ME-Ed1tion!x"
 

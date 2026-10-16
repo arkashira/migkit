@@ -20,13 +20,14 @@ import psycopg2
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("verify.fence", "postgres")]
 
 pytestmark = needs_docker
 
-SRC = "migkit-test-pg-src"
+SRC = servers.name(servers.PREFIX + "-pg-src")
 
 
 def _hop(pg_pair, tmp_path, **options):

@@ -38,11 +38,12 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
-A_PORT, B_PORT = 13403, 13404
-NAMES = {A_PORT: "migkit-test-tz-a", B_PORT: "migkit-test-tz-b"}
+A_PORT, B_PORT = servers.private_port(0), servers.private_port(1)
+NAMES = {A_PORT: servers.name(servers.PREFIX + "-tz-a"), B_PORT: servers.name(servers.PREFIX + "-tz-b")}
 
 
 @pytest.fixture(scope="module")

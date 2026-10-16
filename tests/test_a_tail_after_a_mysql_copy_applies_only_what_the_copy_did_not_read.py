@@ -18,13 +18,14 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("tail.follows", "mysql")]
 
 pytestmark = needs_docker
 
-MY, PORT = "migkit-test-wm-my", 15980
+MY, PORT = servers.name(servers.PREFIX + "-wm-my"), servers.private_port(0)
 ROWS = 60_000
 
 

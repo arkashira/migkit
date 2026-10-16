@@ -18,10 +18,11 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers
 
 pytestmark = [pytest.mark.docker]
 
-NAME, PORT = "migkit-test-mongo-keytypes", 15741
+NAME, PORT = servers.name(servers.PREFIX + "-mongo-keytypes"), servers.private_port(0)
 
 
 def _docker():

@@ -13,12 +13,13 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("move.bulk", "postgres")]
 
-SRC, DST = "migkit-test-pgc-src", "migkit-test-pgc-dst"
-SRC_PORT, DST_PORT = 15433, 15434
+SRC, DST = servers.name(servers.PREFIX + "-pgc-src"), servers.name(servers.PREFIX + "-pgc-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

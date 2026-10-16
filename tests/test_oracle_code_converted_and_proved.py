@@ -18,15 +18,16 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers as lanes
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("schema.views", "oracle"), ("schema.routines", "oracle")]
 
 pytestmark = [pytest.mark.docker]
 
-OR, SB_OR = "migkit-test-code-or", "migkit-test-code-sbor"
-PG, SB_PG = "migkit-test-code-pg", "migkit-test-code-sbpg"
-OR_PORT, SB_OR_PORT, PG_PORT, SB_PG_PORT = 16084, 16085, 16081, 16083
+OR, SB_OR = lanes.name(lanes.PREFIX + "-code-or"), lanes.name(lanes.PREFIX + "-code-sbor")
+PG, SB_PG = lanes.name(lanes.PREFIX + "-code-pg"), lanes.name(lanes.PREFIX + "-code-sbpg")
+OR_PORT, SB_OR_PORT, PG_PORT, SB_PG_PORT = lanes.private_port(0), lanes.private_port(1), lanes.private_port(2), lanes.private_port(3)
 PASSWORD = "CHANGE_ME_test1"
 IMAGE = "gvenzl/oracle-free:slim-faststart"
 

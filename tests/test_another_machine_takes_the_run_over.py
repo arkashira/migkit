@@ -20,8 +20,8 @@ from tests import servers as store
 
 pytestmark = [pytest.mark.docker]
 
-S3 = "migkit-test-runstate-s3"
-PORT = 15824
+S3 = store.name(store.PREFIX + "-runstate-s3")
+PORT = store.private_port(0)
 BUCKET = "migkit-state"
 
 

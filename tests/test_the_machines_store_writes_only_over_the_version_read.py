@@ -23,9 +23,9 @@ from migkit.config import Endpoint, Hop
 from migkit.state import Taken
 from tests import servers as s3store
 
-PG, PG_PORT = "migkit-test-w1-store-pg", 16424
-MY, MY_PORT = "migkit-test-w1-store-my", 16425
-S3, S3_PORT = "migkit-test-w1-store-s3", 16426
+PG, PG_PORT = s3store.name(s3store.PREFIX + "-w1-store-pg"), s3store.private_port(0)
+MY, MY_PORT = s3store.name(s3store.PREFIX + "-w1-store-my"), s3store.private_port(1)
+S3, S3_PORT = s3store.name(s3store.PREFIX + "-w1-store-s3"), s3store.private_port(2)
 
 
 def _hop(tmp_path, name="st", engine="postgres", options=None, **ends):

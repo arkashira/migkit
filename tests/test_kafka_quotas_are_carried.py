@@ -14,10 +14,11 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
-SRC, DST = ("migkit-test-kquo-src", 15913), ("migkit-test-kquo-dst", 15914)
+SRC, DST = (servers.name(servers.PREFIX + "-kquo-src"), servers.private_port(0)), (servers.name(servers.PREFIX + "-kquo-dst"), servers.private_port(1))
 ADMIN = ("--user", "migkit", "--password", "CHANGE_ME-sasl",
          "--sasl-mechanism", "SCRAM-SHA-256")
 

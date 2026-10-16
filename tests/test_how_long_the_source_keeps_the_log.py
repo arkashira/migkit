@@ -13,6 +13,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
@@ -67,7 +68,7 @@ def test_postgres_says_what_the_slot_can_still_take(pg_pair):
         psql(pg_pair["src"], "drop table if exists room_fill")
 
 
-MY, MY_PORT = "migkit-test-room-my", 15783
+MY, MY_PORT = servers.name(servers.PREFIX + "-room-my"), servers.private_port(0)
 
 
 def _my(sql):
@@ -116,7 +117,7 @@ def test_mysql_says_when_the_tails_binlog_may_be_purged():
         _down(MY)
 
 
-MG, MG_PORT = "migkit-test-room-mg", 15784
+MG, MG_PORT = servers.name(servers.PREFIX + "-room-mg"), servers.private_port(1)
 
 
 def test_mongodb_says_how_much_oplog_is_older_than_the_resume_point():

@@ -20,10 +20,11 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers
 
 pytestmark = pytest.mark.docker
 
-MY, PORT = "migkit-test-binlog-place", 15877
+MY, PORT = servers.name(servers.PREFIX + "-binlog-place"), servers.private_port(0)
 
 
 def _docker():

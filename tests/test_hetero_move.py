@@ -13,12 +13,13 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("move.table-copy", "hetero")]
 
-PG, MY = "migkit-test-mv-pg", "migkit-test-mv-my"
-PG_PORT, MY_PORT = 15471, 13371
+PG, MY = servers.name(servers.PREFIX + "-mv-pg"), servers.name(servers.PREFIX + "-mv-my")
+PG_PORT, MY_PORT = servers.private_port(0), servers.private_port(1)
 ROWS = 250
 
 

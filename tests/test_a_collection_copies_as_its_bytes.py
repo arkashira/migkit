@@ -18,10 +18,11 @@ from bson import ObjectId
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
-SRC, DST = ("migkit-test-mgraw-src", 15941), ("migkit-test-mgraw-dst", 15942)
+SRC, DST = (servers.name(servers.PREFIX + "-mgraw-src"), servers.private_port(0)), (servers.name(servers.PREFIX + "-mgraw-dst"), servers.private_port(1))
 
 
 @pytest.fixture(scope="module")

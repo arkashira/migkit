@@ -18,6 +18,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 PROVES = [
     ("move.table-copy", "bigtable"),
@@ -26,7 +27,7 @@ PROVES = [
 
 pytestmark = needs_docker
 
-EMU, PORT = "migkit-test-bigtable", 16451
+EMU, PORT = servers.name(servers.PREFIX + "-bigtable"), servers.private_port(0)
 IMAGE = "gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators"
 PROJECT = "migkit-test"
 UTC = datetime.timezone.utc

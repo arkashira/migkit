@@ -18,13 +18,14 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import mssql_run, needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("verify.users", "mssql")]
 
 pytestmark = needs_docker
 
-MS, PORT, PW = "migkit-test-ms-sums", 15943, "Migkit-Test-9x!"
+MS, PORT, PW = servers.name(servers.PREFIX + "-ms-sums"), servers.private_port(0), "Migkit-Test-9x!"
 
 
 def _sql(db, *statements):
@@ -117,7 +118,7 @@ def test_a_table_with_no_key_is_compared_as_a_whole(eng):
     assert not any("refused" in r.detail for r in got), got
 
 
-MS2, PORT2 = "migkit-test-ms-sums-dst", 15944
+MS2, PORT2 = servers.name(servers.PREFIX + "-ms-sums-dst"), servers.private_port(1)
 
 
 @pytest.fixture(scope="module")

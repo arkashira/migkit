@@ -9,6 +9,7 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [
@@ -33,8 +34,8 @@ pytestmark = [pytest.mark.docker,
               pytest.mark.skipif(not _docker(),
                                  reason="docker not available")]
 
-SRC, DST = "migkit-test-mongo-src", "migkit-test-mongo-dst"
-SRC_PORT, DST_PORT = 47017, 47018
+SRC, DST = servers.name(servers.PREFIX + "-mongo-src"), servers.name(servers.PREFIX + "-mongo-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _wait(port, timeout=90):

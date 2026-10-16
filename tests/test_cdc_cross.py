@@ -16,9 +16,10 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
-MY, PG = "migkit-test-cdc-my", "migkit-test-cdc-pg"
-MY_PORT, PG_PORT = 13365, 15465
+MY, PG = servers.name(servers.PREFIX + "-cdc-my"), servers.name(servers.PREFIX + "-cdc-pg")
+MY_PORT, PG_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

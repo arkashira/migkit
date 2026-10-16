@@ -17,13 +17,14 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("verify.structure.foreign-keys", "mysql")]
 
 pytestmark = needs_docker
 
-MY, PORT = "migkit-test-keysoff", 15948
+MY, PORT = servers.name(servers.PREFIX + "-keysoff"), servers.private_port(0)
 
 
 @pytest.fixture(scope="module")

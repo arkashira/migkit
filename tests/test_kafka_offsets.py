@@ -30,12 +30,13 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("verify.repair", "kafka"), ("verify.repair-undo", "kafka")]
 
-SRC, DST = "migkit-test-off-src", "migkit-test-off-dst"
-SRC_PORT, DST_PORT = 19411, 19412
+SRC, DST = servers.name(servers.PREFIX + "-off-src"), servers.name(servers.PREFIX + "-off-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

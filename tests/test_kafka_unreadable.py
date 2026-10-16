@@ -28,13 +28,14 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("verify.delta", "kafka")]
 
-NET = "migkit-test-knet"
-CTL, B1, B2 = "migkit-test-kctl", "migkit-test-kbr1", "migkit-test-kbr2"
-B1_PORT, B2_PORT = 19292, 19293
+NET = servers.name(servers.PREFIX + "-knet")
+CTL, B1, B2 = servers.name(servers.PREFIX + "-kctl"), servers.name(servers.PREFIX + "-kbr1"), servers.name(servers.PREFIX + "-kbr2")
+B1_PORT, B2_PORT = servers.private_port(0), servers.private_port(1)
 CLUSTER_ID = "5L6g3nShT-eMCtK--X86sw"
 
 

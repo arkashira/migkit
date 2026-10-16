@@ -11,6 +11,7 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
 
 def _docker():
@@ -26,8 +27,8 @@ pytestmark = [pytest.mark.docker,
               pytest.mark.skipif(not _docker(),
                                  reason="docker not available")]
 
-SRC, DST = "migkit-test-restore-src", "migkit-test-restore-dst"
-SRC_PORT, DST_PORT = 13398, 13399
+SRC, DST = servers.name(servers.PREFIX + "-restore-src"), servers.name(servers.PREFIX + "-restore-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _wait(port, timeout=90):

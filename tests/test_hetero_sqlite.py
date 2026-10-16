@@ -14,9 +14,10 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
-PG = "migkit-test-hsq-pg"
-PG_PORT = 15477
+PG = servers.name(servers.PREFIX + "-hsq-pg")
+PG_PORT = servers.private_port(0)
 
 ROWS = [(1, "café", 1e20), (2, "", 0.000001), (3, None, None)]
 

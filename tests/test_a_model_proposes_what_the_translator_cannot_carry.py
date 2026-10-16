@@ -21,10 +21,11 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import psql
+from tests import servers
 
 pytestmark = [pytest.mark.docker]
 
-MY, MY_PORT = "migkit-test-code-propose-my", 16086
+MY, MY_PORT = servers.name(servers.PREFIX + "-code-propose-my"), servers.private_port(0)
 
 PROPOSALS = {
     "steps": "```sql\nCREATE FUNCTION steps(x integer) RETURNS integer"

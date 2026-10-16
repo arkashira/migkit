@@ -11,10 +11,11 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
-NET = "migkit-test-rep-net"
-PRI, SBY = "migkit-test-pri", "migkit-test-sby"
-PRI_PORT, SBY_PORT = 15437, 15438
+NET = servers.name(servers.PREFIX + "-rep-net")
+PRI, SBY = servers.name(servers.PREFIX + "-pri"), servers.name(servers.PREFIX + "-sby")
+PRI_PORT, SBY_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

@@ -20,6 +20,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [
@@ -31,8 +32,8 @@ PROVES = [
 
 pytestmark = needs_docker
 
-SRC, DST = ("migkit-test-eng-sc-src", 16017), ("migkit-test-eng-sc-dst",
-                                               16018)
+SRC, DST = (servers.name(servers.PREFIX + "-eng-sc-src"), servers.private_port(0)), (servers.name(servers.PREFIX + "-eng-sc-dst"),
+                                               servers.private_port(1))
 KEYSPACE = ("create keyspace if not exists {} with replication = {{'class':"
             " 'NetworkTopologyStrategy', 'replication_factor': 1}} and"
             " tablets = {{'enabled': false}}")

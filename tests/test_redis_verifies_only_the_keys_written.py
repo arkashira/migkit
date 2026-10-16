@@ -15,14 +15,15 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("verify.delta", "redis")]
 
 pytestmark = needs_docker
 
-SRC, DST = ("migkit-test-rdelta-src", 15925), ("migkit-test-rdelta-dst",
-                                                15926)
+SRC, DST = (servers.name(servers.PREFIX + "-rdelta-src"), servers.private_port(0)), (servers.name(servers.PREFIX + "-rdelta-dst"),
+                                                servers.private_port(1))
 
 
 def _wait(port, timeout=60):

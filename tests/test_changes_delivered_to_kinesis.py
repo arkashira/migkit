@@ -19,10 +19,11 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
-KS, KS_PORT = "migkit-test-kinesis", 15843
+KS, KS_PORT = servers.name(servers.PREFIX + "-kinesis"), servers.private_port(0)
 
 
 @pytest.fixture(scope="module")

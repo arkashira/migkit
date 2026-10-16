@@ -17,14 +17,15 @@ import urllib.request
 import pytest
 
 from tests.conftest import needs_docker
+from tests import servers as lanes
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("assess.versions", "opensearch"), ("assess.brands", "opensearch")]
 
 pytestmark = needs_docker
 
-ES = ("migkit-test-side-es", 16406, "elasticsearch:8.15.3")
-OS = ("migkit-test-side-os", 16407, "opensearchproject/opensearch:2.11.1")
+ES = (lanes.name(lanes.PREFIX + "-side-es"), lanes.private_port(0), "elasticsearch:8.15.3")
+OS = (lanes.name(lanes.PREFIX + "-side-os"), lanes.private_port(1), "opensearchproject/opensearch:2.11.1")
 
 
 def _http(port, method, path, body=None):

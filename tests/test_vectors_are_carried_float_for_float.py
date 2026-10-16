@@ -19,11 +19,12 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 from tests.typepair import Checkpoint
+from tests import servers as lanes
 
 pytestmark = needs_docker
 
-PG, MY = "migkit-test-ty2-vpg", "migkit-test-ty2-vmy"
-PG_PORT, MY_PORT = 16210, 16211
+PG, MY = lanes.name(lanes.PREFIX + "-ty2-vpg"), lanes.name(lanes.PREFIX + "-ty2-vmy")
+PG_PORT, MY_PORT = lanes.private_port(0), lanes.private_port(1)
 
 SEED = """
 create extension vector;

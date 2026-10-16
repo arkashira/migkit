@@ -17,12 +17,13 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("verify.value.type-drift", "mongodb")]
 
-SRC, DST = "migkit-test-mongotype-src", "migkit-test-mongotype-dst"
-SRC_PORT, DST_PORT = 15492, 15493
+SRC, DST = servers.name(servers.PREFIX + "-mongotype-src"), servers.name(servers.PREFIX + "-mongotype-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

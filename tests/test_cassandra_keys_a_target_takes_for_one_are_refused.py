@@ -16,10 +16,11 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import psql
 from tests.typepair import Checkpoint
+from tests import servers
 
 pytestmark = [pytest.mark.docker]
 
-CS, CS_PORT = "migkit-test-f0t-cs", 16066
+CS, CS_PORT = servers.name(servers.PREFIX + "-f0t-cs"), servers.private_port(0)
 
 
 @pytest.fixture(scope="module")

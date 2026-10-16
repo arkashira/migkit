@@ -23,14 +23,15 @@ from click.testing import CliRunner
 
 from tests import cutover_harness as harness
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("cutover.drain", "postgres")]
 
 pytestmark = needs_docker
 
-SRC, DST = "migkit-test-pg-src", "migkit-test-pg-dst"
-BOUNCER, BOUNCER_PORT = "migkit-test-cut-bouncer", 16074
+SRC, DST = servers.name(servers.PREFIX + "-pg-src"), servers.name(servers.PREFIX + "-pg-dst")
+BOUNCER, BOUNCER_PORT = servers.name(servers.PREFIX + "-cut-bouncer"), servers.private_port(0)
 HOP = "pgc"
 
 

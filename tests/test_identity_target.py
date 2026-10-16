@@ -28,6 +28,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
@@ -131,7 +132,7 @@ def test_a_bulk_copy_needs_no_clause_at_all(shapes):
     # COPY FROM STDIN needs real stdin, which `psql -c` does not provide
     got = subprocess.run(
         ["docker", "exec", "-i", "-e", "PGPASSWORD=test",
-         "migkit-test-pg-dst", "psql", "-U", "postgres", "-c",
+         servers.name(servers.PREFIX + "-pg-dst"), "psql", "-U", "postgres", "-c",
          "copy public.ident (id, v) from stdin"],
         input="11\tfrom-copy\n", capture_output=True, text=True)
     assert got.returncode == 0, got.stderr

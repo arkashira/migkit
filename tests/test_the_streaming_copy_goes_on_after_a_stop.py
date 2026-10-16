@@ -19,11 +19,12 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
-SRC, DST = "migkit-test-streamresume-src", "migkit-test-streamresume-dst"
-SRC_PORT, DST_PORT = 15866, 15867
+SRC, DST = servers.name(servers.PREFIX + "-streamresume-src"), servers.name(servers.PREFIX + "-streamresume-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _local():

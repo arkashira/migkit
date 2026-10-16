@@ -25,11 +25,12 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 from tests.typepair import Checkpoint
+from tests import servers as lanes
 
 pytestmark = needs_docker
 
-MS, MS_PORT, PW = "migkit-test-w6-mssql", 16540, "CHANGE_ME-W6-Str0ng!"
-PG, PG_PORT = "migkit-test-w6-pg", 16541
+MS, MS_PORT, PW = lanes.name(lanes.PREFIX + "-w6-mssql"), lanes.private_port(0), "CHANGE_ME-W6-Str0ng!"
+PG, PG_PORT = lanes.name(lanes.PREFIX + "-w6-pg"), lanes.private_port(1)
 IMAGE = "mcr.microsoft.com/mssql/server:2022-latest"
 
 VARIANTS = """

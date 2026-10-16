@@ -14,6 +14,7 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers
 
 
 def _docker():
@@ -29,8 +30,8 @@ pytestmark = [pytest.mark.docker,
               pytest.mark.skipif(not _docker(),
                                  reason="docker not available")]
 
-PG, MY, MG = "migkit-test-lost-pg", "migkit-test-lost-my", "migkit-test-lost-mg"
-PG_PORT, MY_PORT, MG_PORT = 15678, 15679, 15680
+PG, MY, MG = servers.name(servers.PREFIX + "-lost-pg"), servers.name(servers.PREFIX + "-lost-my"), servers.name(servers.PREFIX + "-lost-mg")
+PG_PORT, MY_PORT, MG_PORT = servers.private_port(0), servers.private_port(1), servers.private_port(2)
 
 
 def _wait(port, timeout=180):

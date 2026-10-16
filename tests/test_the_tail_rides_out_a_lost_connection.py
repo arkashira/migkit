@@ -14,6 +14,7 @@ import time
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
@@ -60,7 +61,7 @@ def test_a_paused_target_does_not_end_the_tail(pg_pair, tmp_path,
                 break
             time.sleep(0.5)
         assert rows() == "10", said
-        subprocess.run(["docker", "pause", "migkit-test-pg-dst"], check=True)
+        subprocess.run(["docker", "pause", servers.name(servers.PREFIX + "-pg-dst")], check=True)
         try:
             psql(pg_pair["src"], "insert into public.blip select g, 'b'"
                                  " from generate_series(11, 20) g")
@@ -73,7 +74,7 @@ def test_a_paused_target_does_not_end_the_tail(pg_pair, tmp_path,
                 time.sleep(0.5)
             assert thread.is_alive(), ended
         finally:
-            subprocess.run(["docker", "unpause", "migkit-test-pg-dst"],
+            subprocess.run(["docker", "unpause", servers.name(servers.PREFIX + "-pg-dst")],
                            check=True)
         for _ in range(180):
             if rows() == "20":

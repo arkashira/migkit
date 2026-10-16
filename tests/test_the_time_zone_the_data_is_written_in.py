@@ -6,6 +6,7 @@ import datetime
 
 
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 
 def _fake(offset, heads):
@@ -88,7 +89,7 @@ def test_mysql_reads_it_by_the_index():
     from migkit import zones
     from migkit.config import Endpoint, Hop
     from migkit.engines.mysql import MySQLEngine
-    name, port = "migkit-test-zone-my", 15811
+    name, port = servers.name(servers.PREFIX + "-zone-my"), servers.private_port(0)
     subprocess.run(["docker", "rm", "-f", "-v", name], capture_output=True)
     try:
         subprocess.run(["docker", "run", "-d", "--name", name, "-e",

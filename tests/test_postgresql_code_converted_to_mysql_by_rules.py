@@ -24,6 +24,7 @@ from migkit.storedcode import pg_mysql
 from migkit.storedcode.mysql_pg import Context
 from migkit.storedcode.routines import Param, Routine
 from migkit.storedcode.translate import Refused
+from tests import servers as lanes
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("schema.routines", "postgres")]
@@ -479,9 +480,9 @@ def test_definition_makes_the_routine_again_under_another_name():
 
 # ---- proved by running it --------------------------------------------------
 
-PG, MY = "migkit-test-pgmy-pg", "migkit-test-pgmy-my"
-SB_PG, SB_MY = "migkit-test-pgmy-sbpg", "migkit-test-pgmy-sbmy"
-PG_PORT, MY_PORT, SB_PG_PORT, SB_MY_PORT = 16290, 16291, 16292, 16293
+PG, MY = lanes.name(lanes.PREFIX + "-pgmy-pg"), lanes.name(lanes.PREFIX + "-pgmy-my")
+SB_PG, SB_MY = lanes.name(lanes.PREFIX + "-pgmy-sbpg"), lanes.name(lanes.PREFIX + "-pgmy-sbmy")
+PG_PORT, MY_PORT, SB_PG_PORT, SB_MY_PORT = lanes.private_port(0), lanes.private_port(1), lanes.private_port(2), lanes.private_port(3)
 MY_SMALL = ["--log-bin-trust-function-creators=1",
             "--performance-schema=OFF", "--innodb-buffer-pool-size=16M"]
 DB = "pgmy"

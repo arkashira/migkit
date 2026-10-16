@@ -22,6 +22,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers as lanes
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [
@@ -34,8 +35,8 @@ PROVES = [
 
 pytestmark = needs_docker
 
-CB, KV, MGMT = "migkit-test-couchbase", 16342, 16343
-KAFKA, KAFKA_PORT = "migkit-test-changes-kafka", 16347
+CB, KV, MGMT = lanes.name(lanes.PREFIX + "-couchbase"), lanes.private_port(1), lanes.private_port(2)
+KAFKA, KAFKA_PORT = lanes.name(lanes.PREFIX + "-changes-kafka"), lanes.private_port(0)
 TOPIC = "couchbase-shop"
 USER, PW = "migkit", "migkit-pw"
 

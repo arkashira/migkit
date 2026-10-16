@@ -11,12 +11,13 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
-MY, MY_PORT = "migkit-test-assess-my", 15890
-MY_REPLICA = "migkit-test-assess-myreplica"
-PG_STANDBY = "migkit-test-assess-standby"
+MY, MY_PORT = servers.name(servers.PREFIX + "-assess-my"), servers.private_port(0)
+MY_REPLICA = servers.name(servers.PREFIX + "-assess-myreplica")
+PG_STANDBY = servers.name(servers.PREFIX + "-assess-standby")
 
 
 def _ip(name):
@@ -44,7 +45,7 @@ def _pg(pg_pair):
 def test_a_standby_of_the_target_is_named(pg_pair):
     item = "no standbys stream from the target during the load"
     assert [i["level"] for i in _items(_pg(pg_pair), item)] == ["pass"]
-    subprocess.run(["docker", "exec", "migkit-test-pg-dst", "sh", "-c",
+    subprocess.run(["docker", "exec", servers.name(servers.PREFIX + "-pg-dst"), "sh", "-c",
                     "echo 'host replication all all scram-sha-256' >>"
                     " /var/lib/postgresql/data/pg_hba.conf"], check=True)
     psql(pg_pair["dst"], "select pg_reload_conf()")
@@ -55,7 +56,7 @@ def test_a_standby_of_the_target_is_named(pg_pair):
          "--entrypoint", "sh", "postgres:16", "-c",
          "mkdir -p /var/lib/postgresql/data && chown postgres"
          " /var/lib/postgresql/data && chmod 700 /var/lib/postgresql/data &&"
-         f" su postgres -c 'pg_basebackup -h {_ip('migkit-test-pg-dst')} -U"
+         f" su postgres -c 'pg_basebackup -h {_ip(servers.name(servers.PREFIX + '-pg-dst'))} -U"
          " postgres -D /var/lib/postgresql/data -R -X stream"
          " --checkpoint=fast' && exec su postgres -c 'postgres -D"
          " /var/lib/postgresql/data'"], check=True, capture_output=True)

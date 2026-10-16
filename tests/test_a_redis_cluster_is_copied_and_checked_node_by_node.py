@@ -20,10 +20,11 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers as lanes
 
-BOX, OLD = "migkit-test-out-rc", "migkit-test-out-r6"
+BOX, OLD = lanes.name(lanes.PREFIX + "-out-rc"), lanes.name(lanes.PREFIX + "-out-r6")
 NODES = (16090, 16091, 16092)
-ALONE, OLD_PORT = 16093, 16094
+ALONE, OLD_PORT = lanes.private_port(0), lanes.private_port(1)
 
 
 def _docker():

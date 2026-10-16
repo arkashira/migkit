@@ -12,6 +12,7 @@ import sqlite3
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 
 def _lite(tmp_path, rules, src_rows, dst_rows):
@@ -131,7 +132,7 @@ def test_postgres_rules_run_read_only(pg_pair, tmp_path):
 
 # ---- MongoDB, whose questions are aggregation pipelines ----
 
-MONGO, MONGO_PORT = "migkit-test-rules-mongo", 15771
+MONGO, MONGO_PORT = servers.name(servers.PREFIX + "-rules-mongo"), servers.private_port(0)
 
 
 @pytest.fixture(scope="module")

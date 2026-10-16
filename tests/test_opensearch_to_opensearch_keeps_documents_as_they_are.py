@@ -17,13 +17,14 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("verify.delta", "opensearch"), ("cutover.rollback", "opensearch")]
 
 pytestmark = needs_docker
 
-OS, PORT = "migkit-test-osos", 15930
+OS, PORT = servers.name(servers.PREFIX + "-osos"), servers.private_port(0)
 
 
 def _http(method, path, body=None, ndjson=False):

@@ -11,12 +11,13 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("assess.engine-checks", "mongodb"), ("assess.handwork", "mongodb")]
 
-SRC, DST = "migkit-test-hwmg-src", "migkit-test-hwmg-dst"
-SRC_PORT, DST_PORT = 15497, 15498
+SRC, DST = servers.name(servers.PREFIX + "-hwmg-src"), servers.name(servers.PREFIX + "-hwmg-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

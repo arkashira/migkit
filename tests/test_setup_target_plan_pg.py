@@ -34,6 +34,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
@@ -96,19 +97,19 @@ def test_the_split_really_does_what_the_plan_says(pg_pair):
     psql(dst, "drop table if exists public.plan_t;")
 
     subprocess.run(
-        ["docker", "exec", "-e", "PGPASSWORD=test", "migkit-test-pg-src",
+        ["docker", "exec", "-e", "PGPASSWORD=test", servers.name(servers.PREFIX + "-pg-src"),
          "pg_dump", "-U", "postgres", "-d", "postgres", "-t", "public.plan_t",
          "-Fc", "--schema-only", "-f", "/tmp/plan.dump"],
         check=True, capture_output=True)
-    subprocess.run(["docker", "cp", "migkit-test-pg-src:/tmp/plan.dump",
+    subprocess.run(["docker", "cp", f"{servers.name(servers.PREFIX + '-pg-src')}:/tmp/plan.dump",
                     "/tmp/plan.dump"], check=True, capture_output=True)
     subprocess.run(["docker", "cp", "/tmp/plan.dump",
-                    "migkit-test-pg-dst:/tmp/plan.dump"], check=True,
+                    f"{servers.name(servers.PREFIX + '-pg-dst')}:/tmp/plan.dump"], check=True,
                    capture_output=True)
 
     def restore(section):
         return subprocess.run(
-            ["docker", "exec", "-e", "PGPASSWORD=test", "migkit-test-pg-dst",
+            ["docker", "exec", "-e", "PGPASSWORD=test", servers.name(servers.PREFIX + "-pg-dst"),
              "pg_restore", "-U", "postgres", "-d", "postgres", "--no-owner",
              f"--section={section}", "/tmp/plan.dump"],
             capture_output=True, text=True)
@@ -123,7 +124,7 @@ def test_the_split_really_does_what_the_plan_says(pg_pair):
     # the data lands into a table with no index to maintain
     loaded = subprocess.run(
         ["docker", "exec", "-i", "-e", "PGPASSWORD=test",
-         "migkit-test-pg-dst", "psql", "-U", "postgres", "-c",
+         servers.name(servers.PREFIX + "-pg-dst"), "psql", "-U", "postgres", "-c",
          "copy public.plan_t (id, a) from stdin"],
         input="".join(f"{i}\tv{i}\n" for i in range(1, 501)),
         capture_output=True, text=True)

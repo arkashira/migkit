@@ -26,14 +26,15 @@ import pytest
 
 from migkit import freeze
 from migkit.config import Endpoint, Hop
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("cutover.freeze", ("postgres", "mysql"))]
 
 pytestmark = pytest.mark.docker
 
-PG, PG_PORT = "migkit-test-mgd-pg", 16436
-MY, MY_PORT = "migkit-test-mgd-my", 16437
+PG, PG_PORT = servers.name(servers.PREFIX + "-mgd-pg"), servers.private_port(0)
+MY, MY_PORT = servers.name(servers.PREFIX + "-mgd-my"), servers.private_port(1)
 
 
 def _docker():

@@ -18,15 +18,16 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("verify.fence", "mysql"), ("verify.confirm", "mysql")]
 
 pytestmark = pytest.mark.docker
 
-NET = "migkit-test-fence-net"
-SRC, DST = "migkit-test-fence-src", "migkit-test-fence-dst"
-SRC_PORT, DST_PORT = 15663, 15664
+NET = servers.name(servers.PREFIX + "-fence-net")
+SRC, DST = servers.name(servers.PREFIX + "-fence-src"), servers.name(servers.PREFIX + "-fence-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 GTID = ["--gtid-mode=ON", "--enforce-gtid-consistency=ON", "--log-bin"]
 
 

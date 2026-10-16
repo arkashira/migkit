@@ -17,6 +17,7 @@ import time
 import pytest
 
 from migkit import canon as c
+from tests import servers
 
 
 def _docker():
@@ -32,8 +33,8 @@ pytestmark = [pytest.mark.docker,
               pytest.mark.skipif(not _docker(),
                                  reason="docker not available")]
 
-MY, PG = "migkit-test-canon-my", "migkit-test-canon-pg"
-MY_PORT, PG_PORT = 13387, 15487
+MY, PG = servers.name(servers.PREFIX + "-canon-my"), servers.name(servers.PREFIX + "-canon-pg")
+MY_PORT, PG_PORT = servers.private_port(0), servers.private_port(1)
 
 # One row per column below, the same logical value on both sides.
 COLS = [

@@ -24,11 +24,12 @@ import time
 
 import pytest
 from click.testing import CliRunner
+from tests import servers as lanes
 
 pytestmark = [pytest.mark.docker]
 
-MARIA, MARIA_PORT = "migkit-test-fork-maria", 15764
-MY, MY_PORT = "migkit-test-fork-my", 15765
+MARIA, MARIA_PORT = lanes.name(lanes.PREFIX + "-fork-maria"), lanes.private_port(0)
+MY, MY_PORT = lanes.name(lanes.PREFIX + "-fork-my"), lanes.private_port(1)
 
 
 def _docker():

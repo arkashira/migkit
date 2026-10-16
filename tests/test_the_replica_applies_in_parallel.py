@@ -16,10 +16,11 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
-NET = "migkit-test-parapply-net"
-SRC, DST = "migkit-test-parapply-src", "migkit-test-parapply-dst"
-SRC_PORT, DST_PORT = 15777, 15778
+NET = servers.name(servers.PREFIX + "-parapply-net")
+SRC, DST = servers.name(servers.PREFIX + "-parapply-src"), servers.name(servers.PREFIX + "-parapply-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 IMAGES = {"mysql": ("mysql:8.4", "mysql", "MYSQL_ROOT_PASSWORD", []),
           "mariadb": ("mariadb:11", "mariadb", "MARIADB_ROOT_PASSWORD",
                       ["--log-bin=binlog", "--binlog-format=ROW"])}

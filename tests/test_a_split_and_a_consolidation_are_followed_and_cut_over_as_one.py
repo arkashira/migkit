@@ -22,9 +22,10 @@ from migkit import consolidate, freeze, reshard, tailctl
 from migkit.config import Endpoint, Hop
 from migkit.engines.base import RepairAction
 from tests.conftest import needs_docker
+from tests import servers
 
-SRC, DST = ("migkit-test-groups-src", 16534), ("migkit-test-groups-dst",
-                                              16535)
+SRC, DST = (servers.name(servers.PREFIX + "-groups-src"), servers.private_port(0)), (servers.name(servers.PREFIX + "-groups-dst"),
+                                              servers.private_port(1))
 
 
 def _chop(name="c", keys="offset", **more):

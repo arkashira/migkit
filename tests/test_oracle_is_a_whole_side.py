@@ -39,6 +39,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [
@@ -63,12 +64,12 @@ PROVES = [
 
 pytestmark = needs_docker
 
-ORA, ORA_PORT = "migkit-test-ora", 16140
-PG, PG_PORT = "migkit-test-ora-pg", 16141
-READER, READER_PORT = "migkit-test-ora-redo", 16142
+ORA, ORA_PORT = servers.name(servers.PREFIX + "-ora"), servers.private_port(0)
+PG, PG_PORT = servers.name(servers.PREFIX + "-ora-pg"), servers.private_port(1)
+READER, READER_PORT = servers.name(servers.PREFIX + "-ora-redo"), servers.private_port(2)
 #: the database's files, redo and archived redo among them, in a volume a
 #: reader run beside it can mount
-DATA = "migkit-test-ora-data"
+DATA = servers.name(servers.PREFIX + "-ora-data")
 PW = "CHANGE_ME_ora1"
 SRC, DST = "FREEPDB1", "FREEPDB2"
 

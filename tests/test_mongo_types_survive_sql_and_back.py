@@ -22,11 +22,12 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 from tests.typepair import Checkpoint
+from tests import servers as lanes
 
 pytestmark = needs_docker
 
-MG, PG = "migkit-test-ty2-mg", "migkit-test-ty2-mpg"
-MG_PORT, PG_PORT = 16212, 16213
+MG, PG = lanes.name(lanes.PREFIX + "-ty2-mg"), lanes.name(lanes.PREFIX + "-ty2-mpg")
+MG_PORT, PG_PORT = lanes.private_port(0), lanes.private_port(1)
 U = uuid.UUID("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11")
 
 

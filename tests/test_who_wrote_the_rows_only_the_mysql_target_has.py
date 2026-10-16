@@ -15,10 +15,11 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
-MY, PORT = "migkit-test-whowrote-my", 15809
+MY, PORT = servers.name(servers.PREFIX + "-whowrote-my"), servers.private_port(0)
 
 
 def _sql(sql):

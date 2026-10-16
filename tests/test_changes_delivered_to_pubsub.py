@@ -22,10 +22,11 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
-PS, PS_PORT, PROJECT = "migkit-test-pubsub", 15852, "migkit-test"
+PS, PS_PORT, PROJECT = servers.name(servers.PREFIX + "-pubsub"), servers.private_port(0), "migkit-test"
 
 
 @pytest.fixture(scope="module")

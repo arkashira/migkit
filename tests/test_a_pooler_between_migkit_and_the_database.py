@@ -22,12 +22,13 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
-NET = "migkit-test-pooler-net"
-PG, BOUNCER = "migkit-test-pooler-pg", "migkit-test-pooler-bouncer"
-PG_PORT, BOUNCER_PORT = 15851, 15850
+NET = servers.name(servers.PREFIX + "-pooler-net")
+PG, BOUNCER = servers.name(servers.PREFIX + "-pooler-pg"), servers.name(servers.PREFIX + "-pooler-bouncer")
+PG_PORT, BOUNCER_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _up(port):

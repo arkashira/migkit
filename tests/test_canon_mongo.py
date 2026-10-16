@@ -18,9 +18,10 @@ import time
 import pytest
 
 from migkit import canon
+from tests import servers
 
-MONGO, PG = "migkit-test-mg", "migkit-test-mg-pg"
-MONGO_PORT, PG_PORT = 27075, 15473
+MONGO, PG = servers.name(servers.PREFIX + "-mg"), servers.name(servers.PREFIX + "-mg-pg")
+MONGO_PORT, PG_PORT = servers.private_port(0), servers.private_port(1)
 
 SEED = """
 db.getSiblingDB("cx").v.insertMany([

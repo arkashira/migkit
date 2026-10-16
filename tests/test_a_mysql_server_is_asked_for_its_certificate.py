@@ -12,11 +12,12 @@ import pytest
 from migkit import tls
 from migkit.config import Endpoint, Hop
 from tests.test_a_connection_is_verified_where_it_can_be import _certs
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("security.tls", "mysql")]
 
-MY, PORT, LISTEN = "migkit-test-out-my", 16098, 16099
+MY, PORT, LISTEN = servers.name(servers.PREFIX + "-out-my"), servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

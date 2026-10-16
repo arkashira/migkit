@@ -42,11 +42,12 @@ import time
 import pytest
 
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
 ON, OFF = 15535, 15537
-NAMES = {ON: "migkit-test-stat-on", OFF: "migkit-test-stat-off"}
+NAMES = {ON: servers.name(servers.PREFIX + "-stat-on"), OFF: servers.name(servers.PREFIX + "-stat-off")}
 
 #: One naptime (60s) plus room for the worker to get to this table.
 NAPTIME_WAIT = 100

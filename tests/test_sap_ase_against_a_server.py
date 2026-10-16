@@ -16,13 +16,14 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("move.table-copy", "ase")]
 
 pytestmark = needs_docker
 
-ASE, PORT, PW = "migkit-test-ms-ase", 16133, "myPassword"
+ASE, PORT, PW = servers.name(servers.PREFIX + "-ms-ase"), servers.private_port(0), "myPassword"
 IMAGE = "datagrip/sybase:16.0"
 
 

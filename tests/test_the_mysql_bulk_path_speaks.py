@@ -19,8 +19,9 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers
 
-MY, PORT = "migkit-test-mysp", 15689
+MY, PORT = servers.name(servers.PREFIX + "-mysp"), servers.private_port(0)
 
 
 def _docker():

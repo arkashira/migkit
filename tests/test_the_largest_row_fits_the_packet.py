@@ -15,11 +15,12 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers as lanes
 
 pytestmark = pytest.mark.docker
 
-SRC, DST = "migkit-test-pkt-src", "migkit-test-pkt-dst"
-SRC_PORT, DST_PORT = 15702, 15703
+SRC, DST = lanes.name(lanes.PREFIX + "-pkt-src"), lanes.name(lanes.PREFIX + "-pkt-dst")
+SRC_PORT, DST_PORT = lanes.private_port(0), lanes.private_port(1)
 MIB = 1024 * 1024
 
 

@@ -11,13 +11,14 @@ import time
 from pathlib import Path
 
 import pytest
+from tests import servers
 
 ROOT = Path(__file__).resolve().parent.parent
-MY_SRC, MY_DST = "migkit-test-cap-my-src", "migkit-test-cap-my-dst"
-MY_PORTS = (16220, 16221)
-PG_SRC, PG_DST = "migkit-test-cap-pg-src", "migkit-test-cap-pg-dst"
-PG_PORTS = (16224, 16225)
-RUNNER = "migkit-test-cap-runner"
+MY_SRC, MY_DST = servers.name(servers.PREFIX + "-cap-my-src"), servers.name(servers.PREFIX + "-cap-my-dst")
+MY_PORTS = (servers.private_port(16), servers.private_port(17))
+PG_SRC, PG_DST = servers.name(servers.PREFIX + "-cap-pg-src"), servers.name(servers.PREFIX + "-cap-pg-dst")
+PG_PORTS = (servers.private_port(18), servers.private_port(19))
+RUNNER = servers.name(servers.PREFIX + "-cap-runner")
 RUNNER_IMAGE = "migkit-test-cap-runner:1"
 
 

@@ -17,6 +17,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
@@ -62,7 +63,7 @@ def test_without_a_mark_it_says_it_cannot_tell(pg_pair, tmp_path):
         got[0].detail
 
 
-PORT, NAME = 15725, "migkit-test-committs"
+PORT, NAME = servers.private_port(0), servers.name(servers.PREFIX + "-committs")
 
 
 @pytest.fixture
@@ -105,8 +106,8 @@ def test_a_target_keeping_commit_times_gives_them(stamped, pg_pair,
     assert "committed between " + today in got[0].detail, got[0].detail
 
 
-MG_SRC, MG_DST = "migkit-test-ww-mg-src", "migkit-test-ww-mg-dst"
-MG_SRC_PORT, MG_DST_PORT = 15726, 15727
+MG_SRC, MG_DST = servers.name(servers.PREFIX + "-ww-mg-src"), servers.name(servers.PREFIX + "-ww-mg-dst")
+MG_SRC_PORT, MG_DST_PORT = servers.private_port(1), servers.private_port(2)
 
 
 @pytest.fixture

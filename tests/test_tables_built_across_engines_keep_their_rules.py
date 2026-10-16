@@ -21,6 +21,7 @@ import pytest
 from click.testing import CliRunner
 
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [
@@ -30,7 +31,7 @@ PROVES = [
 
 pytestmark = needs_docker
 
-MY, MY_PORT = "migkit-test-rules-my", 15760
+MY, MY_PORT = servers.name(servers.PREFIX + "-rules-my"), servers.private_port(0)
 
 
 def my(sql):

@@ -21,11 +21,12 @@ import pytest
 from migkit import leaves
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers as lanes
 
 pytestmark = needs_docker
 
-MY, MY_PORT = "migkit-test-proof-my", 16172
-PG, PG_PORT = "migkit-test-proof-pg", 16174
+MY, MY_PORT = lanes.name(lanes.PREFIX + "-proof-my"), lanes.private_port(0)
+PG, PG_PORT = lanes.name(lanes.PREFIX + "-proof-pg"), lanes.private_port(1)
 
 
 def my(sql, db=""):

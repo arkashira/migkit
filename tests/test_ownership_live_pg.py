@@ -12,12 +12,13 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("verify.access.object-ownership", "postgres")]
 
-NAME = "migkit-test-own-pg"
-PORT = 15469
+NAME = servers.name(servers.PREFIX + "-own-pg")
+PORT = servers.private_port(0)
 
 
 def _docker():

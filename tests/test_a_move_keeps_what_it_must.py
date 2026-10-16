@@ -23,6 +23,7 @@ from migkit import decide, guarantees, jointplan
 from migkit.catalog import Catalog, Column, ForeignKey, Index
 from migkit.guarantees import Schedule
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -687,7 +688,7 @@ def test_a_shape_changed_between_ranges_stops_the_move(pg_pair, tmp_path):
     extra = psql(pg_pair["dst"], "select count(*) filter (where extra = 7)"
                                  " || ':' || count(*) from public.orders"
                  ).stdout.strip()
-    assert extra == "80000:80000", extra
+    assert extra == f"{servers.private_port(0)}:80000", extra
     _same_and_whole(pg_pair)
 
 

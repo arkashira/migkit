@@ -23,11 +23,12 @@ import time
 
 import pytest
 from click.testing import CliRunner
+from tests import servers
 
-NET = "migkit-test-phys-net"
-SRC, DST = "migkit-test-phys-src", "migkit-test-phys-dst"
-VOL = "migkit-test-phys-dstdata"
-SRC_PORT, DST_PORT = 16120, 16121
+NET = servers.name(servers.PREFIX + "-phys-net")
+SRC, DST = servers.name(servers.PREFIX + "-phys-src"), servers.name(servers.PREFIX + "-phys-dst")
+VOL = servers.name(servers.PREFIX + "-phys-dstdata")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 DATA = "/var/lib/postgresql/data"
 
 

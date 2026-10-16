@@ -21,13 +21,14 @@ from migkit.engines import engine_named
 from tests import large_values_rig as rig
 from tests.cap_pairs import remove
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("move.large-values", "ase"), ("move.sized", "ase")]
 
 pytestmark = needs_docker
 
-ASE, PORT, PW = "migkit-test-lv-ase", 16378, "myPassword"
+ASE, PORT, PW = servers.name(servers.PREFIX + "-lv-ase"), servers.private_port(0), "myPassword"
 IMAGE = "datagrip/sybase:16.0"
 #: a value past a piece
 SIZE = 12 * rig.MB

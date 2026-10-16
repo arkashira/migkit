@@ -13,11 +13,12 @@ import pytest
 from click.testing import CliRunner
 
 from tests.conftest import needs_docker
+from tests import servers as lanes
 
 pytestmark = needs_docker
 
-SERVERS = {"a": ("migkit-test-lock-mysql-a", 16240),
-           "b": ("migkit-test-lock-mysql-b", 16241)}
+SERVERS = {"a": (lanes.name(lanes.PREFIX + "-lock-mysql-a"), lanes.private_port(0)),
+           "b": (lanes.name(lanes.PREFIX + "-lock-mysql-b"), lanes.private_port(1))}
 
 
 def _my(which, sql):

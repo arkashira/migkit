@@ -12,9 +12,10 @@ import time
 import pytest
 
 from migkit import pgslot
+from tests import servers
 
-PG = "migkit-test-slot-pg"
-PG_PORT = 15459
+PG = servers.name(servers.PREFIX + "-slot-pg")
+PG_PORT = servers.private_port(0)
 SLOT = "migkit_test_slot"
 
 

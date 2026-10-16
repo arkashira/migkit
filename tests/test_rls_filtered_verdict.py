@@ -34,11 +34,12 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
 SRC, DST = 15527, 15528
-NAMES = {SRC: "migkit-test-rls-src", DST: "migkit-test-rls-dst"}
+NAMES = {SRC: servers.name(servers.PREFIX + "-rls-src"), DST: servers.name(servers.PREFIX + "-rls-dst")}
 
 SEED = """
 create table tenant (id int primary key, tenant text, v text);

@@ -15,9 +15,10 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
-MG, PG = "migkit-test-mgcdc", "migkit-test-mgcdc-pg"
-MG_PORT, PG_PORT = 27069, 15455
+MG, PG = servers.name(servers.PREFIX + "-mgcdc"), servers.name(servers.PREFIX + "-mgcdc-pg")
+MG_PORT, PG_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():
@@ -122,13 +123,13 @@ def test_a_standalone_is_refused_with_the_way_out(pair):
     """A change stream reads the oplog, and a standalone has none. The
     message is the two commands that fix it, because nothing client-side
     can."""
-    other = "migkit-test-mgcdc-solo"
+    other = servers.name(servers.PREFIX + "-mgcdc-solo")
     subprocess.run(["docker", "rm", "-f", "-v", other], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", other, "-p",
-                    "27068:27017", "mongo:7"], check=True,
+                    f"{servers.private_port(2)}:27017", "mongo:7"], check=True,
                    capture_output=True)
     try:
-        assert _wait(27068)
+        assert _wait(servers.private_port(2))
         for _ in range(40):
             if mongosh("db.runCommand({ping:1}).ok", "admin",
                        other).returncode == 0:
@@ -137,7 +138,7 @@ def test_a_standalone_is_refused_with_the_way_out(pair):
         else:
             pytest.fail("the standalone never answered")
         from migkit.engines.mongodb import MongoEngine
-        eng = MongoEngine(_hop("mongodb", 27068, "", ""))
+        eng = MongoEngine(_hop("mongodb", servers.private_port(2), "", ""))
         with pytest.raises(SystemExit) as e:
             eng.neutral_changes("src", "cx")
         assert "standalone" in str(e.value)

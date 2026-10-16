@@ -14,6 +14,7 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 from tests.mysql_pair import _ready
+from tests import servers
 
 PROVES = [
     ("tail.follows", "dcdb"),
@@ -23,7 +24,7 @@ PROVES = [
 
 pytestmark = needs_docker
 
-SETS = (("migkit-test-tdsql-a", 16456), ("migkit-test-tdsql-b", 16457))
+SETS = ((servers.name(servers.PREFIX + "-tdsql-a"), servers.private_port(0)), (servers.name(servers.PREFIX + "-tdsql-b"), servers.private_port(1)))
 
 
 def _sql(name, sql):

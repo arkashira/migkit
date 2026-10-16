@@ -24,14 +24,15 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("move.bulk", "kafka")]
 
 pytestmark = needs_docker
 
-SRC, DST = "migkit-test-mirror-src", "migkit-test-mirror-dst"
-SRC_PORT, DST_PORT = 16284, 16285
+SRC, DST = servers.name(servers.PREFIX + "-mirror-src"), servers.name(servers.PREFIX + "-mirror-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _wait(port, timeout=180):
@@ -109,7 +110,7 @@ def clusters():
         p.close()
         _produce(SRC_PORT, 0, 2000)
         tx = KafkaProducer(bootstrap_servers=f"127.0.0.1:{SRC_PORT}",
-                           transactional_id="migkit-test-aborted")
+                           transactional_id=servers.name(servers.PREFIX + "-aborted"))
         tx.init_transactions()
         tx.begin_transaction()
         for _ in range(5):

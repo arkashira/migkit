@@ -27,14 +27,15 @@ import yaml
 from click.testing import CliRunner
 
 from tests import cutover_harness as harness
+from tests import servers as lanes
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("cutover.drain", "mysql")]
 
 pytestmark = pytest.mark.docker
 
-NET = "migkit-test-mark-net"
-SRC, DST = ("migkit-test-mark-mysrc", 16355), ("migkit-test-mark-mydst", 16356)
+NET = lanes.name(lanes.PREFIX + "-mark-net")
+SRC, DST = (lanes.name(lanes.PREFIX + "-mark-mysrc"), lanes.private_port(0)), (lanes.name(lanes.PREFIX + "-mark-mydst"), lanes.private_port(1))
 HOP = "mym"
 
 

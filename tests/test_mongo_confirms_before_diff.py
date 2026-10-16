@@ -16,11 +16,12 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("verify.fence", "mongodb"), ("verify.confirm", "mongodb")]
 
-MG, PORT = "migkit-test-mgfence", 15695
+MG, PORT = servers.name(servers.PREFIX + "-mgfence"), servers.private_port(0)
 
 
 def _docker():

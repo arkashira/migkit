@@ -23,10 +23,11 @@ import pytest
 import yaml
 
 from tests.conftest import migkit_cmd, needs_docker, psql
+from tests import servers
 
 ROOT = Path(__file__).resolve().parents[1]
-MYSQL = "migkit-test-ux-mysql"
-MYSQL_PORT = 16200
+MYSQL = servers.name(servers.PREFIX + "-ux-mysql")
+MYSQL_PORT = servers.private_port(0)
 
 
 def _my(sql, db=""):
@@ -206,7 +207,7 @@ def test_users_that_may_not_are_given_a_script_and_asked_again(shop,
     assert "on `shop2`.* to 'app'@'%';" in target, target
     assert not _no_program_named(out + script + target)
     # the DBA runs them; doctor asks again, and the scripts go
-    got = subprocess.run(["docker", "exec", "-i", "migkit-test-pg-src",
+    got = subprocess.run(["docker", "exec", "-i", servers.name(servers.PREFIX + "-pg-src"),
                           "psql", "-U", "postgres", "-d", "shop", "-v",
                           "ON_ERROR_STOP=1"], input=script,
                          capture_output=True, text=True)

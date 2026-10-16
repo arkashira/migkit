@@ -10,9 +10,10 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
-SRC, DST = "migkit-test-revert-src", "migkit-test-revert-dst"
-SRC_PORT, DST_PORT = 13485, 13486
+SRC, DST = servers.name(servers.PREFIX + "-revert-src"), servers.name(servers.PREFIX + "-revert-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

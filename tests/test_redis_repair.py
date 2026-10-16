@@ -27,10 +27,11 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers as lanes
 
-SRC, DST, OLD = ("migkit-test-rr-src", "migkit-test-rr-dst",
-                 "migkit-test-rr-old")
-SRC_PORT, DST_PORT, OLD_PORT = 16421, 16422, 16423
+SRC, DST, OLD = (lanes.name(lanes.PREFIX + "-rr-src"), lanes.name(lanes.PREFIX + "-rr-dst"),
+                 lanes.name(lanes.PREFIX + "-rr-old"))
+SRC_PORT, DST_PORT, OLD_PORT = lanes.private_port(0), lanes.private_port(1), lanes.private_port(2)
 
 
 def _docker():

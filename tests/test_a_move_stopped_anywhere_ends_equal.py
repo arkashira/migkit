@@ -20,11 +20,12 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
 ROOT = Path(__file__).resolve().parent.parent
-MY, MY_PORT = "migkit-test-crash-my", 15880
+MY, MY_PORT = servers.name(servers.PREFIX + "-crash-my"), servers.private_port(0)
 
 
 def _migkit(tmp, *args, fail=None):

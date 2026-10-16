@@ -44,6 +44,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 # Recorded from `SHOW REPLICA STATUS` on MySQL 8.4, trimmed to the columns
 # this reads. The full row is fifty-odd columns wide.
@@ -222,8 +223,8 @@ def test_named_rows_pair_values_with_the_columns_they_came_from():
         {"Replica_IO_Running": "Connecting", "Last_IO_Error": "boom"}]
 
 
-PORT = 13431
-NAME = "migkit-test-replstatus"
+PORT = servers.private_port(0)
+NAME = servers.name(servers.PREFIX + "-replstatus")
 
 
 @pytest.fixture(scope="module")

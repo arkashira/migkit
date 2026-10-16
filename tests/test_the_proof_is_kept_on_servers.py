@@ -23,13 +23,14 @@ import pytest
 from migkit import kept, leaves, tailctl
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
 ROWS = 20_000
 WRITES = 4_000
-MY, MY_PORT = "migkit-test-proof-kmy", 16173
-PG, PG_PORT = "migkit-test-proof-kpg", 16175
+MY, MY_PORT = servers.name(servers.PREFIX + "-proof-kmy"), servers.private_port(0)
+PG, PG_PORT = servers.name(servers.PREFIX + "-proof-kpg"), servers.private_port(1)
 
 
 def _tail(pair, db, token_path, lines):

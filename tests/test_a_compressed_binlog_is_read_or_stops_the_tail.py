@@ -26,11 +26,12 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers
 
 pytestmark = pytest.mark.docker
 
-MY, MY_PORT = "migkit-test-zc-my", 15706
-MARIA, MARIA_PORT = "migkit-test-zc-maria", 15707
+MY, MY_PORT = servers.name(servers.PREFIX + "-zc-my"), servers.private_port(0)
+MARIA, MARIA_PORT = servers.name(servers.PREFIX + "-zc-maria"), servers.private_port(1)
 
 
 def _docker():

@@ -29,6 +29,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("verify.structure.extensions", "postgres")]
@@ -36,7 +37,7 @@ PROVES = [("verify.structure.extensions", "postgres")]
 pytestmark = needs_docker
 
 SRC, DST = 15527, 15528
-NAMES = {SRC: "migkit-test-ext-src", DST: "migkit-test-ext-dst"}
+NAMES = {SRC: servers.name(servers.PREFIX + "-ext-src"), DST: servers.name(servers.PREFIX + "-ext-dst")}
 
 
 def q(port, sql):

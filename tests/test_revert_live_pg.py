@@ -10,12 +10,13 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("verify.structure.schema-diff", "postgres")]
 
-NAME = "migkit-test-revert"
-PORT = 15489
+NAME = servers.name(servers.PREFIX + "-revert")
+PORT = servers.private_port(0)
 
 
 def _docker():

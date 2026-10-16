@@ -26,13 +26,14 @@ import pytest
 
 from tests.cap_pairs import live_eta, watched
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
 ROOT = Path(__file__).resolve().parent.parent
-SRC, DST = "migkit-test-pg-src", "migkit-test-pg-dst"
-TC = "migkit-test-cap-tc"
-PROXY, API, LISTEN = "migkit-test-cap-toxi", 16222, 16223
+SRC, DST = servers.name(servers.PREFIX + "-pg-src"), servers.name(servers.PREFIX + "-pg-dst")
+TC = servers.name(servers.PREFIX + "-cap-tc")
+PROXY, API, LISTEN = servers.name(servers.PREFIX + "-cap-toxi"), servers.private_port(0), servers.private_port(1)
 ROWS = 1_500_000
 #: how far the rate the model predicts may be from the rate the move
 #: measured, as a share of the measured one: probes of seconds against a

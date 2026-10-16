@@ -16,11 +16,12 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
-SRC, DST = ("migkit-test-eng-cs-src", 16015), ("migkit-test-eng-cs-dst",
-                                               16016)
+SRC, DST = (servers.name(servers.PREFIX + "-eng-cs-src"), servers.private_port(0)), (servers.name(servers.PREFIX + "-eng-cs-dst"),
+                                               servers.private_port(1))
 
 
 def _session(port, wait=300):

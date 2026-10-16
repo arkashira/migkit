@@ -18,9 +18,10 @@ import time
 import pytest
 
 from migkit import canon
+from tests import servers as lanes
 
-PG, MY = "migkit-test-sq-pg", "migkit-test-sq-my"
-PG_PORT, MY_PORT = 15479, 13379
+PG, MY = lanes.name(lanes.PREFIX + "-sq-pg"), lanes.name(lanes.PREFIX + "-sq-my")
+PG_PORT, MY_PORT = lanes.private_port(0), lanes.private_port(1)
 
 # Only the classes SQLite maps: its declared type is a hint, so `decimal`,
 # the date types and `json` are deliberately not claimed yet.

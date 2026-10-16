@@ -19,10 +19,11 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 from tests.typepair import Checkpoint
+from tests import servers
 
 pytestmark = needs_docker
 
-MS, PORT, PW = "migkit-test-ty2-ms", 16218, "Migkit-Test-9x!"
+MS, PORT, PW = servers.name(servers.PREFIX + "-ty2-ms"), servers.private_port(0), "Migkit-Test-9x!"
 
 
 def _sql(db, *statements):

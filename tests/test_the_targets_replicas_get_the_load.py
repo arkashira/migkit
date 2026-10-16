@@ -15,13 +15,14 @@ import pytest
 
 from migkit import movers
 from migkit.config import Endpoint, Hop
+from tests import servers
 
 pytestmark = [pytest.mark.docker]
 
-NET = "migkit-test-downstream-net"
-SRC, DST, REP = ("migkit-test-downstream-src", "migkit-test-downstream-dst",
-                 "migkit-test-downstream-rep")
-SRC_PORT, DST_PORT = 15737, 15738
+NET = servers.name(servers.PREFIX + "-downstream-net")
+SRC, DST, REP = (servers.name(servers.PREFIX + "-downstream-src"), servers.name(servers.PREFIX + "-downstream-dst"),
+                 servers.name(servers.PREFIX + "-downstream-rep"))
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

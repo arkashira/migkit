@@ -18,6 +18,7 @@ import pytest
 from migkit.config import Endpoint, Hop
 from migkit.engines.base import RepairAction
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = [needs_docker, pytest.mark.skipif(
     not shutil.which("atlas", path=os.environ.get("PATH", "")
@@ -102,7 +103,7 @@ def test_an_undo_that_does_not_return_it_is_said(pg_pair, tmp_path,
 # ---- MySQL, whose DDL is not transactional: a fix that fails part of the
 # way through on the target is left half applied there ----
 
-MY, MY_PORT = "migkit-test-rehearse-my", 15758
+MY, MY_PORT = servers.name(servers.PREFIX + "-rehearse-my"), servers.private_port(0)
 
 
 def my(sql):

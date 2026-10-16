@@ -23,13 +23,14 @@ import time
 import pytest
 
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("verify.delta", "mongodb")]
 
 pytestmark = needs_docker
 
-MG, PORT = "migkit-test-f0v-mongo", 16050
+MG, PORT = servers.name(servers.PREFIX + "-f0v-mongo"), servers.private_port(0)
 
 
 def _up():

@@ -36,9 +36,10 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 SRC, DST = 15587, 15588
-NS, ND = "migkit-test-follow-src", "migkit-test-follow-dst"
+NS, ND = servers.name(servers.PREFIX + "-follow-src"), servers.name(servers.PREFIX + "-follow-dst")
 
 
 def _hop(tmp_path, name="fl", dbs=("postgres",)):

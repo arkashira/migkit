@@ -13,12 +13,13 @@ import threading
 import time
 
 import pytest
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("tail.follows", "hetero")]
 
-PG, MY = "migkit-test-tail-pg", "migkit-test-tail-my"
-PG_PORT, MY_PORT = 15453, 13353
+PG, MY = servers.name(servers.PREFIX + "-tail-pg"), servers.name(servers.PREFIX + "-tail-my")
+PG_PORT, MY_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

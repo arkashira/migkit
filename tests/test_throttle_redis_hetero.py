@@ -22,9 +22,10 @@ import time
 import pytest
 
 from migkit.throttle import BUSY_RATIO
+from tests import servers
 
-RD = "migkit-test-thr-redis"
-RD_PORT = 16377
+RD = servers.name(servers.PREFIX + "-thr-redis")
+RD_PORT = servers.private_port(0)
 
 
 def _docker():

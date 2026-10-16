@@ -10,9 +10,10 @@ import subprocess
 import time
 
 import pytest
+from tests import servers as lanes
 
-MY, PG = "migkit-test-f0t-my", "migkit-test-f0t-pg"
-MY_PORT, PG_PORT = 16060, 16061
+MY, PG = lanes.name(lanes.PREFIX + "-f0t-my"), lanes.name(lanes.PREFIX + "-f0t-pg")
+MY_PORT, PG_PORT = lanes.private_port(18), lanes.private_port(19)
 
 
 def _docker():

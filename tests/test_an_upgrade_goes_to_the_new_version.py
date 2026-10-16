@@ -17,9 +17,10 @@ import pytest
 from click.testing import CliRunner
 
 from tests.conftest import needs_docker
+from tests import servers
 
-SRC, DST = ("migkit-test-upgrade-src", 16338), ("migkit-test-upgrade-dst",
-                                                16339)
+SRC, DST = (servers.name(servers.PREFIX + "-upgrade-src"), servers.private_port(0)), (servers.name(servers.PREFIX + "-upgrade-dst"),
+                                                servers.private_port(1))
 
 
 def test_a_major_version_is_what_upgrades_are_told_apart_by():

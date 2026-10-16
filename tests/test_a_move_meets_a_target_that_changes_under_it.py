@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
@@ -90,7 +91,7 @@ def test_a_target_turned_read_only_part_way(pg_pair, tmp_path):
     assert psql(pg_pair["src"], Q).stdout == psql(pg_pair["dst"], Q).stdout
 
 
-SMALL, SMALL_PORT = "migkit-test-small-disk", 15883
+SMALL, SMALL_PORT = servers.name(servers.PREFIX + "-small-disk"), servers.private_port(0)
 
 
 @pytest.fixture

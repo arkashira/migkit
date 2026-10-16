@@ -20,6 +20,7 @@ import pytest
 from migkit import repairlog
 from migkit.config import Endpoint, Hop
 from tests.conftest import _have_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [
@@ -31,9 +32,9 @@ pytestmark = [pytest.mark.docker,
               pytest.mark.skipif(not _have_docker(),
                                  reason="docker not available")]
 
-MONGO, MONGO_PORT = "migkit-test-vd-mongo", 16274
-RD_SRC, RD_DST = ("migkit-test-vd-rd-src", 16275), ("migkit-test-vd-rd-dst",
-                                                    16279)
+MONGO, MONGO_PORT = servers.name(servers.PREFIX + "-vd-mongo"), servers.private_port(0)
+RD_SRC, RD_DST = (servers.name(servers.PREFIX + "-vd-rd-src"), servers.private_port(1)), (servers.name(servers.PREFIX + "-vd-rd-dst"),
+                                                    servers.private_port(2))
 
 
 def _wait(port, timeout=120):

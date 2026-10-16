@@ -18,12 +18,13 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers as lanes
 
 pytestmark = [pytest.mark.docker]
 
-MY, PG = "migkit-test-coll-my", "migkit-test-coll-pg"
-SB_MY, SB_PG = "migkit-test-coll-sbmy", "migkit-test-coll-sbpg"
-MY_PORT, PG_PORT, SB_MY_PORT, SB_PG_PORT = 16294, 16295, 16296, 16297
+MY, PG = lanes.name(lanes.PREFIX + "-coll-my"), lanes.name(lanes.PREFIX + "-coll-pg")
+SB_MY, SB_PG = lanes.name(lanes.PREFIX + "-coll-sbmy"), lanes.name(lanes.PREFIX + "-coll-sbpg")
+MY_PORT, PG_PORT, SB_MY_PORT, SB_PG_PORT = lanes.private_port(0), lanes.private_port(1), lanes.private_port(2), lanes.private_port(3)
 #: the sandbox's PostgreSQL is built from this major's image, with ICU
 PG_MAJOR = 17
 #: small servers: four of them run at once here

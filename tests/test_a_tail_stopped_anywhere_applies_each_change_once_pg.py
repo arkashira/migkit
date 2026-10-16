@@ -32,11 +32,12 @@ import pytest
 from migkit import tailctl, tailtables
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers as lanes
 
 pytestmark = needs_docker
 
-SRC, DST = "migkit-test-audb-pg-src", "migkit-test-audb-pg-dst"
-SRC_PORT, DST_PORT = 16490, 16491
+SRC, DST = lanes.name(lanes.PREFIX + "-audb-pg-src"), lanes.name(lanes.PREFIX + "-audb-pg-dst")
+SRC_PORT, DST_PORT = lanes.private_port(0), lanes.private_port(1)
 DB = "postgres"
 
 

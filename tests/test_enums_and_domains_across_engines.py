@@ -14,11 +14,12 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers
 
 pytestmark = [pytest.mark.docker]
 
-MY, PG = "migkit-test-enum-my", "migkit-test-enum-pg"
-MY_PORT, PG_PORT = 15729, 15730
+MY, PG = servers.name(servers.PREFIX + "-enum-my"), servers.name(servers.PREFIX + "-enum-pg")
+MY_PORT, PG_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

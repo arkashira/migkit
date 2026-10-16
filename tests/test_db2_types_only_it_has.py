@@ -22,11 +22,12 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 from tests.typepair import Checkpoint
+from tests import servers as lanes
 
 pytestmark = needs_docker
 
-DB2, PORT, PW = "migkit-test-w6-db2", 16544, "CHANGE_ME-db2"
-PG, PG_PORT = "migkit-test-w6-db2pg", 16545
+DB2, PORT, PW = lanes.name(lanes.PREFIX + "-w6-db2"), lanes.private_port(0), "CHANGE_ME-db2"
+PG, PG_PORT = lanes.name(lanes.PREFIX + "-w6-db2pg"), lanes.private_port(1)
 IMAGE = "icr.io/db2_community/db2:latest"
 
 SEED = [

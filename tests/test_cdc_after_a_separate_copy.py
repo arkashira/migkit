@@ -27,10 +27,11 @@ from click.testing import CliRunner
 
 from migkit import movers
 from migkit.config import Endpoint, Hop
+from tests import servers
 
-NET = "migkit-test-cdcsep-net"
-SRC, DST = "migkit-test-cdcsep-src", "migkit-test-cdcsep-dst"
-SRC_PORT, DST_PORT = 15719, 15720
+NET = servers.name(servers.PREFIX + "-cdcsep-net")
+SRC, DST = servers.name(servers.PREFIX + "-cdcsep-src"), servers.name(servers.PREFIX + "-cdcsep-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

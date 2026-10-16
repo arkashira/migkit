@@ -21,9 +21,10 @@ import subprocess
 import time
 
 import pytest
+from tests import servers as lanes
 
-MY, MARIA = "migkit-test-repl-my", "migkit-test-repl-maria"
-MY_PORT, MARIA_PORT = 13347, 13345
+MY, MARIA = lanes.name(lanes.PREFIX + "-repl-my"), lanes.name(lanes.PREFIX + "-repl-maria")
+MY_PORT, MARIA_PORT = lanes.private_port(0), lanes.private_port(1)
 
 
 def _docker():

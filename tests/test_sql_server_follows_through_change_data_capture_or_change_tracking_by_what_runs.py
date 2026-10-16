@@ -204,7 +204,7 @@ def test_a_capture_mark_is_the_newest_commit_and_covers_only_its_own_feed():
 @needs_docker
 def test_the_edge_edition_makes_the_capture_and_nothing_fills_it():
     import pymssql
-    name, port = servers.name("migkit-test-mssql-follow"), \
+    name, port = servers.name(servers.PREFIX + "-mssql-follow"), \
         servers.private_port(8)
     pw = servers.STRONG
     subprocess.run(["docker", "rm", "-f", "-v", name], capture_output=True)

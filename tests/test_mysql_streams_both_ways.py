@@ -16,11 +16,12 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
-NET = "migkit-test-mytwo-net"
-A, B = ("migkit-test-mytwo-a", 15897), ("migkit-test-mytwo-b", 15898)
+NET = servers.name(servers.PREFIX + "-mytwo-net")
+A, B = (servers.name(servers.PREFIX + "-mytwo-a"), servers.private_port(0)), (servers.name(servers.PREFIX + "-mytwo-b"), servers.private_port(1))
 
 
 def sql(node, text):

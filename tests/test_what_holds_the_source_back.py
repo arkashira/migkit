@@ -16,6 +16,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
@@ -35,7 +36,7 @@ def _hold(seconds=12):
     """Another session holding a repeatable-read snapshot open."""
     return subprocess.Popen(
         ["docker", "exec", "-e", "PGPASSWORD=test", "-e",
-         "PGAPPNAME=report-job", "migkit-test-pg-src", "psql", "-U",
+         "PGAPPNAME=report-job", servers.name(servers.PREFIX + "-pg-src"), "psql", "-U",
          "postgres", "-c", "begin isolation level repeatable read;"
          f" select count(*) from pg_class; select pg_sleep({seconds});"
          " commit;"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -77,7 +78,7 @@ def test_the_consistent_pass_says_how_long_it_held_it(pg_pair):
 @pytest.fixture(scope="module")
 def mysql():
     import socket
-    name, port = "migkit-test-held-my", 15696
+    name, port = servers.name(servers.PREFIX + "-held-my"), servers.private_port(0)
     subprocess.run(["docker", "rm", "-f", "-v", name], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", name, "-e",
                     "MYSQL_ROOT_PASSWORD=test", "-p", f"{port}:3306",

@@ -24,12 +24,13 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers as lanes
 
 pytestmark = [pytest.mark.docker]
 
-MY, PG = "migkit-test-depth-my", "migkit-test-depth-pg"
-SB_MY, SB_PG = "migkit-test-depth-sbmy", "migkit-test-depth-sbpg"
-MY_PORT, PG_PORT, SB_MY_PORT, SB_PG_PORT = 16290, 16291, 16292, 16293
+MY, PG = lanes.name(lanes.PREFIX + "-depth-my"), lanes.name(lanes.PREFIX + "-depth-pg")
+SB_MY, SB_PG = lanes.name(lanes.PREFIX + "-depth-sbmy"), lanes.name(lanes.PREFIX + "-depth-sbpg")
+MY_PORT, PG_PORT, SB_MY_PORT, SB_PG_PORT = lanes.private_port(0), lanes.private_port(1), lanes.private_port(2), lanes.private_port(3)
 PG_MAJOR = 17
 #: the statement digests on: the application's calls are read from them
 MY_FLAGS = ["--innodb-buffer-pool-size=16M",

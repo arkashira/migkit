@@ -16,10 +16,11 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import psql
 from tests.typepair import Checkpoint
+from tests import servers
 
 pytestmark = [pytest.mark.docker]
 
-DDB, DDB_PORT = "migkit-test-f0t-ddb", 16064
+DDB, DDB_PORT = servers.name(servers.PREFIX + "-f0t-ddb"), servers.private_port(0)
 
 
 @pytest.fixture(scope="module")

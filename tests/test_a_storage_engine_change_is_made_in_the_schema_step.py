@@ -16,9 +16,10 @@ from click.testing import CliRunner
 
 from migkit import tableengine
 from tests.conftest import needs_docker
+from tests import servers
 
-SRC, DST = ("migkit-test-engine-src", 16462), ("migkit-test-engine-dst",
-                                              16463)
+SRC, DST = (servers.name(servers.PREFIX + "-engine-src"), servers.private_port(0)), (servers.name(servers.PREFIX + "-engine-dst"),
+                                              servers.private_port(1))
 
 MYISAM = ("CREATE TABLE `g` (\n"
           "  `grp` int NOT NULL,\n"

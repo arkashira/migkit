@@ -16,6 +16,7 @@ import pytest
 
 from migkit import leftovers as lo
 from migkit.config import Endpoint, Hop
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("scope.copy", "postgres")]
@@ -143,7 +144,7 @@ def test_the_bulk_paths_leave_them_out_without_an_exclude_list():
 
 # ---- a real source ---------------------------------------------------------
 
-NAME, PORT, TPORT = "migkit-test-out-pg", 16094, 16095
+NAME, PORT, TPORT = servers.name(servers.PREFIX + "-out-pg"), servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

@@ -26,15 +26,16 @@ import pytest
 from migkit.config import Endpoint, Hop
 from migkit.engines.base import Engine
 from tests.conftest import needs_docker, psql
+from tests import servers as lanes
 
 pytestmark = needs_docker
 
-RD_SRC, RD_DST = "migkit-test-all-rd-src", "migkit-test-all-rd-dst"
-RD_SRC_PORT, RD_DST_PORT = 16431, 16432
-MG = "migkit-test-all-mg"
-MG_PORT = 27091
-KF = "migkit-test-all-kf"
-KF_PORT = 19421
+RD_SRC, RD_DST = lanes.name(lanes.PREFIX + "-all-rd-src"), lanes.name(lanes.PREFIX + "-all-rd-dst")
+RD_SRC_PORT, RD_DST_PORT = lanes.private_port(0), lanes.private_port(1)
+MG = lanes.name(lanes.PREFIX + "-all-mg")
+MG_PORT = lanes.private_port(2)
+KF = lanes.name(lanes.PREFIX + "-all-kf")
+KF_PORT = lanes.private_port(3)
 
 #: the checks the CLI can ask for, whether or not an engine lists them in its
 #: own default set - the ones it does not list are exactly where this rots

@@ -13,6 +13,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
@@ -47,8 +48,8 @@ def test_pg_the_target_table_is_emptied_and_the_source_is_not(pg_pair):
     assert _pg(pg_pair["src"], "select count(*) from public.t") == "3"
 
 
-SRC, DST = "migkit-test-nempty-src", "migkit-test-nempty-dst"
-SRC_PORT, DST_PORT = 15661, 15662
+SRC, DST = servers.name(servers.PREFIX + "-nempty-src"), servers.name(servers.PREFIX + "-nempty-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _my(name, sql):

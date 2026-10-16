@@ -15,10 +15,11 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
-PG, PORT = "migkit-test-pgvector", 15892
+PG, PORT = servers.name(servers.PREFIX + "-pgvector"), servers.private_port(0)
 
 
 def sql(text, db="postgres"):

@@ -16,6 +16,7 @@ import pytest
 from migkit import freeze
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 PROVES = [
     ("cutover.read-only-target", ("clickhouse", "cockroachdb", "tidb",
@@ -73,7 +74,7 @@ def _hop(tmp_path, engine, ep, db, **options):
 
 # --- ClickHouse ----------------------------------------------------------------
 
-CH, CH_PORT = "migkit-test-kept-ch", 16510
+CH, CH_PORT = servers.name(servers.PREFIX + "-kept-ch"), servers.private_port(0)
 
 
 def _ch_client(user="default", password="test"):
@@ -137,7 +138,7 @@ def test_a_clickhouse_target_is_held_and_given_back(tmp_path):
 
 # --- CockroachDB, a target and a source -------------------------------------------
 
-CRDB, CRDB_PORT = "migkit-test-kept-crdb", 16511
+CRDB, CRDB_PORT = servers.name(servers.PREFIX + "-kept-crdb"), servers.private_port(1)
 
 
 def _crdb(statements, user="root", db="app"):
@@ -214,7 +215,7 @@ def test_a_cockroachdb_target_is_held_and_a_source_frozen(tmp_path):
 
 # --- TiDB ------------------------------------------------------------------------
 
-TIDB, TIDB_PORT = "migkit-test-kept-tidb", 16512
+TIDB, TIDB_PORT = servers.name(servers.PREFIX + "-kept-tidb"), servers.private_port(2)
 
 
 def _tidb(sql, user="root", password=""):
@@ -253,7 +254,7 @@ def test_a_tidb_target_is_held_by_mysqls_way(tmp_path):
 
 # --- OpenSearch: named, not held -------------------------------------------------
 
-OS, OS_PORT = "migkit-test-kept-os", 16513
+OS, OS_PORT = servers.name(servers.PREFIX + "-kept-os"), servers.private_port(3)
 
 
 def _os(method, path, body=None):
@@ -304,7 +305,7 @@ def test_an_opensearch_targets_writes_that_are_not_migkits_are_named(
 
 # --- Redis -----------------------------------------------------------------------
 
-REDIS, REDIS_PORT = "migkit-test-kept-redis", 16514
+REDIS, REDIS_PORT = servers.name(servers.PREFIX + "-kept-redis"), servers.private_port(4)
 
 
 def test_a_redis_targets_accounts_are_refused_but_migkits(tmp_path):
@@ -339,7 +340,7 @@ def test_a_redis_targets_accounts_are_refused_but_migkits(tmp_path):
 
 # --- MongoDB ---------------------------------------------------------------------
 
-MONGO, MONGO_PORT = "migkit-test-kept-mongo", 16515
+MONGO, MONGO_PORT = servers.name(servers.PREFIX + "-kept-mongo"), servers.private_port(5)
 
 
 def _mongo(user, password, db="admin"):
@@ -378,7 +379,7 @@ def test_a_mongodb_targets_accounts_read_but_do_not_write(tmp_path):
 
 # --- Oracle ----------------------------------------------------------------------
 
-ORA, ORA_PORT = "migkit-test-kept-ora", 16516
+ORA, ORA_PORT = servers.name(servers.PREFIX + "-kept-ora"), servers.private_port(6)
 
 
 def _ora(user, password, sql=None):

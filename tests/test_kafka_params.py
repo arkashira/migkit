@@ -12,11 +12,12 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers
 
 pytestmark = pytest.mark.docker
 
-SRC, DST = "migkit-test-kparams-src", "migkit-test-kparams-dst"
-SRC_PORT, DST_PORT = 15669, 15670
+SRC, DST = servers.name(servers.PREFIX + "-kparams-src"), servers.name(servers.PREFIX + "-kparams-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _wait(port, timeout=180):

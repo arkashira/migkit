@@ -9,6 +9,7 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [
@@ -30,12 +31,12 @@ pytestmark = [pytest.mark.docker,
               pytest.mark.skipif(not _docker(),
                                  reason="docker not available")]
 
-REDIS, VALKEY = "migkit-test-var-redis", "migkit-test-var-valkey"
-CRDB = "migkit-test-var-crdb"
-MARIA = "migkit-test-var-maria"
-REDIS_PORT, VALKEY_PORT = 16389, 16388
-CRDB_PORT = 26258
-MARIA_PORT = 13389
+REDIS, VALKEY = servers.name(servers.PREFIX + "-var-redis"), servers.name(servers.PREFIX + "-var-valkey")
+CRDB = servers.name(servers.PREFIX + "-var-crdb")
+MARIA = servers.name(servers.PREFIX + "-var-maria")
+REDIS_PORT, VALKEY_PORT = servers.private_port(0), servers.private_port(1)
+CRDB_PORT = servers.private_port(2)
+MARIA_PORT = servers.private_port(3)
 
 
 def _wait(port, timeout=150):

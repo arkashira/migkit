@@ -9,9 +9,10 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
-SRC, DST = "migkit-test-ixw-src", "migkit-test-ixw-dst"
-SRC_PORT, DST_PORT = 15425, 15426
+SRC, DST = servers.name(servers.PREFIX + "-ixw-src"), servers.name(servers.PREFIX + "-ixw-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

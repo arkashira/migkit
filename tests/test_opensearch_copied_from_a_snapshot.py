@@ -21,11 +21,12 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("move.bulk", "opensearch")]
 
-SRC, DST = ("migkit-test-rfs-src", 16280), ("migkit-test-rfs-dst", 16281)
+SRC, DST = (servers.name(servers.PREFIX + "-rfs-src"), servers.private_port(0)), (servers.name(servers.PREFIX + "-rfs-dst"), servers.private_port(1))
 
 
 def _built():

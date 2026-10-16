@@ -25,9 +25,10 @@ import subprocess
 import time
 
 import pytest
+from tests import servers
 
-L1, U8 = "migkit-test-cs-latin1", "migkit-test-cs-utf8"
-L1_PORT, U8_PORT = 13455, 13456
+L1, U8 = servers.name(servers.PREFIX + "-cs-latin1"), servers.name(servers.PREFIX + "-cs-utf8")
+L1_PORT, U8_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

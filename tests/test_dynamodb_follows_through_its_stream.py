@@ -19,6 +19,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [
@@ -31,7 +32,7 @@ PROVES = [
 
 pytestmark = needs_docker
 
-DDB, PORT = "migkit-test-ddbstream", 15929
+DDB, PORT = servers.name(servers.PREFIX + "-ddbstream"), servers.private_port(0)
 
 
 @pytest.fixture(scope="module")

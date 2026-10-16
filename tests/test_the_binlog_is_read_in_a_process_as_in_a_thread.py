@@ -18,11 +18,12 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers as lanes
 
 pytestmark = pytest.mark.docker
 
-MY, MY_PORT = "migkit-test-spd-my", 16100
-PG, PG_PORT = "migkit-test-spd-pg", 16101
+MY, MY_PORT = lanes.name(lanes.PREFIX + "-spd-my"), lanes.private_port(0)
+PG, PG_PORT = lanes.name(lanes.PREFIX + "-spd-pg"), lanes.private_port(1)
 
 
 def _docker():

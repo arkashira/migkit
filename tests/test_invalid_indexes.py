@@ -32,6 +32,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("verify.structure.indexes", "postgres")]
@@ -144,13 +145,13 @@ def test_an_index_that_still_costs_every_write_is_told_apart(pg_pair,
     assert got.returncode == 0, got.stderr
 
     holder = subprocess.Popen(
-        ["docker", "exec", "-e", "PGPASSWORD=test", "migkit-test-pg-dst",
+        ["docker", "exec", "-e", "PGPASSWORD=test", servers.name(servers.PREFIX + "-pg-dst"),
          "psql", "-U", "postgres", "-At", "-c",
          "begin isolation level repeatable read; select 1;"
          " select pg_sleep(60);"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     builder = subprocess.Popen(
-        ["docker", "exec", "-e", "PGPASSWORD=test", "migkit-test-pg-dst",
+        ["docker", "exec", "-e", "PGPASSWORD=test", servers.name(servers.PREFIX + "-pg-dst"),
          "psql", "-U", "postgres", "-At", "-c",
          "create index concurrently invoices_v on public.invoices (v);"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

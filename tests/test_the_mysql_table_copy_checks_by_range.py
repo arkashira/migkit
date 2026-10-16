@@ -17,13 +17,14 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("move.table-copy", "mysql")]
 
 pytestmark = needs_docker
 
-MY, PORT = "migkit-test-mysql-ranges", 15864
+MY, PORT = servers.name(servers.PREFIX + "-mysql-ranges"), servers.private_port(0)
 ROWS = 60_000
 
 

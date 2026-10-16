@@ -16,9 +16,10 @@ import subprocess
 import time
 
 import pytest
+from tests import servers as lanes
 
-ON, OFF = "migkit-test-offer-my", "migkit-test-offer-my-nolib"
-ON_PORT, OFF_PORT = 16300, 16301
+ON, OFF = lanes.name(lanes.PREFIX + "-offer-my"), lanes.name(lanes.PREFIX + "-offer-my-nolib")
+ON_PORT, OFF_PORT = lanes.private_port(0), lanes.private_port(1)
 
 
 def _docker():

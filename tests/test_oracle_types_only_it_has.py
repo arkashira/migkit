@@ -25,11 +25,12 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 from tests.typepair import Checkpoint
+from tests import servers as lanes
 
 pytestmark = needs_docker
 
-ORA, ORA_PORT, PW = "migkit-test-w6-ora", 16542, "CHANGE_ME_w6ora1"
-PG, PG_PORT = "migkit-test-w6-orapg", 16543
+ORA, ORA_PORT, PW = lanes.name(lanes.PREFIX + "-w6-ora"), lanes.private_port(0), "CHANGE_ME_w6ora1"
+PG, PG_PORT = lanes.name(lanes.PREFIX + "-w6-orapg"), lanes.private_port(1)
 IMAGE = "gvenzl/oracle-free:full-faststart"
 
 SEED = [

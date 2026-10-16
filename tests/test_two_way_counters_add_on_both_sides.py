@@ -26,10 +26,11 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
-MY, MY_PORT = "migkit-test-counters-my", 15951
+MY, MY_PORT = servers.name(servers.PREFIX + "-counters-my"), servers.private_port(0)
 
 
 def my(sql, db="app"):

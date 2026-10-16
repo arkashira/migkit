@@ -15,12 +15,13 @@ import subprocess
 import time
 
 import pytest
+from tests import servers as lanes
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("scope.names", "hetero"), ("tail.follows", "mongodb")]
 
-MY, PG = "migkit-test-fcdc-my", "migkit-test-fcdc-pg"
-MY_PORT, PG_PORT = 15672, 15673
+MY, PG = lanes.name(lanes.PREFIX + "-fcdc-my"), lanes.name(lanes.PREFIX + "-fcdc-pg")
+MY_PORT, PG_PORT = lanes.private_port(0), lanes.private_port(1)
 
 
 def _docker():
@@ -416,7 +417,7 @@ def test_full_cdc_without_a_database_stops_before_copying(tmp_path,
     assert copied == []
 
 
-MG, MG_PORT = "migkit-test-fcdc-mg", 15674
+MG, MG_PORT = lanes.name(lanes.PREFIX + "-fcdc-mg"), lanes.private_port(2)
 
 
 def mongosh(script, db="cx"):

@@ -37,11 +37,12 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
 SRC, DST = 15522, 15523
-NAMES = {SRC: "migkit-test-coll-src", DST: "migkit-test-coll-dst"}
+NAMES = {SRC: servers.name(servers.PREFIX + "-coll-src"), DST: servers.name(servers.PREFIX + "-coll-dst")}
 
 
 def _up(name, port):

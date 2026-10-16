@@ -22,10 +22,11 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
-MS, PORT, PW = "migkit-test-f0v-mssql22", 16055, "CHANGE_ME-Str0ng!"
+MS, PORT, PW = servers.name(servers.PREFIX + "-f0v-mssql22"), servers.private_port(0), "CHANGE_ME-Str0ng!"
 IMAGE = "mcr.microsoft.com/mssql/server:2022-latest"
 
 

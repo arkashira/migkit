@@ -22,13 +22,14 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("tail.ddl", "mysql")]
 
 pytestmark = needs_docker
 
-MY, PORT = "migkit-test-ddltail-my", 15699
+MY, PORT = servers.name(servers.PREFIX + "-ddltail-my"), servers.private_port(0)
 
 
 def my(sql):

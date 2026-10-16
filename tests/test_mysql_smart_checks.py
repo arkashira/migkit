@@ -9,6 +9,7 @@ import time
 import pytest
 
 from tests.conftest import verdict
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [
@@ -36,8 +37,8 @@ pytestmark = [pytest.mark.docker,
               pytest.mark.skipif(not _docker(),
                                  reason="docker not available")]
 
-SRC, DST = "migkit-test-mysqlsmart-src", "migkit-test-mysqlsmart-dst"
-SRC_PORT, DST_PORT = 13400, 13401
+SRC, DST = servers.name(servers.PREFIX + "-mysqlsmart-src"), servers.name(servers.PREFIX + "-mysqlsmart-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _wait(port, timeout=90):

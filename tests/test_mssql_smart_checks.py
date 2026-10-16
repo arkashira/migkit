@@ -15,6 +15,7 @@ import time
 import pytest
 
 from tests.conftest import verdict
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [
@@ -46,8 +47,8 @@ pytestmark = [
                        reason="mssql image not pulled (amd64, ~1.5GB)"),
 ]
 
-SRC, DST = "migkit-test-mssql-src", "migkit-test-mssql-dst"
-SRC_PORT, DST_PORT = 14433, 14434
+SRC, DST = servers.name(servers.PREFIX + "-mssql-src"), servers.name(servers.PREFIX + "-mssql-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 SA = "Str0ng!Passw0rd"
 
 

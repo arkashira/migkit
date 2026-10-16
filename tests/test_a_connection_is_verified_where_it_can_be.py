@@ -18,6 +18,7 @@ import pytest
 
 from migkit import tls
 from migkit.config import Endpoint, Hop
+from tests import servers as lanes
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [
@@ -156,8 +157,8 @@ def test_doctor_says_it_as_a_failure(monkeypatch):
 
 # ---- real servers -----------------------------------------------------------
 
-PG, RD = "migkit-test-out-tlspg", "migkit-test-out-tlsrd"
-PG_PORT, RD_PORT = 16096, 16097
+PG, RD = lanes.name(lanes.PREFIX + "-out-tlspg"), lanes.name(lanes.PREFIX + "-out-tlsrd")
+PG_PORT, RD_PORT = lanes.private_port(0), lanes.private_port(1)
 
 
 def _docker():

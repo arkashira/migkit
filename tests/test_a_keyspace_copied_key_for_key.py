@@ -13,12 +13,13 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("move.table-copy", "redis"), ("cutover.rollback", "redis")]
 
-SRC, DST = "migkit-test-rcp-src", "migkit-test-rcp-dst"
-SRC_PORT, DST_PORT = 15816, 15817
+SRC, DST = servers.name(servers.PREFIX + "-rcp-src"), servers.name(servers.PREFIX + "-rcp-dst")
+SRC_PORT, DST_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _docker():

@@ -17,6 +17,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers as lanes
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [
@@ -28,7 +29,7 @@ PROVES = [
 
 pytestmark = needs_docker
 
-SRC, DST = ("migkit-test-chch-src", 15923), ("migkit-test-chch-dst", 15924)
+SRC, DST = (lanes.name(lanes.PREFIX + "-chch-src"), lanes.private_port(0)), (lanes.name(lanes.PREFIX + "-chch-dst"), lanes.private_port(1))
 
 
 @pytest.fixture(scope="module")

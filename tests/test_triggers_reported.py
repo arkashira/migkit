@@ -31,6 +31,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("verify.structure.triggers", "postgres")]
@@ -38,7 +39,7 @@ PROVES = [("verify.structure.triggers", "postgres")]
 pytestmark = needs_docker
 
 SRC, DST = 15527, 15528
-NAMES = {SRC: "migkit-test-trg-src", DST: "migkit-test-trg-dst"}
+NAMES = {SRC: servers.name(servers.PREFIX + "-trg-src"), DST: servers.name(servers.PREFIX + "-trg-dst")}
 
 BOTH = """
 create table notes (id int primary key, body text, updated_at timestamptz);

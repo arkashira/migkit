@@ -39,11 +39,12 @@ import pytest
 from migkit.config import Endpoint, Hop
 from migkit.util import which
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
-MY1, MY2 = "migkit-test-lock-my1", "migkit-test-lock-my2"
-MY1_PORT, MY2_PORT = 13393, 13394
+MY1, MY2 = servers.name(servers.PREFIX + "-lock-my1"), servers.name(servers.PREFIX + "-lock-my2")
+MY1_PORT, MY2_PORT = servers.private_port(0), servers.private_port(1)
 
 
 def _wait(port, timeout=180):

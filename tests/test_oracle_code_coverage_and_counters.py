@@ -21,12 +21,13 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers as lanes
 
 pytestmark = [pytest.mark.docker]
 
-OR, SB_OR = "migkit-test-orcov-or", "migkit-test-orcov-sbor"
-PG, SB_PG = "migkit-test-orcov-pg", "migkit-test-orcov-sbpg"
-OR_PORT, SB_OR_PORT, PG_PORT, SB_PG_PORT = 16298, 16299, 16294, 16295
+OR, SB_OR = lanes.name(lanes.PREFIX + "-orcov-or"), lanes.name(lanes.PREFIX + "-orcov-sbor")
+PG, SB_PG = lanes.name(lanes.PREFIX + "-orcov-pg"), lanes.name(lanes.PREFIX + "-orcov-sbpg")
+OR_PORT, SB_OR_PORT, PG_PORT, SB_PG_PORT = lanes.private_port(0), lanes.private_port(1), lanes.private_port(2), lanes.private_port(3)
 PASSWORD = "CHANGE_ME_test1"
 IMAGE = "gvenzl/oracle-free:slim-faststart"
 

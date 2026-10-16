@@ -28,11 +28,12 @@ import pytest
 
 from migkit import pieces
 from tests import cap_pairs
+from tests import servers
 
 MB = 2 ** 20
 #: a large value: twice what one batch of a copy holds
 WIDE = 2 * pieces.BATCH_BYTES
-NETWORK = "migkit-test-lv"
+NETWORK = servers.name(servers.PREFIX + "-lv")
 CALIBRATE = bool(os.environ.get("CAP_CALIBRATE"))
 HOP = "lv"
 

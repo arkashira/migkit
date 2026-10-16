@@ -20,11 +20,12 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 from tests.typepair import Checkpoint
+from tests import servers as lanes
 
 pytestmark = needs_docker
 
-CS, PG = "migkit-test-ty2-cs", "migkit-test-ty2-cpg"
-CS_PORT, PG_PORT = 16214, 16215
+CS, PG = lanes.name(lanes.PREFIX + "-ty2-cs"), lanes.name(lanes.PREFIX + "-ty2-cpg")
+CS_PORT, PG_PORT = lanes.private_port(0), lanes.private_port(1)
 REPLICATION = "{'class': 'SimpleStrategy', 'replication_factor': 1}"
 
 SEED = """

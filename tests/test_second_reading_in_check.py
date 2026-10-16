@@ -18,9 +18,10 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers
 
-MY, PG = "migkit-test-sr2-my", "migkit-test-sr2-pg"
-MY_PORT, PG_PORT = 15692, 15693
+MY, PG = servers.name(servers.PREFIX + "-sr2-my"), servers.name(servers.PREFIX + "-sr2-pg")
+MY_PORT, PG_PORT = servers.private_port(0), servers.private_port(1)
 READER = os.environ.get("MIGKIT_SECOND_READER_PYTHON",
                         "/tmp/dvt-venv/bin/python")
 

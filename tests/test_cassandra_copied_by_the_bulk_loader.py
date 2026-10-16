@@ -22,6 +22,7 @@ import pytest
 from migkit.config import Endpoint, Hop
 from migkit.util import which
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("move.bulk", "cassandra")]
@@ -29,7 +30,7 @@ PROVES = [("move.bulk", "cassandra")]
 pytestmark = [needs_docker, pytest.mark.skipif(
     not which("dsbulk"), reason="the bulk loader is not installed here")]
 
-NAME, PORT = "migkit-test-dsbulk", 16288
+NAME, PORT = servers.name(servers.PREFIX + "-dsbulk"), servers.private_port(0)
 
 
 def _session(wait=300):

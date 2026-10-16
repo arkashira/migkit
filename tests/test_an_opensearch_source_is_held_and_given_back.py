@@ -16,13 +16,14 @@ import pytest
 from migkit import freeze
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("cutover.freeze", "opensearch")]
 
 pytestmark = needs_docker
 
-NAME, PORT = "migkit-test-hold-opensearch", 16354
+NAME, PORT = servers.name(servers.PREFIX + "-hold-opensearch"), servers.private_port(0)
 
 
 def _http(method, path, body=None):

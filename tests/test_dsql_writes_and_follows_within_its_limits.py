@@ -23,6 +23,7 @@ import pytest
 from migkit.config import Endpoint, Hop
 from migkit.engines import dsql
 from tests.conftest import needs_docker
+from tests import servers as lanes
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [
@@ -31,8 +32,8 @@ PROVES = [
     ("cutover.drain", "dsql"),
 ]
 
-PG, PG_PORT = "migkit-test-dsql-wire", 16349
-KS, KS_PORT = "migkit-test-dsql-stream", 16348
+PG, PG_PORT = lanes.name(lanes.PREFIX + "-dsql-wire"), lanes.private_port(0)
+KS, KS_PORT = lanes.name(lanes.PREFIX + "-dsql-stream"), lanes.private_port(1)
 STREAM = "dsql-cdc"
 
 

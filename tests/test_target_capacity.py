@@ -30,6 +30,7 @@ import pytest
 from migkit import canon
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+from tests import servers
 
 pytestmark = needs_docker
 
@@ -220,8 +221,8 @@ def test_an_engine_that_cannot_count_says_so(tmp_path):
 
 # ---- mysql, so this is not a postgres-only capability ------------------
 
-MY = "migkit-test-cap-my"
-MY_PORT = 13403
+MY = servers.name(servers.PREFIX + "-cap-my")
+MY_PORT = servers.private_port(0)
 
 
 @pytest.fixture(scope="module")

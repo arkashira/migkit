@@ -23,12 +23,13 @@ import pytest
 
 from migkit import tailctl
 from tests.conftest import needs_docker
+from tests import servers
 
 pytestmark = needs_docker
 
-MG, MG_PORT = "migkit-test-audb-mongo", 16492
-KSRC, KDST = "migkit-test-audb-kafka-src", "migkit-test-audb-kafka-dst"
-KSRC_PORT, KDST_PORT = 16493, 16494
+MG, MG_PORT = servers.name(servers.PREFIX + "-audb-mongo"), servers.private_port(0)
+KSRC, KDST = servers.name(servers.PREFIX + "-audb-kafka-src"), servers.name(servers.PREFIX + "-audb-kafka-dst")
+KSRC_PORT, KDST_PORT = servers.private_port(1), servers.private_port(2)
 
 
 def _mongosh(script, db="admin"):

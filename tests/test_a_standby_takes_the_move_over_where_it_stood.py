@@ -28,12 +28,13 @@ import time
 from pathlib import Path
 
 import pytest
+from tests import servers
 
 pytestmark = [pytest.mark.docker]
 
 ROOT = Path(__file__).resolve().parent.parent
-SRC, SRC_PORT = "migkit-test-w1-ha-src", 16427
-DST, DST_PORT = "migkit-test-w1-ha-dst", 16428
+SRC, SRC_PORT = servers.name(servers.PREFIX + "-w1-ha-src"), servers.private_port(0)
+DST, DST_PORT = servers.name(servers.PREFIX + "-w1-ha-dst"), servers.private_port(1)
 TERM = "4"
 
 

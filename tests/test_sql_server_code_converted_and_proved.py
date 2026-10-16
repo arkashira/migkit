@@ -18,15 +18,16 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers as lanes
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("schema.routines", "mssql")]
 
 pytestmark = [pytest.mark.docker]
 
-MS, SB_MS = "migkit-test-code-ms", "migkit-test-code-sbms"
-PG, SB_PG = "migkit-test-code-pg", "migkit-test-code-sbpg"
-MS_PORT, SB_MS_PORT, PG_PORT, SB_PG_PORT = 16087, 16088, 16081, 16083
+MS, SB_MS = lanes.name(lanes.PREFIX + "-code-ms"), lanes.name(lanes.PREFIX + "-code-sbms")
+PG, SB_PG = lanes.name(lanes.PREFIX + "-code-pg"), lanes.name(lanes.PREFIX + "-code-sbpg")
+MS_PORT, SB_MS_PORT, PG_PORT, SB_PG_PORT = lanes.private_port(0), lanes.private_port(1), lanes.private_port(2), lanes.private_port(3)
 PASSWORD = "Mk1!CHANGE_ME_test"
 EDGE = "mcr.microsoft.com/azure-sql-edge:latest"
 

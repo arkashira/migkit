@@ -23,6 +23,7 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers
 
 
 def _hop(tmp_path, port=1):
@@ -91,7 +92,7 @@ def _docker():
 @pytest.mark.parametrize("gtid", [True, False])
 def test_the_source_is_asked_not_assumed(tmp_path, gtid):
     from migkit import movers
-    name, port = "migkit-test-gtidq", 15694
+    name, port = servers.name(servers.PREFIX + "-gtidq"), servers.private_port(0)
     subprocess.run(["docker", "rm", "-f", "-v", name], capture_output=True)
     args = ["--gtid-mode=ON", "--enforce-gtid-consistency=ON"] if gtid else []
     subprocess.run(["docker", "run", "-d", "--name", name, "-e",

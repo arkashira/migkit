@@ -18,6 +18,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
+from tests import servers
 
 PROVES = [
     ("move.table-copy", ("firestore", "datastore")),
@@ -29,8 +30,8 @@ PROVES = [
 pytestmark = needs_docker
 
 IMAGE = "gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators"
-NATIVE, NATIVE_PORT = "migkit-test-firestore", 16452
-DSMODE, DSMODE_PORT = "migkit-test-datastore", 16453
+NATIVE, NATIVE_PORT = servers.name(servers.PREFIX + "-firestore"), servers.private_port(0)
+DSMODE, DSMODE_PORT = servers.name(servers.PREFIX + "-datastore"), servers.private_port(1)
 UTC = datetime.timezone.utc
 
 

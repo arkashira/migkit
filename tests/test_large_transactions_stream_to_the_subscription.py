@@ -15,6 +15,7 @@ import pytest
 from migkit.config import Endpoint, Hop
 from migkit.engines.postgres import PostgresEngine
 from tests.conftest import psql
+from tests import servers
 
 
 def _engine(src=55432, dst=55433):
@@ -71,7 +72,7 @@ def test_a_large_transaction_is_streamed_not_spilled(pg_pair):
     ip = subprocess.run(["docker", "inspect", "-f",
                          "{{range .NetworkSettings.Networks}}"
                          "{{.IPAddress}}{{end}}",
-                         "migkit-test-pg-src"],
+                         servers.name(servers.PREFIX + "-pg-src")],
                         capture_output=True, text=True).stdout.strip()
     assert ip, "the source container has no bridge address"
     name = eng._repl_name()
