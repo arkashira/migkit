@@ -3762,51 +3762,58 @@ def redis_seed(facts):
              footprint=1)), f)
 
 
-# --- move health: a range whose server session went quiet -------------------
-
-def range_stall(facts):
-    """The `Choice` for a range of a move whose recorded server session was
-    read (`attempts.Monitor.unit_health`, backlog P0-ETA-ALL move health):
-    replay it from its checkpoint where the server no longer lists the
-    session (its one statement's transaction is gone with it, so nothing
-    of it is uncertain); close exactly that session and replay where the
-    server lists it idle past the keepalive observed on a connection here,
-    and it is the hop's account's; else wait - no fixed timeout, only what
-    was read. `facts`: `listed` (True, False, or None where the server's
-    view could not be read), `state`, `idle_seconds` the server counts,
-    `keepalive` (`attempts.keepalive_seconds`, None where not observed),
-    `owned`, `open` (the unit has not closed)."""
+def phase_order(facts):
+    """The `Choice` of the order of one database's phases
+    (P0-WORKFLOW-DEPTH.model): the schema whole before the copy, or the
+    tables first and the keys and constraints after the rows. Read from
+    the dependencies and the engines' semantics: `fk cycle` (True where
+    the foreign keys close a cycle - no table order loads them in place,
+    None where not read), `target keys` (the target enforces foreign keys
+    at all). A cycle not read is not taken as none: the order that holds
+    in either case is taken."""
     f = facts if isinstance(facts, Facts) else Facts(facts)
-    idle = float(f.get("idle_seconds") or 0.0)
-    keep = f.get("keepalive")
-    listed = f.get("listed")
-    seen = ("the server's view of the session could not be read"
-            if listed is None else "the server lists the session"
-            if listed else "the server no longer lists the session")
-    said = (f"{seen}, {f.get('state') or 'no state'}, idle {idle:.1f}s"
-            + (f" against a {float(keep):.1f}s keepalive observed"
-               if keep is not None else ", no keepalive observed"))
-    still = Need("the unit still open", lambda f: f.get("open"),
-                 "the unit has closed: nothing is owed")
-    rungs = (
-        Rung("replay", "replay the range from its checkpoint", needs=(
-            still, Need("a session the server no longer lists",
-                        lambda f: f.get("listed") is False,
-                        f"not gone: {said}")),
-             because=said),
-        Rung("close", "close that session only, then replay the range",
-             footprint=1, needs=(
-                 still,
-                 Need("an idle session", lambda f: f.get("listed") is True
-                      and f.get("state") == "idle",
-                      f"not idle: {said}"),
-                 Need("idle past the keepalive observed",
-                      lambda f: f.get("keepalive") is not None and idle
-                      > float(f["keepalive"]),
-                      f"not idle long enough: {said}"),
-                 Need("the session owned", lambda f: f.get("owned"),
-                      f"the session is not the hop's account's: {said}")),
-             because=said),
-        Rung("wait", "wait on the range", because=said))
-    return climb("a range whose session was read", rungs, f)
+    return climb("the order of the phases", (
+        Rung("schema-whole", "the schema whole, its keys and constraints"
+             " with it, before the copy", needs=(
+                 Need("no cycle of foreign keys",
+                      lambda f: f.get("fk cycle") is False
+                      or f.get("target keys") is False,
+                      lambda f: "the foreign keys were not read, so a cycle"
+                      " among them is not ruled out"
+                      if f.get("fk cycle") is None else
+                      "the foreign keys close a cycle, which no order of"
+                      " tables loads with them in place"),),
+             because="every table lands with its constraints already"
+                     " checking it, and nothing is added after the rows"),
+        Rung("constraints-after", "the tables first, the copy, then the keys"
+             " and constraints", footprint=1,
+             because="the rows land in any order and the constraints are"
+                     " checked whole once they are in")), f)
 
+
+def phase_step(facts):
+    """The `Choice` of what one phase of a workflow does now: enter it
+    (`every prerequisite done`, `entry holds`), stay blocked behind a
+    prerequisite that failed (`prerequisite failed` - its words), or wait
+    for one still owed. Read at every transition, never a fixed order."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+    return climb("the next transition of a phase", (
+        Rung("enter", "entered", needs=(
+            Need("every prerequisite done",
+                 lambda f: not f.get("prerequisites owed"),
+                 lambda f: "it waits for " + str(f.get("prerequisites owed"))),
+            Need("its entry criteria",
+                 lambda f: not f.get("entry unmet"),
+                 lambda f: "its entry criteria do not hold: "
+                 + str(f.get("entry unmet")))),
+             because="what it needs is done and its entry criteria hold"),
+        Rung("blocked", "blocked", needs=(
+            Need("a prerequisite that failed, or entry criteria that do"
+                 " not hold with nothing left to wait for",
+                 lambda f: bool(f.get("prerequisite failed")) or bool(
+                     f.get("entry unmet")
+                     and not f.get("prerequisites owed"))),),
+             because="a phase it needs failed, so what that phase owed it"
+                     " is missing"),
+        Rung("wait", "waits", footprint=1,
+             because="a phase it needs is not done yet")), f)

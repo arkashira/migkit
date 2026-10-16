@@ -49,13 +49,140 @@ FLOWS = {
 }
 GOALS = tuple(FLOWS)
 #: what each step does, in an operator's words
-STEP_SAID = {"assess": "assessment", "move": "copy", "follow": "catch-up",
+STEP_SAID = {"assess": "assessment", "schema": "schema", "move": "copy",
+             "constraints": "keys and constraints", "follow": "catch-up",
              "verify": "proof", "ready": "cutover readiness"}
 #: a move step for the goal: a sync and a cutover keep the stream running
 MOVE_MODE = {"copy": "full", "sync": "full+cdc", "cutover": "full+cdc"}
 
 INTENT, ACCESS, BUSINESS, AUTHORIZE = ("intent", "access",
                                        "business choice", "authorization")
+
+# --- each phase's contract (P0-WORKFLOW-DEPTH.model) -------------------------
+# A phase of the flow is a `planner.Phase` with its contract: what it leaves
+# true, the evidence a done one leaves in `workflow.json`, the evidence each
+# phase it waits on must have left (its entry criteria), and what its own
+# result must show to count as done (its exit criteria).
+
+#: step -> (outcome, evidence a done one leaves, exit criteria on
+#: {"result": what the step returned})
+CONTRACTS = {
+    "assess": ("every check of the hop and of each database read, and what"
+               " fails said with the database it holds apart",
+               ("the hop's checks read", "each database's checks read"),
+               (("the checks answered for each database",
+                 lambda f: isinstance(f.get("result"), list)),)),
+    "schema": ("the target's tables made as the order chosen says",
+               ("the target's schema applied",),
+               (("the schema step did not refuse",
+                 lambda f: f.get("result") is not False),)),
+    "move": ("every table in scope copied, each unit closed in the ledger",
+             ("every table's rows landed", "each unit closed in the ledger"),
+             (("the copy did not refuse",
+               lambda f: f.get("result") is not False),)),
+    "constraints": ("the keys and constraints made on the rows, checked"
+                    " whole", ("the keys and constraints in place",),
+                    (("the constraints step did not refuse",
+                      lambda f: f.get("result") is not False),)),
+    "follow": ("the target caught up with the source's changes",
+               ("the stream caught up",),
+               (("the stream says it caught up",
+                 lambda f: f.get("result") is True),)),
+    "verify": ("the target proved equal to the source after its one repair",
+               ("the verdict of the comparison",),
+               (("the verdict is equal",
+                 lambda f: f.get("result") in ("equal", "pass")),)),
+    "ready": ("the cutover's readiness read, every check passing",
+              ("the cutover's readiness read",),
+              (("every readiness check passes",
+                lambda f: f.get("result") is True),)),
+}
+#: the steps the flow composes only where the steps offered do them
+OWN_STEPS = ("schema", "constraints")
+
+
+def _said(key):
+    step, _, db = key.partition(":")
+    return STEP_SAID[step] + (f" of {db}" if db else "")
+
+
+def _entry(key, ev):
+    """The entry criteria of waiting on `key`: each evidence it left."""
+    return tuple((f"{e} by the {_said(key)}",
+                  lambda f, k=key, e=e: e in (f.get("evidence", {}).get(k)
+                                              or ()))
+                 for e in ev)
+
+
+def compose(goal, dbs, can=(), facts=None):
+    """(the order chosen for each database, [planner.Phase]) of `goal`'s
+    flow over `dbs`, each phase with its contract. The order is the one
+    decision engine's (`decide.phase_order`) from what each database's
+    `facts` say of its dependencies and the engines; a schema and a
+    constraints phase are composed where the steps offered (`can`) do
+    them, and the copy carries them where not. A phase waits on the one
+    before it and names the evidence it needs of it; another database's
+    phases are independent of it and go on while it fails."""
+    from .planner import Phase
+    if goal not in FLOWS:
+        raise SystemExit(f"goal {goal}: one of {', '.join(GOALS)}")
+    choices = {}
+    root = Phase(STEP_SAID["assess"], step="assess",
+                 outcome=CONTRACTS["assess"][0], scope=tuple(dbs) or ("",),
+                 root=True, evidence=CONTRACTS["assess"][1],
+                 entry=(("the hop's databases are listed",
+                         lambda f: f.get("dbs") is not None),),
+                 exit=CONTRACTS["assess"][2],
+                 independent=tuple(f"each check of {d}" for d in dbs))
+    out = [root]
+    for d in dbs:
+        c = decide.phase_order((facts or {}).get(d) or {})
+        choices[d] = c
+        seq = ["schema"] if "schema" in can else []
+        seq.append("move")
+        if c.path == "constraints-after" and "constraints" in can:
+            seq.append("constraints")
+        seq += [s for s in FLOWS[goal][1] if s != "move"]
+        before, others = root, [o for o in dbs if o != d]
+        for step in seq:
+            outcome_, ev, exit_ = CONTRACTS[step]
+            if step == "move" and "schema" not in can:
+                outcome_ += ("; the schema made by the copy, its keys and"
+                             " constraints " + (
+                                 "after the rows" if c.path ==
+                                 "constraints-after" else
+                                 "with each table before its rows"))
+            ph = Phase(STEP_SAID[step], step=step, db=d, outcome=outcome_,
+                       scope=(d,), evidence=ev,
+                       prerequisites=((before.key, before.evidence),),
+                       entry=_entry(before.key, before.evidence),
+                       exit=exit_,
+                       independent=tuple(f"every phase of {o}"
+                                         for o in others))
+            out.append(ph)
+            before = ph
+    return choices, out
+
+
+def gaps(src, dst):
+    """[(engine, side, kind, name, state, why)]: what the pair `src` ->
+    `dst` lacks, read off the code (`decide.still_lacking`) - each shape,
+    capability and depth item one of the two engines has no way for, or
+    no proof of, with the engine that lacks it and the backlog row it
+    waits on (P0-DECISION-ALL.engines). The flow says these before any
+    costly step; nothing the pair lacks is skipped silently."""
+    sides = ((src, "source and target"),) if src == dst else (
+        (src, "source"), (dst, "target"))
+    return [(eng, side, kind, name, state, why)
+            for eng, side in sides
+            for kind, name, state, why in decide.still_lacking(eng)[eng]]
+
+
+def gap_lines(src, dst):
+    """Each of `gaps`' rows in an operator's words."""
+    return [f"{eng} ({side}) lacks the {kind} {name}: {state}"
+            + (f" - {why}" if why else "")
+            for eng, side, kind, name, state, why in gaps(src, dst)]
 
 
 @dataclass(frozen=True)
@@ -155,8 +282,12 @@ class Unit:
                 "took": round(self.took, 3), "at": self.at}
 
 
-def units(goal, dbs):
-    """The units a goal's flow is made of, each with what it waits for."""
+def units(goal, dbs, phases=None):
+    """The units a goal's flow is made of, each with what it waits for:
+    one a phase of `phases` (`compose`) where given."""
+    if phases is not None:
+        return [Unit(p.step, p.db, tuple(k for k, _ in p.prerequisites))
+                for p in phases]
     out = [Unit("assess")]
     for d in dbs:
         before = ("assess",)
@@ -174,6 +305,10 @@ class Workflow:
     units: list
     path: Path = None
     decisions: list = field(default_factory=list)
+    #: key -> its `planner.Phase` (the contract), where composed
+    phases: dict = field(default_factory=dict)
+    #: key -> the evidence its phase left when it was done
+    evidence: dict = field(default_factory=dict)
 
     def by_key(self):
         return {u.key: u for u in self.units}
@@ -181,24 +316,38 @@ class Workflow:
     def save(self):
         if self.path is None:
             return
+        for u in self.units:
+            if u.key in self.phases:
+                self.phases[u.key].state = PHASE_OF[u.state]
         durable.write_json(self.path, {
             "goal": self.goal,
             "units": {u.key: u.row() for u in self.units},
+            "phases": {k: p.row() for k, p in self.phases.items()},
+            "evidence": self.evidence,
             "decisions": self.decisions[-500:]}, indent=1)
 
     @classmethod
-    def load(cls, path, goal, dbs):
-        """The flow, with what an earlier run of the same goal finished."""
-        wf = cls(goal, units(goal, dbs), Path(path) if path else None)
+    def load(cls, path, goal, dbs, phases=None):
+        """The flow, with what an earlier run of the same goal finished; a
+        unit it left running is failed-unknown - what it did is reconciled
+        before it runs again (`run`)."""
+        wf = cls(goal, units(goal, dbs, phases), Path(path) if path else None,
+                 phases={p.key: p for p in phases or ()})
         kept = durable.read_state(path, "state") if path else None
         if not kept or kept.get("goal") != goal:
             return wf
         rows = kept.get("units") or {}
+        ev = kept.get("evidence") or {}
         for u in wf.units:
             r = rows.get(u.key)
             if r and r.get("state") == "done":
                 u.state, u.way = "done", r.get("way", "")
                 u.took, u.at = float(r.get("took") or 0), r.get("at") or 0
+                if u.key in ev:
+                    wf.evidence[u.key] = list(ev[u.key])
+            elif r and r.get("state") in ("running", "failed-unknown"):
+                u.state = "failed-unknown"
+                u.why = "a run before stopped while it ran"
         wf.decisions = list(kept.get("decisions") or [])
         return wf
 
@@ -229,6 +378,13 @@ class Workflow:
                "at": time.time(), **more}
         self.decisions.append(got)
         return got
+
+
+#: a unit's state -> its phase's durable state (`planner.PHASE_STATES`): a
+#: held unit waits on a phase that did not finish, so it is blocked
+PHASE_OF = {"pending": "not-started", "running": "running", "done": "done",
+            "failed": "failed", "held": "blocked", "asked": "blocked",
+            "failed-unknown": "failed-unknown"}
 
 
 #: the bounds of the wait before a unit is tried again from its position
@@ -434,11 +590,45 @@ def run(goal, ops, say, path=None, wait=time.sleep, now=time.time,
     has them, `eta(kind, db)` -> seconds left, `reconcile(db)` and
     `switch(db)`. A cutover proved ready proposes the switch (`switch`):
     `answer(question, default)` says yes or no, `go` is the yes given up
-    front; with neither it is asked, never done."""
+    front; with neither it is asked, never done.
+
+    Where `ops` has them: `pair()` -> (source engine, target engine), whose
+    gaps (`gaps`) are said before any step; `order(db)` -> the facts the
+    order of its phases is chosen from (`decide.phase_order`); `schema(db)`
+    and `constraints(db)`, phases of their own (`compose`); `eng`, whose
+    ledger's units a run before left open are closed as cut off
+    (`attempts.reconcile_units`) before a unit it left running is run
+    again. Each phase enters, waits or is blocked as `decide.phase_step`
+    chooses from its prerequisites and entry criteria, and counts as done
+    only where its exit criteria hold; the evidence it leaves is kept."""
     if goal not in FLOWS:
         raise SystemExit(f"goal {goal}: one of {', '.join(GOALS)}")
     dbs = list(ops.dbs())
-    wf = Workflow.load(path, goal, dbs)
+    pair = ops.pair() if callable(getattr(ops, "pair", None)) else None
+    told = gap_lines(*pair) if pair else []
+    for line in told:
+        say(line)
+    order = getattr(ops, "order", None)
+    choices, phases = compose(
+        goal, dbs, [s for s in OWN_STEPS if callable(getattr(ops, s, None))],
+        {d: order(d) for d in dbs} if callable(order) else None)
+    wf = Workflow.load(path, goal, dbs, phases)
+    hop = Unit("assess")
+    if told:
+        wf.decided(hop, "gaps", f"{len(told)} things the pair lacks said"
+                   " before any step", gaps=told)
+    for d, c in choices.items():
+        wf.decided(hop, "order", f"{d}: {c.said} - {c.reason}", c.path)
+    unknown = [u for u in wf.units if u.state == "failed-unknown"]
+    if unknown:
+        from . import attempts
+        cut = attempts.reconcile_units(getattr(ops, "eng", None))
+        for u in unknown:
+            wf.decided(u, "reconciled", "a run before stopped while it ran;"
+                       " its open units closed as cut off before it runs"
+                       " again", cut=list(cut or ()))
+        say(f"{len(unknown)} step(s) a run before left running: reconciled"
+            f" ({len(cut or ())} open unit(s) closed) before they run again")
     owed = wf.again()
     keys = wf.by_key()
     total = len(wf.units)
@@ -451,19 +641,21 @@ def run(goal, ops, say, path=None, wait=time.sleep, now=time.time,
         if u is None:
             break
         seen.add(u.key)
-        stuck = [keys[k] for k in u.after if keys[k].state != "done"]
-        if stuck:
+        now_ = _transition(u, wf, keys, dbs)
+        if now_.path != "enter":
             u.state = "held"
-            u.why = (f"waits for the {STEP_SAID[stuck[0].step]}"
-                     + (f" of {stuck[0].db}" if stuck[0].db else ""))
-            wf.decided(u, "held", u.why)
+            u.why = now_.reason
+            wf.decided(u, "held", u.why, now_.path)
             continue
         if u.db in apart and u.step == "move":
             u.state, u.why = "failed", f"the assessment: {apart[u.db]}"
             wf.decided(u, "failed", u.why)
             say(f"{u.db}: {u.why}; the rest goes on without it")
         else:
+            u.state = "running"
+            wf.save()
             got = _unit(u, wf, ops, say, wait, now, plan)
+            _exited(u, wf, got, say)
             if u.step == "assess" and u.state == "done":
                 # what fails for one database isolates that one only
                 apart.update((d, why) for d, why in got or () if d)
@@ -474,6 +666,52 @@ def run(goal, ops, say, path=None, wait=time.sleep, now=time.time,
     switch = propose_switch(wf, ops, dbs, say, answer, go)
     wf.save()
     return Outcome(wf, outcome(wf, dbs), switch)
+
+
+def _transition(u, wf, keys, dbs):
+    """`decide.phase_step`'s choice for `u` now, from what its phase waits
+    on: a prerequisite that failed blocks it with the evidence missing, one
+    still owed holds it, entry criteria that fail stop it."""
+    ph = wf.phases.get(u.key)
+    owed = [keys[k] for k in u.after if keys[k].state != "done"]
+    bad = [x for x in owed if x.state != "pending"]
+    facts = {"prerequisites owed": ", ".join(_said(x.key) for x in owed)}
+    if bad:
+        x = bad[0]
+        lack = dict(ph.missing(wf.evidence)).get(x.key) if ph else None
+        facts["prerequisite failed"] = (
+            f"the {_said(x.key)}, which "
+            + ("failed" if x.state in ("failed", "failed-unknown") else
+               "did not finish") + (f" ({x.why})" if x.why else "")
+            + (f", so {', '.join(lack)} is missing" if lack else ""))
+    if ph and not owed:
+        unmet = ph.unmet({"evidence": wf.evidence, "dbs": dbs})
+        facts["entry unmet"] = "; ".join(unmet)
+    from dataclasses import replace
+    got = decide.phase_step(facts)
+    if got.path == "blocked" and facts.get("prerequisite failed"):
+        return replace(got, reason=f"blocked: {facts['prerequisite failed']};"
+                       " it runs once that is put right and the flow is run"
+                       " again")
+    if got.path == "wait" and owed:
+        return replace(got, reason=f"waits for the {_said(owed[0].key)}")
+    return got
+
+
+def _exited(u, wf, got, say):
+    """A done unit counts as done only where its phase's exit criteria hold
+    on what it returned; then the evidence it leaves is kept."""
+    ph = wf.phases.get(u.key)
+    if u.state != "done" or ph is None:
+        return
+    unmet = ph.unmet({"result": got}, "exit")
+    if unmet:
+        u.state, u.way = "failed", ""
+        u.why = "its exit criteria do not hold: " + "; ".join(unmet)
+        wf.decided(u, "failed", u.why)
+        say(f"{_said(u.key)}: {u.why}; the rest goes on without it")
+        return
+    wf.evidence[u.key] = list(ph.evidence)
 
 
 def _progress(wf, ops, total):
@@ -753,6 +991,8 @@ def _step(u, ops, chunk, workers=None):
         return bad
     if u.step == "move":
         return ops.move(u.db, chunk, workers)
+    if u.step in OWN_STEPS:
+        return getattr(ops, u.step)(u.db)
     if u.step == "follow":
         if ops.follow(u.db) is False:
             raise TimeoutError(f"the stream of {u.db} has not caught up")

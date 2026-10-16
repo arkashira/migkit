@@ -465,6 +465,62 @@ class Phase:
     truth: str = ""             #: where its rate came from
     detail: str = ""
     never: bool = False         #: a catch-up that cannot finish
+    # -- its contract, as a phase of a workflow (P0-WORKFLOW-DEPTH.model);
+    # a phase of the time forecast alone leaves these empty
+    step: str = ""              #: the workflow's step (`autonomous.STEP_SAID`)
+    db: str = ""                #: the database, "" for the hop's own
+    outcome: str = ""           #: what it leaves true, in an operator's words
+    scope: tuple = ()           #: the databases (or tables) it covers
+    #: ((phase key, (evidence it must have left, ...)), ...)
+    prerequisites: tuple = ()
+    #: True for the first phase: it waits on nothing, by declaration
+    root: bool = False
+    #: the checks that go on while this phase fails (other databases',
+    #: other checks') - what does not wait on it
+    independent: tuple = ()
+    #: what a done phase leaves in the workflow's evidence
+    evidence: tuple = ()
+    #: ((said, facts -> bool), ...) on the evidence before it starts and
+    #: after it ends
+    entry: tuple = ()
+    exit: tuple = ()
+    state: str = "not-started"  #: one of `PHASE_STATES`
+
+    @property
+    def key(self):
+        return f"{self.step}:{self.db}" if self.db else self.step
+
+    def hollow(self):
+        """The parts of its contract it leaves empty, by name: a phase of
+        a workflow declares every one, and a prerequisite names the
+        evidence it waits on."""
+        out = [n for n in ("outcome", "scope", "evidence", "entry", "exit")
+               if not getattr(self, n)]
+        if not self.prerequisites and not self.root:
+            out.append("prerequisites")
+        out += [f"evidence of {k}" for k, ev in self.prerequisites if not ev]
+        out += [f"{n} {said!r} is no predicate" for n in ("entry", "exit")
+                for said, test in getattr(self, n) if not callable(test)]
+        return out
+
+    def unmet(self, facts, which="entry"):
+        """The words of each `entry` (or `exit`) criterion `facts` fail."""
+        return [said for said, test in getattr(self, which)
+                if not test(facts)]
+
+    def missing(self, have):
+        """((prerequisite key, [evidence it did not leave]), ...) against
+        `have` ({phase key: evidence left})."""
+        return tuple((k, [e for e in ev if e not in (have.get(k) or ())])
+                     for k, ev in self.prerequisites
+                     if any(e not in (have.get(k) or ()) for e in ev))
+
+    def row(self):
+        return {"state": self.state, "outcome": self.outcome,
+                "scope": list(self.scope), "evidence": list(self.evidence),
+                "prerequisites": {k: list(ev)
+                                  for k, ev in self.prerequisites},
+                "independent": list(self.independent)}
 
     def line(self):
         if self.never:
@@ -477,6 +533,12 @@ class Phase:
                 + (f", set by {self.binds}" if self.binds else "")
                 + (f" ({self.truth})" if self.truth else "")
                 + (f"; {self.detail}" if self.detail else ""))
+
+
+#: the durable states of a workflow's phase: failed-unknown is one a run
+#: left running when it stopped - what it did is reconciled before replay
+PHASE_STATES = ("not-started", "running", "done", "failed", "blocked",
+                "failed-unknown")
 
 
 def _time_said(secs):
