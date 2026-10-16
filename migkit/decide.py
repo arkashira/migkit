@@ -3817,3 +3817,49 @@ def phase_step(facts):
                      " is missing"),
         Rung("wait", "waits", footprint=1,
              because="a phase it needs is not done yet")), f)
+
+def range_stall(facts):
+    """The `Choice` for a range of a move whose recorded server session was
+    read (`attempts.Monitor.unit_health`, backlog P0-ETA-ALL move health):
+    replay it from its checkpoint where the server no longer lists the
+    session (its one statement's transaction is gone with it, so nothing
+    of it is uncertain); close exactly that session and replay where the
+    server lists it idle past the keepalive observed on a connection here,
+    and it is the hop's account's; else wait - no fixed timeout, only what
+    was read. `facts`: `listed` (True, False, or None where the server's
+    view could not be read), `state`, `idle_seconds` the server counts,
+    `keepalive` (`attempts.keepalive_seconds`, None where not observed),
+    `owned`, `open` (the unit has not closed)."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+    idle = float(f.get("idle_seconds") or 0.0)
+    keep = f.get("keepalive")
+    listed = f.get("listed")
+    seen = ("the server's view of the session could not be read"
+            if listed is None else "the server lists the session"
+            if listed else "the server no longer lists the session")
+    said = (f"{seen}, {f.get('state') or 'no state'}, idle {idle:.1f}s"
+            + (f" against a {float(keep):.1f}s keepalive observed"
+               if keep is not None else ", no keepalive observed"))
+    still = Need("the unit still open", lambda f: f.get("open"),
+                 "the unit has closed: nothing is owed")
+    rungs = (
+        Rung("replay", "replay the range from its checkpoint", needs=(
+            still, Need("a session the server no longer lists",
+                        lambda f: f.get("listed") is False,
+                        f"not gone: {said}")),
+             because=said),
+        Rung("close", "close that session only, then replay the range",
+             footprint=1, needs=(
+                 still,
+                 Need("an idle session", lambda f: f.get("listed") is True
+                      and f.get("state") == "idle",
+                      f"not idle: {said}"),
+                 Need("idle past the keepalive observed",
+                      lambda f: f.get("keepalive") is not None and idle
+                      > float(f["keepalive"]),
+                      f"not idle long enough: {said}"),
+                 Need("the session owned", lambda f: f.get("owned"),
+                      f"the session is not the hop's account's: {said}")),
+             because=said),
+        Rung("wait", "wait on the range", because=said))
+    return climb("a range whose session was read", rungs, f)
