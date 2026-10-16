@@ -543,10 +543,74 @@ each offers:
 * `0f.reindex-from-snapshot.bulk-size` (unused): documents per bulk request would strengthen bulk sizing from the target's measured refusals (apply ladder).
 * `0f.dynamodb-s3.incremental-export` (unused): an incremental export between two times would strengthen DynamoDB catch-up after the copy (stream ladder).
 * `0f.dynamodb-s3.bucket-owner` (unused): a bucket of another account would strengthen cross-account DynamoDB export (snapshot ladder).
+* `0f.ast-grep-py.pattern-search` (unused): match a pattern with metavariables across a tree would strengthen stored-code reading (statement ladder).
+* `0f.aws-sdk.copy-snapshot` (unused): copy a snapshot to another account or region before it is restored there would strengthen snapshot ladder (a snapshot copied to the target account).
+* `0f.azure-sdk.restart-export-restore-point` (unused): restart a flexible server, export a cache, take a SQL restore point before a cutover, put a backup would strengthen snapshot ladder (a restore point taken on the source before a cutover).
+* `0f.boto3-s3.io-tuning` (unused): I/O chunk size, queue depth, bandwidth cap and transfer client choice would strengthen transfer tuning on a measured link (bulk ladder).
+* `0f.couchbase.query-and-sampling` (unused): query service, prefix and sampling scans, consistency with a mutation token, document mutation in place would strengthen sampled and prefix scans of a keyed source (verify ladder).
+* `0f.deltalake.change-data` (unused): the change data feed of the table would strengthen change-feed reading of a lake target (stream ladder).
+* `0f.google-api-client.restarts-exports` (unused): restart and restore instances, export documents and copy a Spanner backup would strengthen export of a document store before a cutover (snapshot ladder).
+* `0f.google-cloud-bigquery.copy-insert-json` (unused): copy a table, insert rows and load from JSON would strengthen load of a warehouse target from a file or copy (bulk ladder).
+* `0f.google-cloud-bigquery-storage.pending-default` (unused): pending and default write streams, and the change type would strengthen pending-stream write of a warehouse target (bulk ladder).
+* `0f.google-cloud-bigtable.query-batch` (unused): a SQL query, a batched mutation and a read-modify-write would strengthen batched writes of a wide-row target (bulk ladder).
+* `0f.google-cloud-datastore.transaction` (unused): a transaction around a read and write would strengthen transactional write of a document target (bulk ladder).
+* `0f.google-cloud-firestore.batch-delete-read-time` (unused): a batch, a recursive delete and a read at a time would strengthen recursive removal of a document target (bulk ladder).
+* `0f.google-cloud-spanner.dml-groups` (partly used): partitioned DML, mutation groups, a transaction runner and the DB-API would strengthen partitioned DML for a bulk change on a large table (bulk ladder).
+* `0f.gremlinpython.submit-merge` (unused): submit a script directly and merge vertices would strengthen merge of graph vertices on a graph target (bulk ladder).
+* `0f.huaweicloud-sdk.in-place-restore-restart` (unused): restore onto an existing instance, restart it, update an entity configuration would strengthen restore onto an existing target instance (snapshot ladder).
+* `0f.ibm-cloud-sdk-core.restore-deployment` (unused): restore a deployment from a backup would strengthen restore of a managed deployment target (snapshot ladder).
+* `0f.ibmi-odbc.fetch-tuning` (unused): block fetch size, block size and compression would strengthen block fetch on a wide read of an IBM i source (verify ladder).
+* `0f.initdb.wal-and-options` (unused): a separate WAL directory, the WAL segment size and settings applied at creation would strengthen a target cluster with its WAL on its own volume (bulk ladder).
+* `0f.jinja2.sandbox` (unused): a sandboxed environment for untrusted templates would strengthen a template that a customer may write (operator notice).
+* `0f.mapepire.query-auto-close` (unused): a query that closes its cursor when read would strengthen cursor close on a large read of an IBM i source (verify ladder).
+* `0f.neptunedata.gremlin` (unused): run a Gremlin query would strengthen Gremlin reading of a graph source (verify ladder).
+* `0f.oci-sdk.restart-restore` (unused): restore an autonomous database and restart it or a MySQL system would strengthen restore of a managed database target (snapshot ladder).
+* `0f.ora2pg.estimate-cost` (partly used): estimate the cost of the migration in days would strengthen migration effort estimate before a conversion (assess ladder).
+* `0f.pyiceberg.maintenance` (unused): add data files, expire snapshots and overwrite a partition dynamically would strengthen file adoption of an existing lake target (bulk ladder).
+* `0f.pyodata.batch-changes` (unused): batches, changesets and entity writes would strengthen batched writes to an OData target (bulk ladder).
+* `0f.pyrage.files` (unused): encrypt and decrypt files by path would strengthen encryption of a dump at rest (sealed evidence).
+* `0f.redshift_connector.dataframe-write` (unused): write a dataframe to a table would strengthen dataframe write to a warehouse target (bulk ladder).
+* `0f.salesforce-api.pubsub-publish` (unused): publish and managed subscriptions would strengthen event publishing of a change to a subscriber (stream ladder).
+* `0f.scim2-filter-parser.patch-paths` (unused): the paths a patch request names would strengthen provisioning patch of a user directory (access ladder).
+* `0f.singer-tap.batch` (partly used): records in batches would strengthen batch reading of a SaaS source (stream ladder).
+* `0f.snowflake-connector-python.hash-agg` (unused): a hash aggregate of the rows in SQL would strengthen order-free row-set hash on a warehouse target (verify ladder).
+* `0f.snowpipe-streaming.elastic-channel` (unused): an elastic channel for the client would strengthen streaming ingest with elastic channels (stream ladder).
+* `0f.tencentcloud-sdk.restores-restarts` (unused): restores and rollbacks to a new or an existing instance, and restarts would strengthen rollback of a managed target to a backup (snapshot ladder).
+* `0f.teradatasql.lob-values` (partly used): large objects and the values of the session would strengthen large values of a warehouse source (large values ladder).
+* `0f.teradatasql.fast-load-export` (partly used): fast load and fast export of the database would strengthen fast load of a warehouse target (bulk ladder).
+* `0f.timestream.scheduled-query` (unused): a scheduled query would strengthen scheduled reading of a time series target (verify ladder).
+* `0f.zstandard.threads` (unused): parallel compression threads would strengthen parallel compression of a dump stream (bulk ladder).
+* `0f.zstandard.dictionary` (unused): a trained dictionary for small records would strengthen dictionary compression of many small rows (bulk ladder).
+* `0f.atlas.schema-diff` (no account): diff two schemas and plan the change would strengthen schema comparison before a conversion (schema ladder).
+* `0f.bson.raw` (no account): raw BSON bytes without decoding would strengthen raw-BSON bucket digest of a document target (verify ladder).
+* `0f.clickhouse_connect.insert` (no account): insert rows or a dataframe in batches would strengthen batched insert to a columnar target (bulk ladder).
+* `0f.duckdb.copy` (no account): COPY a table to and from a file would strengthen local staging of a bulk copy (bulk ladder).
+* `0f.fastavro.block-codec` (no account): block compression codecs would strengthen compressed Avro staging of a bulk copy (bulk ladder).
+* `0f.ibm_db.lob` (no account): large objects read and written in parts would strengthen large values of a Db2 source (large values ladder).
+* `0f.kafka.partitions` (no account): assign partitions and seek to an offset would strengthen offset seek of a change-stream leg (stream ladder).
+* `0f.liquibase.diff` (no account): compare two databases and write the changes would strengthen schema comparison before a conversion (schema ladder).
+* `0f.lz4.level` (no account): a compression level would strengthen faster compression of a dump stream (bulk ladder).
+* `0f.mssql_py_core.bulk-copy` (no account): bulk copy of rows into a table would strengthen bulk insert into a SQL Server target (bulk ladder).
+* `0f.mysqldump.where-filter` (no account): dump only the rows a condition selects would strengthen row-range dump of a MySQL source (bulk ladder).
+* `0f.opensearchpy.bulk` (no account): bulk index actions would strengthen bulk indexing of a search target (bulk ladder).
+* `0f.psycopg.pipeline` (no account): pipeline mode for many statements would strengthen pipelined statements on a PostgreSQL target (bulk ladder).
+* `0f.psycopg2.logical-replication` (no account): the logical replication protocol would strengthen logical replication reading of a PostgreSQL source (stream ladder).
+* `0f.pyarrow.dataset` (no account): datasets over partitioned files would strengthen partitioned file reading of a lake target (bulk ladder).
+* `0f.pymongo.bulk` (no account): bulk write operations would strengthen bulk write to a document target (bulk ladder).
+* `0f.pymssql.bulk` (no account): bulk insert of rows would strengthen bulk insert into a SQL Server target (bulk ladder).
+* `0f.pymysql.load-local` (no account): LOAD DATA LOCAL from the client would strengthen local file load into a MySQL target (bulk ladder).
+* `0f.pymysqlreplication.resume` (no account): resume from a saved binlog file and position would strengthen resume of a MySQL change-stream leg (stream ladder).
+* `0f.pyodbc.fast-executemany` (no account): batched inserts with fast executemany would strengthen batched inserts through ODBC (bulk ladder).
+* `0f.requests.stream` (no account): stream a response body would strengthen streamed download of a large object (large values ladder).
+* `0f.sqlglot.schema-check` (no account): check the columns of a query against a schema would strengthen column check of a converted view (verify ladder).
+* `0f.pt-table-sync.chunk-size` (no account): sync in chunks by key range would strengthen repair of a differing key range (verify ladder).
+* `0f.z3.optimise` (no account): optimise a goal under the constraints would strengthen decision choice under constraints (decide ladder).
 * `0f.account.library`: 44 libraries are called with no tool-use account (each written option by option, as the others are): `airflow`, `bson`, `certifi`, `click`, `clickhouse_connect`, `confluent_kafka`, `croniter`, `cryptography`, `dagster`, `duckdb`, `ebcdic`, `fastavro`, `google_crc32c`, `grpc`, `hypothesis`, `ibm_db`, `ibm_db_dbi`, `kafka`, `keyring`, `lxml`, `lz4`, `mssql_py_core`, `mssql_python`, `numpy`, `opensearchpy`, `oracledb`, `packaging`, `pandas`, `pglast`, `psutil`, `psycopg`, `psycopg2`, `pyarrow`, `pymongo`, `pymssql`, `pymysql`, `pymysqlreplication`, `pyodbc`, `requests`, `results`, `rich`, `sqlglot`, `yaml`, `z3`.
 * `0f.account.program`: 7 programs are called with no tool-use account (each written option by option, as the others are): `atlas`, `liquibase`, `mysql`, `mysqldump`, `pt-table-sync`, `vacuumdb`, `vault`.
 
 <!-- whole-use:end -->
+
+*Not done (W13O, 2026-10-16): the registry holds no option for redpanda, so it is left out of the catalogue until its options are accounted in migkit/tooluse.py; the 51 libraries and programs in the unaccounted section have capabilities from their releases but no option-by-option account yet (each needs its entry in the registry).*
 
 **0. Choose per table, from measured facts, and combine.**
 

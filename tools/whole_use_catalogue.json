@@ -1,5 +1,5 @@
 {
-  "note": "Internal. What each wrapped tool can do, taken from its pinned release's documentation, set against the tool-use registry (migkit/tooluse.py). A capability names the registry options it covers as 'command option' (command empty for a program without subcommands); its state is computed, never written. 'candidate' marks a capability that would deepen the rung named in 'rung' and is worth a backlog row while it is unused.",
+  "note": "Internal. What each wrapped tool can do, taken from its pinned release's documentation, set against the tool-use registry (migkit/tooluse.py). A capability names the registry options it covers as 'command option' (command empty for a program without subcommands); its state is computed, never written. 'candidate' marks a capability that would deepen the rung named in 'rung' and is worth a backlog row while it is unused. 'unaccounted' holds the libraries and programs called with no tool-use account: capabilities from the pinned release and no options, so no state; each gets an account option by option once one exists.",
   "import_aliases": {
     "boto3": "aws-sdk", "botocore": "aws-sdk", "azure": "azure-sdk",
     "google": "google-api-client", "googleapiclient": "google-api-client",
@@ -174,6 +174,647 @@
         {"id": "incremental-export", "what": "an incremental export between two times", "covers": ["ExportTableToPointInTime IncrementalExportSpecification"], "candidate": true, "rung": "DynamoDB catch-up after the copy (stream ladder)"},
         {"id": "bucket-owner", "what": "a bucket of another account", "covers": ["ExportTableToPointInTime S3BucketOwner"], "candidate": true, "rung": "cross-account DynamoDB export (snapshot ladder)"}
       ]
-    }
+    },
+    "airbyte-connectors": {"release": "Airbyte connector protocol, connector image pin not in the build", "capabilities": [
+      {"id": "read", "what": "read a source as records, state and logs in one stream", "covers": ["read", "--config", "--catalog", "--state", "message RECORD", "message STATE"], "candidate": false},
+      {"id": "discover", "what": "discover the streams a source offers", "covers": ["discover", "message CATALOG"], "candidate": false},
+      {"id": "control", "what": "control and trace messages from the connector", "covers": ["message CONTROL", "message TRACE"], "candidate": false},
+      {"id": "check", "what": "a connection check before a read", "covers": ["check", "message CONNECTION_STATUS"], "candidate": false},
+      {"id": "spec", "what": "the settings schema a connector declares", "covers": ["spec", "message SPEC"], "candidate": false},
+      {"id": "log", "what": "log lines the connector writes", "covers": ["message LOG"], "candidate": false}
+    ]},
+    "alibabacloud-sdk": {"release": "alibabacloud-tea-openapi 0.4.6 with the service packages installed (rds, dds, polardb, kvstore)", "capabilities": [
+      {"id": "credential-chain", "what": "sign in through the usual provider chain: profile, role, token or static key", "covers": ["credentials CLIProfileCredentialsProvider", "credentials ProfileCredentialsProvider", "credentials EcsRamRoleCredentialsProvider", "credentials RamRoleArnCredentialsProvider", "credentials OIDCRoleArnCredentialsProvider", "credentials StaticAKCredentialsProvider", "credentials StaticSTSCredentialsProvider", "credentials URLCredentialsProvider"], "candidate": false},
+      {"id": "backups", "what": "create and list backups of the managed instances", "covers": ["rds CreateBackup", "rds DescribeBackups", "rds DescribeBackupTasks", "dds CreateBackup", "dds DescribeBackups", "kvstore CreateBackup", "kvstore DescribeBackups", "kvstore DescribeBackupTasks", "polardb CreateBackup", "polardb DescribeBackups", "polardbx CreateBackup", "polardbx DescribeBackupSetList"], "candidate": false},
+      {"id": "restore", "what": "rebuild an instance from a backup or clone it", "covers": ["dds RestoreDBInstance", "polardbx RestoreDBInstance", "rds CloneDBInstance"], "candidate": false},
+      {"id": "instances", "what": "create and describe instances, their attributes and network", "covers": ["dds CreateDBInstance", "dds DescribeDBInstances", "dds DescribeDBInstanceAttribute", "kvstore CreateInstance", "kvstore DescribeInstances", "kvstore DescribeInstanceAttribute", "polardb CreateDBCluster", "polardb DescribeDBClusters", "polardb DescribeDBClusterAttribute", "polardb DescribeDBClusterEndpoints", "polardbx DescribeDBInstances", "polardbx DescribeDBInstanceAttribute", "rds DescribeDBInstances", "rds DescribeDBInstanceAttribute", "rds DescribeDBInstanceNetInfo"], "candidate": false},
+      {"id": "parameters", "what": "read and change engine parameters", "covers": ["dds DescribeParameters", "dds ModifyParameters", "kvstore DescribeParameters", "kvstore ModifyInstanceConfig", "polardb DescribeDBClusterParameters", "polardb ModifyDBClusterParameters", "polardbx DescribeParameters", "polardbx ModifyParameter", "rds DescribeParameters", "rds DescribeParameterTemplates", "rds ModifyParameter"], "candidate": false},
+      {"id": "restart-recovery", "what": "restart a node or instance, and recover one in place", "covers": ["polardb RestartDBNode", "polardbx RestartDBInstance", "rds RecoveryDBInstance", "rds RestartDBInstance"], "candidate": false}
+    ]},
+    "apprise": {"release": "apprise 2.0.0", "capabilities": [
+      {"id": "notify", "what": "send a message to a receiver by its service address", "covers": ["instantiate", "notify", "service_name", "title"], "candidate": false},
+      {"id": "format", "what": "the body format and the kind of notice", "covers": ["AppriseAsset", "NotifyFormat", "NotifyType", "body_format"], "candidate": false},
+      {"id": "config-file", "what": "a file of receivers the library reads itself", "covers": ["AppriseConfig"], "candidate": false},
+      {"id": "tags", "what": "route an event to the receivers that carry its tag", "covers": ["tag"], "candidate": false},
+      {"id": "attachments", "what": "attach a file to a notice", "covers": ["attach"], "candidate": false},
+      {"id": "async", "what": "tell receivers at once, not one after another", "covers": ["async_notify"], "candidate": false},
+      {"id": "persistent-storage", "what": "what each receiver was last told, kept by the library", "covers": ["persistent storage"], "candidate": false}
+    ]},
+    "argon2-cffi": {"release": "argon2-cffi 25.1.0", "capabilities": [
+      {"id": "hash-and-verify", "what": "hash a secret and verify it against the hash", "covers": ["hash", "hasher", "verify"], "candidate": false},
+      {"id": "rehash", "what": "rehash a stored hash when its parameters are out of date", "covers": ["rehash"], "candidate": false},
+      {"id": "profiles", "what": "tuned cost profiles for the host", "covers": ["profiles"], "candidate": false},
+      {"id": "raw-hash", "what": "the hash without its encoded parameters", "covers": ["raw hashes"], "candidate": false}
+    ]},
+    "ast-grep-py": {"release": "ast-grep-py 0.45.3", "capabilities": [
+      {"id": "tree", "what": "parse a file and walk its nodes by kind, text and range", "covers": ["SgRoot", "root", "kind", "text", "range", "parent", "children", "ancestors", "is_named"], "candidate": false},
+      {"id": "pattern-search", "what": "match a pattern with metavariables across a tree", "covers": ["find", "find_all", "get_match", "get_multiple_matches", "matches", "has", "inside", "follows", "precedes"], "candidate": true, "rung": "stored-code reading (statement ladder)"},
+      {"id": "rewrite", "what": "rewrite a match into a fix and commit the edits", "covers": ["replace", "commit_edits", "get_transformed"], "candidate": false},
+      {"id": "siblings", "what": "step to neighbouring nodes and to named fields", "covers": ["next", "next_all", "prev", "prev_all", "named_children", "field", "field_children", "child", "is_leaf", "is_named_leaf", "get_root"], "candidate": false},
+      {"id": "dynamic-language", "what": "register a grammar at run time", "covers": ["register_dynamic_language"], "candidate": false}
+    ]},
+    "authlib": {"release": "authlib 1.8.0", "capabilities": [
+      {"id": "sign-in", "what": "authorization URL and code exchange for a signed-in person", "covers": ["OAuth2Session", "authorization URL", "code exchange"], "candidate": false},
+      {"id": "pkce", "what": "PKCE proof with random values", "covers": ["PKCE", "random values"], "candidate": false},
+      {"id": "discovery", "what": "the provider's discovery document", "covers": ["discovery document"], "candidate": false},
+      {"id": "refresh", "what": "refresh a session without a new sign-in", "covers": ["refresh"], "candidate": false},
+      {"id": "machine-token", "what": "a token for a machine, with no person", "covers": ["client credentials"], "candidate": false},
+      {"id": "revoke", "what": "revoke a token the provider issued", "covers": ["revocation", "authorization server", "tokens (old)"], "candidate": false}
+    ]},
+    "aws-sdk": {"release": "boto3 and botocore 1.43.96", "capabilities": [
+      {"id": "docdb", "what": "document-store instances, snapshots and point-in-time restores", "covers": ["docdb create_db_cluster_snapshot", "docdb create_db_instance", "docdb describe_db_cluster_parameters", "docdb describe_db_cluster_snapshots", "docdb describe_db_clusters", "docdb describe_db_instances", "docdb modify_db_cluster_parameter_group", "docdb restore_db_cluster_from_snapshot", "docdb restore_db_cluster_to_point_in_time"], "candidate": false},
+      {"id": "dynamodb", "what": "table backups, point-in-time restore and export", "covers": ["dynamodb create_backup", "dynamodb describe_backup", "dynamodb describe_table", "dynamodb list_backups", "dynamodb restore_table_from_backup", "dynamodb restore_table_to_point_in_time", "dynamodb export_table_to_point_in_time"], "candidate": false},
+      {"id": "rds-snapshots", "what": "relational instance and cluster snapshots, copies of parameters and restores", "covers": ["rds create_db_cluster_snapshot", "rds create_db_instance", "rds create_db_snapshot", "rds describe_db_cluster_parameters", "rds describe_db_cluster_snapshots", "rds describe_db_clusters", "rds describe_db_instances", "rds describe_db_parameters", "rds describe_db_snapshots", "rds modify_db_cluster_parameter_group", "rds modify_db_parameter_group", "rds restore_db_cluster_from_snapshot", "rds restore_db_cluster_to_point_in_time", "rds restore_db_instance_from_db_snapshot", "rds restore_db_instance_to_point_in_time"], "candidate": false},
+      {"id": "caches-streams-search", "what": "managed caches, memory stores, streams, search domains and instance types", "covers": ["elasticache create_replication_group", "elasticache create_snapshot", "elasticache describe_cache_clusters", "elasticache describe_cache_parameters", "elasticache describe_replication_groups", "elasticache describe_snapshots", "elasticache modify_cache_parameter_group", "memorydb create_cluster", "memorydb create_snapshot", "memorydb describe_clusters", "memorydb describe_parameters", "memorydb describe_snapshots", "memorydb update_parameter_group", "msk describe_cluster_v2", "ec2 describe_instance_types", "opensearch describe_domain", "opensearch describe_domains", "opensearch list_domain_names", "sts assume_role"], "candidate": false},
+      {"id": "other-stores", "what": "keyspaces, graph, columnar and reboot or update calls", "covers": ["keyspaces create_keyspace", "keyspaces get_keyspace", "keyspaces get_table", "keyspaces list_tables", "keyspaces restore_table", "keyspaces update_table", "neptune create_db_cluster_snapshot", "neptune create_db_instance", "neptune describe_db_cluster_parameters", "neptune describe_db_cluster_snapshots", "neptune describe_db_clusters", "neptune describe_db_instances", "neptune modify_db_cluster_parameter_group", "neptune restore_db_cluster_from_snapshot", "neptune restore_db_cluster_to_point_in_time", "neptune reboot_db_instance", "redshift create_cluster_snapshot", "redshift describe_cluster_parameters", "redshift describe_cluster_snapshots", "redshift describe_clusters", "redshift modify_cluster_parameter_group", "redshift restore_from_cluster_snapshot", "redshift reboot_cluster", "elasticache reboot_cache_cluster", "opensearch update_domain_config", "msk get_bootstrap_brokers", "rds reboot_db_instance", "rds modify_db_instance"], "candidate": false},
+      {"id": "copy-snapshot", "what": "copy a snapshot to another account or region before it is restored there", "covers": ["rds copy_db_cluster_snapshot", "rds copy_db_snapshot"], "candidate": true, "rung": "snapshot ladder (a snapshot copied to the target account)"}
+    ]},
+    "azure-cosmos": {"release": "azure-cosmos 4.17.1", "capabilities": [
+      {"id": "item-writes", "what": "read, write, delete and batch items by key", "covers": ["ContainerProxy read_item", "ContainerProxy upsert_item", "ContainerProxy delete_item", "ContainerProxy execute_item_batch"], "candidate": false},
+      {"id": "queries", "what": "query items and list the feed ranges", "covers": ["ContainerProxy query_items", "ContainerProxy read_feed_ranges", "request priority"], "candidate": false},
+      {"id": "change-feed", "what": "change feed from the latest version or from all versions and deletes", "covers": ["ContainerProxy query_items_change_feed", "change feed AllVersionsAndDeletes", "change feed LatestVersion", "change feed continuation", "change feed feed_range"], "candidate": false},
+      {"id": "conflicts", "what": "list the write conflicts the service kept", "covers": ["ContainerProxy list_conflicts"], "candidate": false},
+      {"id": "bulk-patch", "what": "delete a partition, patch fields, read all items and pick regions", "covers": ["ContainerProxy delete_all_items_by_partition_key", "ContainerProxy patch_item", "ContainerProxy read_all_items", "CosmosClient preferred_locations"], "candidate": false}
+    ]},
+    "azure-sdk": {"release": "azure-mgmt-cosmosdb 10.0.0, azure-mgmt-redis 14.5.0, azure-mgmt-sql 4.0.0, azure-mgmt-postgresqlflexibleservers 2.0.0, azure-mgmt-mysqlflexibleservers 1.0.0", "capabilities": [
+      {"id": "mysql-flexible", "what": "flexible MySQL servers, their configuration and capabilities", "covers": ["flexible-mysql servers.begin_create", "flexible-mysql servers.get", "flexible-mysql servers.list_by_resource_group", "flexible-mysql configurations.begin_update", "flexible-mysql configurations.get", "flexible-mysql location_based_capabilities.list"], "candidate": false},
+      {"id": "pg-flexible", "what": "flexible PostgreSQL servers, their configuration and capabilities", "covers": ["flexible-postgres servers.begin_create_or_update", "flexible-postgres servers.get", "flexible-postgres servers.list_by_resource_group", "flexible-postgres configurations.begin_update", "flexible-postgres configurations.get", "flexible-postgres capabilities_by_location.list"], "candidate": false},
+      {"id": "backups", "what": "automatic and on-demand backups of flexible servers", "covers": ["flexible-mysql backups.list_by_server", "flexible-mysql long_running_backup.begin_create", "flexible-postgres backups_automatic_and_on_demand.begin_create", "flexible-postgres backups_automatic_and_on_demand.list_by_server"], "candidate": false},
+      {"id": "cosmos-redis", "what": "Cosmos DB accounts, restorable accounts and Redis caches", "covers": ["cosmosdb database_accounts.begin_create_or_update", "cosmosdb database_accounts.get", "cosmosdb database_accounts.list_by_resource_group", "cosmosdb restorable_database_accounts.list_by_location", "redis redis.begin_update", "redis redis.get", "redis redis.list_by_resource_group"], "candidate": false},
+      {"id": "sql-databases", "what": "SQL databases, servers and their restore points", "covers": ["sql databases.begin_create_or_update", "sql databases.get", "sql restore_points.list_by_database", "sql servers.get", "sql servers.list_by_resource_group"], "candidate": false},
+      {"id": "identity", "what": "a default credential chain for the service", "covers": ["identity DefaultAzureCredential"], "candidate": false},
+      {"id": "restart-export-restore-point", "what": "restart a flexible server, export a cache, take a SQL restore point before a cutover, put a backup", "covers": ["flexible-mysql servers.begin_restart", "flexible-postgres servers.begin_restart", "redis redis.begin_export_data", "sql restore_points.begin_create", "flexible-mysql backups.put"], "candidate": true, "rung": "snapshot ladder (a restore point taken on the source before a cutover)"}
+    ]},
+    "azure-storage-blob": {"release": "azure-storage-blob 12.30.3", "capabilities": [
+      {"id": "blob-calls", "what": "upload, download, list, read and delete blobs", "covers": ["calls delete_blob", "calls download_blob", "calls get_blob_properties", "calls list_blobs", "calls readall", "calls readinto", "calls upload_blob"], "candidate": false},
+      {"id": "client", "what": "connect by connection string or credential and reach a container", "covers": ["client connection_verify", "client credential", "client from_connection_string", "client get_container_client"], "candidate": false},
+      {"id": "parallel-upload", "what": "parallel part upload and overwrite control", "covers": ["upload max_concurrency", "upload overwrite"], "candidate": false},
+      {"id": "encryption", "what": "customer keys and encryption scopes for the parts", "covers": ["upload cpk", "upload encryption_scope"], "candidate": false},
+      {"id": "metadata-tags-tiers", "what": "metadata, tags, storage tier and content validation per part", "covers": ["upload metadata", "upload tags", "upload standard_blob_tier", "upload validate_content"], "candidate": false}
+    ]},
+    "boto3-s3": {"release": "boto3 1.43.96", "capabilities": [
+      {"id": "object-calls", "what": "put, get, head, list and delete objects, and the managed upload and download", "covers": ["calls delete_object", "calls download_file", "calls get_object", "calls head_object", "calls list_objects_v2", "calls put_object", "calls upload_file"], "candidate": false},
+      {"id": "client", "what": "endpoint, region, profile, addressing, retries and TLS verification", "covers": ["client addressing_style", "client endpoint_url", "client profile_name", "client region_name", "client retries", "client verify"], "candidate": false},
+      {"id": "multipart", "what": "multipart threshold, part size and concurrency", "covers": ["transfer max_concurrency", "transfer multipart_chunksize", "transfer multipart_threshold"], "candidate": false},
+      {"id": "io-tuning", "what": "I/O chunk size, queue depth, bandwidth cap and transfer client choice", "covers": ["transfer io_chunksize", "transfer max_bandwidth", "transfer max_io_queue", "transfer num_download_attempts", "transfer preferred_transfer_client", "transfer use_threads"], "candidate": true, "rung": "transfer tuning on a measured link (bulk ladder)"},
+      {"id": "upload-options", "what": "checksum, server-side encryption key and storage class on upload", "covers": ["upload ChecksumAlgorithm", "upload SSECustomerKey", "upload StorageClass"], "candidate": false},
+      {"id": "bucket-probe", "what": "a bucket probe to prove the carrier before a load", "covers": ["calls head_bucket"], "candidate": false}
+    ]},
+    "boto3-s3-anchor": {"release": "boto3 1.43.96", "capabilities": [
+      {"id": "versioned-writes", "what": "write an object with a content type, an if-none-match guard and object lock", "covers": ["s3 ContentType", "s3 IfNoneMatch", "s3 ObjectLockMode", "s3 ObjectLockRetainUntilDate", "s3 put_object"], "candidate": false},
+      {"id": "versions", "what": "read an object by version and list its versions", "covers": ["s3 VersionId", "s3 get_object", "s3 head_object", "s3 list_object_versions"], "candidate": false},
+      {"id": "lock-config", "what": "the bucket's object lock configuration", "covers": ["s3 get_object_lock_configuration"], "candidate": false}
+    ]},
+    "boto3-s3-conditional": {"release": "boto3 1.43.96", "capabilities": [
+      {"id": "conditional-write", "what": "write only if the stored tag matches or is absent", "covers": ["s3 ETag", "s3 IfMatch", "s3 IfNoneMatch", "s3 put_object"], "candidate": false},
+      {"id": "conditional-read-delete", "what": "read or delete an object by its stored tag", "covers": ["s3 delete_object", "s3 get_object"], "candidate": false},
+      {"id": "checksum-encryption", "what": "checksum and server-side encryption of a record", "covers": ["s3 ChecksumAlgorithm", "s3 ServerSideEncryption"], "candidate": false},
+      {"id": "lock-and-copy", "what": "object lock on a record, a copy inside the bucket, a head of a record", "covers": ["s3 ObjectLockMode", "s3 copy_object", "s3 head_object"], "candidate": false}
+    ]},
+    "cassandra-sigv4": {"release": "cassandra-sigv4 4.0.2", "capabilities": [
+      {"id": "sigv4-auth", "what": "sign the connection with the AWS signature", "covers": ["auth SigV4AuthProvider"], "candidate": false}
+    ]},
+    "cheroot": {"release": "cheroot 11.1.2", "capabilities": [
+      {"id": "server", "what": "serve the view on a threaded HTTP server", "covers": ["server", "threads"], "candidate": false},
+      {"id": "tls", "what": "serve over TLS", "covers": ["TLS"], "candidate": false},
+      {"id": "peer-identity", "what": "the identity of the peer on a socket", "covers": ["peer credentials"], "candidate": false},
+      {"id": "tls-library", "what": "a second TLS library in the server", "covers": ["second TLS library"], "candidate": false}
+    ]},
+    "couchbase": {"release": "couchbase 4.6.3", "capabilities": [
+      {"id": "connect", "what": "connect by connection string over the network and wait until the cluster is ready", "covers": ["Cluster wait_until_ready", "connection string network"], "candidate": false},
+      {"id": "keys", "what": "get, upsert and remove many documents by key", "covers": ["Collection get_multi", "Collection remove_multi", "Collection upsert_multi"], "candidate": false},
+      {"id": "collections", "what": "create scopes and collections and list them", "covers": ["CollectionManager create_collection", "CollectionManager create_scope", "CollectionManager get_all_scopes"], "candidate": false},
+      {"id": "range-scan", "what": "scan a collection by key range, with batch size and ids only", "covers": ["Collection scan", "ScanOptions batch_item_limit", "ScanOptions ids_only", "scan RangeScan"], "candidate": false},
+      {"id": "query-and-sampling", "what": "query service, prefix and sampling scans, consistency with a mutation token, document mutation in place", "covers": ["Cluster query", "scan PrefixScan", "scan SamplingScan", "ScanOptions consistent_with", "Collection mutate_in"], "candidate": true, "rung": "sampled and prefix scans of a keyed source (verify ladder)"}
+    ]},
+    "deltalake": {"release": "deltalake 1.6.6", "capabilities": [
+      {"id": "append-merge", "what": "append and merge a batch by key in one commit", "covers": ["write_deltalake append", "DeltaTable merge"], "candidate": false},
+      {"id": "transactions", "what": "app transaction versions and the table's transaction version", "covers": ["CommitProperties app_transactions", "DeltaTable transaction_version"], "candidate": false},
+      {"id": "read-arrow", "what": "read the table as an Arrow dataset", "covers": ["DeltaTable to_pyarrow_dataset"], "candidate": false},
+      {"id": "change-data", "what": "the change data feed of the table", "covers": ["DeltaTable load_cdf"], "candidate": true, "rung": "change-feed reading of a lake target (stream ladder)"},
+      {"id": "maintenance", "what": "vacuum and optimise the files", "covers": ["DeltaTable vacuum and optimize"], "candidate": false}
+    ]},
+    "dlt": {"release": "dlt 1.30.0", "capabilities": [
+      {"id": "resources", "what": "declare resources and sources, and run them with a parallel map", "covers": ["resources", "source", "with_resources", "resource", "parallelized"], "candidate": false},
+      {"id": "incremental", "what": "incremental state, hard deletes and the primary key", "covers": ["incremental", "hard_delete", "primary_key", "StateInjectableContext", "injectable_context"], "candidate": false},
+      {"id": "schema", "what": "compute the table schema and map the data types", "covers": ["compute_table_schema", "data_type", "py_type_to_sc_type", "Container"], "candidate": false},
+      {"id": "pipeline-run", "what": "run a pipeline end to end to a destination", "covers": ["pipeline", "run", "extract", "normalize", "load", "destination"], "candidate": false},
+      {"id": "write-disposition", "what": "append, replace or merge the rows, with a merge key and a row limit", "covers": ["write_disposition", "merge_key", "add_limit"], "candidate": false}
+    ]},
+    "google-api-client": {"release": "google-api-python-client 2.200.0", "capabilities": [
+      {"id": "alloydb", "what": "AlloyDB clusters, instances, backups and restores", "covers": ["alloydb projects.locations.backups.create", "alloydb projects.locations.backups.get", "alloydb projects.locations.backups.list", "alloydb projects.locations.clusters.get", "alloydb projects.locations.clusters.instances.create", "alloydb projects.locations.clusters.instances.list", "alloydb projects.locations.clusters.instances.patch", "alloydb projects.locations.clusters.list", "alloydb projects.locations.clusters.restore", "alloydb projects.locations.operations.get", "alloydb projects.locations.supportedDatabaseFlags.list"], "candidate": false},
+      {"id": "cloudsql", "what": "Cloud SQL instances, clones, backups, flags and tiers", "covers": ["cloudsql backupRuns.insert", "cloudsql backupRuns.list", "cloudsql flags.list", "cloudsql instances.clone", "cloudsql instances.get", "cloudsql instances.list", "cloudsql instances.patch", "cloudsql operations.get", "cloudsql tiers.list"], "candidate": false},
+      {"id": "firestore-spanner-memorystore", "what": "Firestore database clone and restore, Spanner instances and backups, Memorystore instances", "covers": ["firestore projects.databases.clone", "firestore projects.databases.get", "firestore projects.databases.operations.get", "firestore projects.databases.restore", "firestore projects.locations.backups.list", "spanner projects.instances.backups.create", "spanner projects.instances.backups.get", "spanner projects.instances.backups.list", "spanner projects.instances.databases.get", "spanner projects.instances.databases.restore", "spanner projects.instances.get", "memorystore projects.locations.instances.get", "memorystore projects.locations.instances.list", "memorystore projects.locations.instances.patch", "memorystore projects.locations.operations.get", "bigquery datasets.get"], "candidate": false},
+      {"id": "restarts-exports", "what": "restart and restore instances, export documents and copy a Spanner backup", "covers": ["alloydb projects.locations.clusters.instances.restart", "cloudsql instances.restart", "cloudsql instances.restoreBackup", "firestore projects.databases.exportDocuments", "memorystore projects.locations.instances.export", "spanner projects.instances.backups.copy"], "candidate": true, "rung": "export of a document store before a cutover (snapshot ladder)"}
+    ]},
+    "google-cloud-bigquery": {"release": "google-cloud-bigquery 3.45.2", "capabilities": [
+      {"id": "query-dml", "what": "run a query, a MERGE and a multi-statement transaction", "covers": ["Client query MERGE", "Client multi-statement transaction", "Client dry_run"], "candidate": false},
+      {"id": "rows", "what": "list rows of a table, and expiry on a table", "covers": ["Client list_rows", "Client Table.expires"], "candidate": false},
+      {"id": "load-file", "what": "load a table from a file", "covers": ["Client load_table_from_file"], "candidate": false},
+      {"id": "jobs-schema", "what": "the jobs information schema for the project", "covers": ["Client INFORMATION_SCHEMA.JOBS_BY_PROJECT"], "candidate": false},
+      {"id": "copy-insert-json", "what": "copy a table, insert rows and load from JSON", "covers": ["Client copy_table", "Client insert_rows", "Client load_table_from_json"], "candidate": true, "rung": "load of a warehouse target from a file or copy (bulk ladder)"},
+      {"id": "fingerprint", "what": "an order-free fingerprint of a column in SQL", "covers": ["SQL BIT_XOR(FARM_FINGERPRINT)"], "candidate": false}
+    ]},
+    "google-cloud-bigquery-storage": {"release": "google-cloud-bigquery-storage 2.41.0", "capabilities": [
+      {"id": "write-proto", "what": "write proto rows to a committed stream with offsets", "covers": ["BigQueryWriteClient committed stream offsets", "BigQueryWriteClient proto rows"], "candidate": false},
+      {"id": "read-session", "what": "a read session of a table", "covers": ["BigQueryReadClient read session"], "candidate": false},
+      {"id": "arrow-rows", "what": "Arrow rows on the write path", "covers": ["BigQueryWriteClient Arrow rows"], "candidate": false},
+      {"id": "pending-default", "what": "pending and default write streams, and the change type", "covers": ["BigQueryWriteClient pending stream", "BigQueryWriteClient default stream _CHANGE_TYPE"], "candidate": true, "rung": "pending-stream write of a warehouse target (bulk ladder)"}
+    ]},
+    "google-cloud-bigtable": {"release": "google-cloud-bigtable 2.48.0", "capabilities": [
+      {"id": "rows", "what": "write and delete cells, read rows and sample row keys", "covers": ["DirectRow delete", "DirectRow set_cell", "Table read_rows", "Table sample_row_keys", "RowSet add_row_key", "RowSet add_row_range_from_keys"], "candidate": false},
+      {"id": "tables-admin", "what": "create, list, truncate and inspect tables and clusters", "covers": ["Instance list_clusters", "Table create", "Table get_cluster_states", "Table list_column_families", "Table truncate", "Table mutate_rows"], "candidate": false},
+      {"id": "backup-restore", "what": "back up, restore and copy a table backup", "covers": ["Table backup", "Table restore", "TableAdminClient copy_backup"], "candidate": false},
+      {"id": "change-stream", "what": "the change stream with its continuation tokens and heartbeat", "covers": ["change stream continuation_tokens", "change stream generate_initial_change_stream_partitions", "change stream heartbeat_duration", "change stream read_change_stream"], "candidate": false},
+      {"id": "query-batch", "what": "a SQL query, a batched mutation and a read-modify-write", "covers": ["Table execute_query", "Table mutations_batcher", "Table read_modify_write_row", "Table drop_by_prefix"], "candidate": true, "rung": "batched writes of a wide-row target (bulk ladder)"}
+    ]},
+    "google-cloud-datastore": {"release": "google-cloud-datastore 2.26.1", "capabilities": [
+      {"id": "batch-get-put", "what": "get, put and delete many entities", "covers": ["Client delete_multi", "Client get_multi", "Client put_multi"], "candidate": false},
+      {"id": "query", "what": "filtered queries and keys-only queries", "covers": ["Query add_filter", "Query keys_only"], "candidate": false},
+      {"id": "entity-indexes", "what": "exclude properties from indexes", "covers": ["Entity exclude_from_indexes"], "candidate": false},
+      {"id": "transaction", "what": "a transaction around a read and write", "covers": ["Client transaction"], "candidate": true, "rung": "transactional write of a document target (bulk ladder)"},
+      {"id": "aggregation", "what": "an aggregation query: count, sum and average", "covers": ["Query run_aggregation_query"], "candidate": false}
+    ]},
+    "google-cloud-firestore": {"release": "google-cloud-firestore 2.33.0", "capabilities": [
+      {"id": "bulk-writer", "what": "bulk writes with an error handler", "covers": ["BulkWriter delete", "BulkWriter on_write_error", "BulkWriter set", "Client bulk_writer"], "candidate": false},
+      {"id": "reads", "what": "get many documents, the collection and collection group, and their partitions", "covers": ["Client collection_group", "Client collections", "Client get_all", "CollectionGroup get_partitions"], "candidate": false},
+      {"id": "query-stream", "what": "stream a query, listen to it and page it from a point", "covers": ["Query on_snapshot", "Query start_after", "Query stream"], "candidate": false},
+      {"id": "admin", "what": "export and import documents, list indexes and fields, read the database", "covers": ["FirestoreAdminClient export_documents", "FirestoreAdminClient get_database", "FirestoreAdminClient import_documents", "FirestoreAdminClient list_fields", "FirestoreAdminClient list_indexes"], "candidate": false},
+      {"id": "batch-delete-read-time", "what": "a batch, a recursive delete and a read at a time", "covers": ["Client batch", "Client recursive_delete", "Query read_time"], "candidate": true, "rung": "recursive removal of a document target (bulk ladder)"}
+    ]},
+    "google-cloud-spanner": {"release": "google-cloud-spanner 3.71.0", "capabilities": [
+      {"id": "mutations", "what": "insert, update, insert-or-update and delete by key", "covers": ["Batch delete", "Batch insert_or_update", "Batch insert", "Batch replace", "KeySet keys"], "candidate": false},
+      {"id": "reads", "what": "read, execute SQL and read at a timestamp, multi-use snapshot", "covers": ["Snapshot execute_sql", "Snapshot multi_use", "Snapshot read", "Snapshot read_timestamp"], "candidate": false},
+      {"id": "batch-query", "what": "partitioned query batches read in parallel", "covers": ["BatchSnapshot generate_query_batches", "BatchSnapshot process_query_batch"], "candidate": false},
+      {"id": "database-ddl", "what": "create, update DDL, restore and inspect a database", "covers": ["Database create", "Database database_dialect", "Database ddl_statements", "Database restore", "Database update_ddl", "Instance backup", "Instance copy_backup"], "candidate": false},
+      {"id": "change-stream", "what": "the change stream partitions and heartbeat", "covers": ["change stream child_partitions", "change stream heartbeat_milliseconds"], "candidate": false},
+      {"id": "dml-groups", "what": "partitioned DML, mutation groups, a transaction runner and the DB-API", "covers": ["Database execute_partitioned_dml", "Database mutation_groups", "Database run_in_transaction", "dbapi connect"], "candidate": true, "rung": "partitioned DML for a bulk change on a large table (bulk ladder)"},
+      {"id": "request-options", "what": "data boost and priority on a request", "covers": ["request data_boost_enabled", "request priority"], "candidate": false}
+    ]},
+    "google-cloud-storage": {"release": "google-cloud-storage 3.15.1", "capabilities": [
+      {"id": "object-calls", "what": "upload, download, list, get and delete blobs and buckets", "covers": ["calls blob", "calls bucket", "calls delete", "calls download_as_bytes", "calls download_to_filename", "calls get_blob", "calls list_blobs", "calls upload_from_filename", "calls upload_from_string"], "candidate": false},
+      {"id": "upload-options", "what": "a content type, a checksum, a retry policy, a timeout and a generation precondition on upload", "covers": ["upload content_type", "upload checksum", "upload retry", "upload timeout", "upload if_generation_match"], "candidate": false}
+    ]},
+    "gremlinpython": {"release": "gremlinpython 3.8.2", "capabilities": [
+      {"id": "traversal", "what": "value maps, element maps, coalesce, drop and side effects on a traversal", "covers": ["GraphTraversal value_map", "GraphTraversal element_map", "GraphTraversal coalesce", "GraphTraversal drop", "GraphTraversal side_effect"], "candidate": false},
+      {"id": "cardinality-tokens", "what": "set a property with a cardinality and read the tokens", "covers": ["Cardinality set_", "WithOptions tokens"], "candidate": false},
+      {"id": "connection-headers", "what": "headers on the remote connection", "covers": ["DriverRemoteConnection headers"], "candidate": false},
+      {"id": "submit-merge", "what": "submit a script directly and merge vertices", "covers": ["Client submit", "GraphTraversal merge_v"], "candidate": true, "rung": "merge of graph vertices on a graph target (bulk ladder)"}
+    ]},
+    "huaweicloud-sdk": {"release": "huaweicloud-sdk-python, not installed in the build; pin from the declared release", "capabilities": [
+      {"id": "backups", "what": "manual backups and their lists across the managed relational, document and gaussdb services", "covers": ["rds create_manual_backup", "rds list_backups", "gaussdb create_manual_backup", "gaussdb list_backups", "geminidb create_back", "geminidb list_backups", "dds create_manual_backup", "dds list_backups"], "candidate": false},
+      {"id": "instances", "what": "list, create and show instance configuration and jobs", "covers": ["rds list_instances", "rds show_instance_configuration", "rds update_instance_configuration", "rds list_job_info", "gaussdb list_instances", "gaussdb show_instance_configuration", "gaussdb update_instance_configuration", "gaussdb show_job_detail", "geminidb create_instance", "geminidb list_instances", "geminidb list_jobs", "geminidb show_instance_configuration", "geminidb update_instance_configuration", "dds list_instances", "dds show_job_detail"], "candidate": false},
+      {"id": "restores", "what": "restore to a new instance from a backup", "covers": ["rds create_restore_instance", "gaussdb create_restore_instance", "dds restore_new_instance"], "candidate": false},
+      {"id": "in-place-restore-restart", "what": "restore onto an existing instance, restart it, update an entity configuration", "covers": ["rds restore_to_existing_instance", "rds start_instance_restart_action", "gaussdb restore_instance", "dds restore_instance", "dds update_entity_configuration", "geminidb restore_existing_instance"], "candidate": true, "rung": "restore onto an existing target instance (snapshot ladder)"},
+      {"id": "temporary-key", "what": "a temporary access key from an agency", "covers": ["iam create_temporary_access_key_by_agency"], "candidate": false}
+    ]},
+    "ibm-cloud-sdk-core": {"release": "ibm-cloud-sdk-core 3.26.2", "capabilities": [
+      {"id": "authenticators", "what": "sign in by bearer token, IAM key, IAM assume or the instance identity", "covers": ["credentials BearerTokenAuthenticator", "credentials IAMAssumeAuthenticator", "credentials IAMAuthenticator", "credentials VPCInstanceAuthenticator"], "candidate": false},
+      {"id": "deployments", "what": "read a deployment, its backups, groups, configuration schema, connections and tasks", "covers": ["icd GET /deployments/{id}", "icd GET /deployments/{id}/backups", "icd GET /deployments/{id}/configuration/schema", "icd GET /deployments/{id}/groups", "icd GET /deployments/{id}/users/{kind}/{user}/connections/{endpoint}", "icd GET /tasks/{task}"], "candidate": false},
+      {"id": "change-configuration", "what": "patch the configuration and take a backup", "covers": ["icd PATCH /deployments/{id}/configuration", "icd POST /deployments/{id}/backups"], "candidate": false},
+      {"id": "restore-deployment", "what": "restore a deployment from a backup", "covers": ["icd POST /deployments/{id}/restores"], "candidate": true, "rung": "restore of a managed deployment target (snapshot ladder)"},
+      {"id": "resource-controller", "what": "list and create resource instances", "covers": ["resource-controller GET /v2/resource_instances/{guid}", "resource-controller GET /v2/resource_instances?type=service_instance", "resource-controller POST /v2/resource_instances"], "candidate": false}
+    ]},
+    "ibmi-odbc": {"release": "IBM i Access ODBC driver, not in the build", "capabilities": [
+      {"id": "connect-settings", "what": "system, user, password, driver and name settings for the connection", "covers": ["DRIVER", "NAM", "PWD", "SYSTEM", "UID"], "candidate": false},
+      {"id": "character-set", "what": "the coded character set and translation", "covers": ["CCSID", "TRANSLATE"], "candidate": false},
+      {"id": "security-commit", "what": "TLS and commitment control", "covers": ["SSL", "CMT"], "candidate": false},
+      {"id": "fetch-tuning", "what": "block fetch size, block size and compression", "covers": ["BLOCKFETCH", "BLOCKSIZE", "COMPRESSION"], "candidate": true, "rung": "block fetch on a wide read of an IBM i source (verify ladder)"},
+      {"id": "library-and-format", "what": "the library list, the date and time format and the transaction format", "covers": ["DBQ", "DFT", "TFT"], "candidate": false}
+    ]},
+    "initdb": {"release": "PostgreSQL server binaries on the host (version as the host reports)", "capabilities": [
+      {"id": "cluster-create", "what": "create a data directory with the superuser and the data checksums", "covers": ["--pgdata", "-U", "--data-checksums", "--no-data-checksums"], "candidate": false},
+      {"id": "encoding-locale", "what": "encoding, locale and locale provider of the cluster", "covers": ["--encoding", "--locale-provider", "--lc-collate", "--lc-ctype", "--builtin-locale", "--icu-locale"], "candidate": false},
+      {"id": "auth-setup", "what": "authentication methods and a password file for the cluster", "covers": ["--auth", "--auth-host", "--auth-local", "--pwfile", "--pwprompt"], "candidate": false},
+      {"id": "wal-and-options", "what": "a separate WAL directory, the WAL segment size and settings applied at creation", "covers": ["--waldir", "--wal-segsize", "--set", "--no-sync", "--no-clean"], "candidate": true, "rung": "a target cluster with its WAL on its own volume (bulk ladder)"},
+      {"id": "text-search", "what": "the text search configuration of the cluster", "covers": ["--text-search-config", "--icu-rules"], "candidate": false},
+      {"id": "messages", "what": "the locale of messages and the debug output", "covers": ["--lc-messages", "--lc-monetary", "--lc-numeric", "--lc-time", "--locale", "--debug", "--discard-caches", "--no-instructions", "--allow-group-access"], "candidate": false}
+    ]},
+    "jinja2": {"release": "jinja2 3.1.6", "capabilities": [
+      {"id": "templates", "what": "render templates with an environment", "covers": ["environment", "templates"], "candidate": false},
+      {"id": "escaping", "what": "autoescape of the output", "covers": ["escaping"], "candidate": false},
+      {"id": "sandbox", "what": "a sandboxed environment for untrusted templates", "covers": ["sandbox"], "candidate": true, "rung": "a template that a customer may write (operator notice)"},
+      {"id": "translations", "what": "translated strings in the output", "covers": ["translations"], "candidate": false},
+      {"id": "async", "what": "asynchronous rendering", "covers": ["async"], "candidate": false}
+    ]},
+    "joserfc": {"release": "joserfc 1.7.5", "capabilities": [
+      {"id": "verify", "what": "verify a signed token and its claims", "covers": ["verify a token", "claims"], "candidate": false},
+      {"id": "key-sets", "what": "load and rotate key sets", "covers": ["key sets"], "candidate": false},
+      {"id": "sign", "what": "sign a token", "covers": ["sign a token"], "candidate": false},
+      {"id": "encrypted", "what": "encrypted tokens", "covers": ["encrypted tokens"], "candidate": false},
+      {"id": "json-serial", "what": "serialise a token as JSON", "covers": ["JSON serialization"], "candidate": false}
+    ]},
+    "mapepire": {"release": "mapepire-python 1.0.0", "capabilities": [
+      {"id": "connect", "what": "connect to the server by host, port, user and password, with the server certificate", "covers": ["connect host", "connect port", "connect user", "connect password", "connect ca", "connect ignoreUnauthorized"], "candidate": false},
+      {"id": "query-auto-close", "what": "a query that closes its cursor when read", "covers": ["query autoClose"], "candidate": true, "rung": "cursor close on a large read of an IBM i source (verify ladder)"},
+      {"id": "clcommand-terse", "what": "run a control language command and terse results", "covers": ["query isClCommand", "query isTerseResults"], "candidate": false}
+    ]},
+    "neptunedata": {"release": "boto3 1.43.96 (neptunedata service)", "capabilities": [
+      {"id": "open-cypher", "what": "run an openCypher query", "covers": ["query execute_open_cypher_query"], "candidate": false},
+      {"id": "gremlin", "what": "run a Gremlin query", "covers": ["query execute_gremlin_query"], "candidate": true, "rung": "Gremlin reading of a graph source (verify ladder)"},
+      {"id": "loader", "what": "start a bulk loader job and read its status", "covers": ["loader start_loader_job", "loader get_loader_job_status"], "candidate": false},
+      {"id": "statistics", "what": "property graph and RDF statistics, managed", "covers": ["statistics get_propertygraph_statistics", "statistics get_sparql_statistics", "statistics manage_propertygraph_statistics", "statistics manage_sparql_statistics"], "candidate": false},
+      {"id": "engine-status-stream", "what": "engine status and the change streams of the graph", "covers": ["status get_engine_status", "stream get_propertygraph_stream", "stream get_sparql_stream"], "candidate": false}
+    ]},
+    "oci-sdk": {"release": "oci 2.187.1", "capabilities": [
+      {"id": "autonomous", "what": "autonomous databases, their backups and their listing", "covers": ["autonomous create_autonomous_database", "autonomous create_autonomous_database_backup", "autonomous get_autonomous_database", "autonomous get_autonomous_database_backup", "autonomous list_autonomous_database_backups", "autonomous list_autonomous_databases"], "candidate": false},
+      {"id": "mysql-system", "what": "MySQL database systems, backups, configurations and shapes", "covers": ["mysql create_backup", "mysql create_configuration", "mysql create_db_system", "mysql get_backup", "mysql get_configuration", "mysql get_db_system", "mysql list_backups", "mysql list_db_systems", "mysql list_shapes", "mysql update_db_system"], "candidate": false},
+      {"id": "credentials", "what": "sign in from a file or an instance principal", "covers": ["credentials from_file", "credentials InstancePrincipalsSecurityTokenSigner"], "candidate": false},
+      {"id": "restart-restore", "what": "restore an autonomous database and restart it or a MySQL system", "covers": ["autonomous restore_autonomous_database", "autonomous restart_autonomous_database", "mysql restart_db_system"], "candidate": true, "rung": "restore of a managed database target (snapshot ladder)"}
+    ]},
+    "opentelemetry": {"release": "opentelemetry-sdk 1.45.0", "capabilities": [
+      {"id": "tracer", "what": "a tracer provider with spans, attributes, events and status", "covers": ["TracerProvider", "start_span", "start_as_current_span", "set_attributes", "add_event", "set_status", "context"], "candidate": false},
+      {"id": "processors", "what": "batch and simple span processors", "covers": ["BatchSpanProcessor", "SimpleSpanProcessor", "force_flush"], "candidate": false},
+      {"id": "exporter", "what": "export spans over OTLP", "covers": ["OTLPSpanExporter", "Resource"], "candidate": false},
+      {"id": "metrics-logs", "what": "metrics and logs on the same pipeline", "covers": ["metrics", "logs"], "candidate": false},
+      {"id": "propagation-sampling", "what": "trace context propagation and sampling", "covers": ["propagation", "sampling"], "candidate": false}
+    ]},
+    "ora2pg": {"release": "ora2pg v25.0 (pinned in migkit/tools.py)", "capabilities": [
+      {"id": "export", "what": "export a schema, its tables and its data, by type", "covers": ["-t", "-o", "-c", "-m", "-b", "-i", "EXPORT_SCHEMA"], "candidate": false},
+      {"id": "type-mapping", "what": "map numeric and integer types to the target", "covers": ["DEFAULT_NUMERIC", "PG_INTEGER_TYPE", "PG_NUMERIC_TYPE"], "candidate": false},
+      {"id": "procedural", "what": "convert procedural code to the target language", "covers": ["PLSQL_PGSQL"], "candidate": false},
+      {"id": "estimate-cost", "what": "estimate the cost of the migration in days", "covers": ["--estimate_cost", "--cost_unit_value", "--human_days_limit"], "candidate": true, "rung": "migration effort estimate before a conversion (assess ladder)"},
+      {"id": "report-test-autonomous", "what": "a report of the conversion, a test mode and autonomous transactions", "covers": ["SHOW_REPORT", "TEST", "AUTONOMOUS_TRANSACTION", "PG_VERSION"], "candidate": false}
+    ]},
+    "pyiceberg": {"release": "pyiceberg 0.12.0", "capabilities": [
+      {"id": "catalog", "what": "a catalog by SQL or by REST", "covers": ["Catalog sql and rest"], "candidate": false},
+      {"id": "append-upsert", "what": "append and upsert rows", "covers": ["Table append", "Table upsert"], "candidate": false},
+      {"id": "scan", "what": "scan the table as a batch reader", "covers": ["Table scan to_arrow_batch_reader"], "candidate": false},
+      {"id": "transaction", "what": "delete and append in one transaction", "covers": ["Transaction delete and append"], "candidate": false},
+      {"id": "maintenance", "what": "add data files, expire snapshots and overwrite a partition dynamically", "covers": ["Table add_files", "Table expire_snapshots", "Table dynamic_partition_overwrite"], "candidate": true, "rung": "file adoption of an existing lake target (bulk ladder)"}
+    ]},
+    "pyodata": {"release": "pyodata 1.12.1", "capabilities": [
+      {"id": "client", "what": "a client with its config and its policy", "covers": ["client Client", "client Config", "client PolicyIgnore", "client config"], "candidate": false},
+      {"id": "metadata-model", "what": "the service metadata and the entity model", "covers": ["client metadata", "model entity_sets", "model entity_type", "model from_json", "model function_imports", "model to_literal"], "candidate": false},
+      {"id": "properties", "what": "the property types, keys and their limits", "covers": ["model countable", "model date", "model filterable", "model key_proprties", "model max_length", "model nullable", "model precision", "model proprties", "model scale"], "candidate": false},
+      {"id": "requests", "what": "read entities, count, execute and page them", "covers": ["request count", "request custom", "request execute", "request get_entities"], "candidate": false},
+      {"id": "batch-changes", "what": "batches, changesets and entity writes", "covers": ["request create_batch", "request create_changeset", "request create_entity", "request delete_entity", "request update_entity", "request get_entity"], "candidate": true, "rung": "batched writes to an OData target (bulk ladder)"},
+      {"id": "query-options", "what": "the filter, select, order, top, skip and expand options", "covers": ["request filter", "request select", "request order_by", "request top", "request skip", "request expand", "request next_url"], "candidate": false}
+    ]},
+    "pyrage": {"release": "pyrage 1.4.0", "capabilities": [
+      {"id": "encrypt-decrypt", "what": "encrypt and decrypt bytes and streams", "covers": ["encrypt", "decrypt", "encrypt_io", "decrypt_io"], "candidate": false},
+      {"id": "keys", "what": "x25519 and SSH recipients and identities", "covers": ["x25519", "ssh"], "candidate": false},
+      {"id": "files", "what": "encrypt and decrypt files by path", "covers": ["encrypt_file", "decrypt_file"], "candidate": true, "rung": "encryption of a dump at rest (sealed evidence)"},
+      {"id": "passphrase-plugin", "what": "a passphrase recipient and an external plugin", "covers": ["passphrase", "plugin"], "candidate": false}
+    ]},
+    "redshift_connector": {"release": "redshift_connector 2.1.17", "capabilities": [
+      {"id": "connect", "what": "connect by password or by IAM", "covers": ["connect iam", "connect password"], "candidate": false},
+      {"id": "load-log", "what": "the load commits table of the cluster", "covers": ["SQL STL_LOAD_COMMITS"], "candidate": false},
+      {"id": "hash", "what": "a hash of the column values in SQL", "covers": ["SQL FNV_HASH"], "candidate": false},
+      {"id": "dataframe-write", "what": "write a dataframe to a table", "covers": ["cursor write_dataframe"], "candidate": true, "rung": "dataframe write to a warehouse target (bulk ladder)"}
+    ]},
+    "salesforce-api": {"release": "Salesforce REST and Pub/Sub API (no library pin in the build)", "capabilities": [
+      {"id": "rest-query", "what": "run a SOQL query, a bulk query job and read its results", "covers": ["rest /query", "rest /jobs/query", "rest /results", "rest /queryAll"], "candidate": false},
+      {"id": "describe", "what": "describe an object and list its sObjects", "covers": ["rest /describe", "rest /sobjects", "rest /limits"], "candidate": false},
+      {"id": "oauth", "what": "the OAuth token for a session, and its refresh", "covers": ["rest /services/oauth2/token", "fetch auth_refresh"], "candidate": false},
+      {"id": "composite-search-tooling", "what": "composite requests, search and tooling calls", "covers": ["rest /composite", "rest /search", "rest /tooling"], "candidate": false},
+      {"id": "pubsub", "what": "subscribe to an event channel, with the topic and its schema", "covers": ["pubsub GetSchema", "pubsub Subscribe", "fetch topic_name", "fetch replay_id", "fetch replay_preset", "fetch num_requested"], "candidate": false},
+      {"id": "pubsub-publish", "what": "publish and managed subscriptions", "covers": ["pubsub GetTopic", "pubsub ManagedSubscribe", "pubsub Publish", "pubsub PublishStream"], "candidate": true, "rung": "event publishing of a change to a subscriber (stream ladder)"}
+    ]},
+    "scim2-filter-parser": {"release": "scim2-filter-parser 0.7.0", "capabilities": [
+      {"id": "filter-to-sql", "what": "turn a SCIM filter into SQL", "covers": ["filters as SQL"], "candidate": false},
+      {"id": "attribute-names", "what": "the attribute names a filter names", "covers": ["attributes named"], "candidate": false},
+      {"id": "patch-paths", "what": "the paths a patch request names", "covers": ["patch paths"], "candidate": true, "rung": "provisioning patch of a user directory (access ladder)"}
+    ]},
+    "signxml": {"release": "signxml 5.1.0", "capabilities": [
+      {"id": "verify", "what": "verify an XML signature and what it covers", "covers": ["verify", "what is taken", "methods"], "candidate": false},
+      {"id": "sign", "what": "sign an XML document", "covers": ["sign"], "candidate": false},
+      {"id": "long-term", "what": "a long-term signature profile", "covers": ["long-term profile"], "candidate": false}
+    ]},
+    "singer-tap": {"release": "Singer tap protocol (tap pin not in the build)", "capabilities": [
+      {"id": "discover-catalog", "what": "discover the streams and write a catalog", "covers": ["--discover", "--catalog", "--properties", "message SCHEMA"], "candidate": false},
+      {"id": "read-state", "what": "read records with state", "covers": ["--config", "--state", "message RECORD", "message STATE"], "candidate": false},
+      {"id": "batch", "what": "records in batches", "covers": ["message BATCH", "message ACTIVATE_VERSION"], "candidate": true, "rung": "batch reading of a SaaS source (stream ladder)"},
+      {"id": "about-format", "what": "the version and the output format of the tap", "covers": ["--about", "--format", "--input"], "candidate": false}
+    ]},
+    "snowflake-connector-python": {"release": "snowflake-connector-python 4.7.5", "capabilities": [
+      {"id": "connect-key", "what": "connect by a private key file or a password", "covers": ["connect private_key_file"], "candidate": false},
+      {"id": "stage-copy", "what": "PUT a file to a table stage and COPY INTO with a transformation", "covers": ["cursor PUT to a table stage", "cursor COPY INTO with a transformation"], "candidate": false},
+      {"id": "merge", "what": "MERGE in a transaction", "covers": ["cursor MERGE in a transaction"], "candidate": false},
+      {"id": "pandas-write", "what": "write a dataframe to a table", "covers": ["pandas_tools write_pandas"], "candidate": false},
+      {"id": "hash-agg", "what": "a hash aggregate of the rows in SQL", "covers": ["SQL HASH_AGG"], "candidate": true, "rung": "order-free row-set hash on a warehouse target (verify ladder)"}
+    ]},
+    "snowpipe-streaming": {"release": "snowpipe-streaming 1.8.1", "capabilities": [
+      {"id": "client", "what": "a streaming ingest client for a table", "covers": ["StreamingIngestClient from_table"], "candidate": false},
+      {"id": "channel", "what": "an ingest channel with its offset token and its wait for commit", "covers": ["StreamingIngestChannel offset token", "StreamingIngestChannel wait_for_commit"], "candidate": false},
+      {"id": "elastic-channel", "what": "an elastic channel for the client", "covers": ["StreamingIngestClient get_elastic_channel"], "candidate": true, "rung": "streaming ingest with elastic channels (stream ladder)"}
+    ]},
+    "tencentcloud-sdk": {"release": "tencentcloud-sdk-python-common 3.1.184 with the service packages (cdb, cynosdb, mariadb, mongodb, postgres, redis, sqlserver)", "capabilities": [
+      {"id": "credentials", "what": "sign in by a credential, the CVM role or an assumed role", "covers": ["credentials Credential", "credentials CVMRoleCredential", "credentials STSAssumeRoleCredential", "sts AssumeRole"], "candidate": false},
+      {"id": "mysql-backups-clones", "what": "MySQL-family instances: backups, clones, parameters and rollbacks", "covers": ["cdb CreateBackup", "cdb CreateCloneInstance", "cdb DescribeBackups", "cdb DescribeCloneList", "cdb DescribeInstanceParams", "cdb ModifyInstanceParam", "cdb DescribeDBInstances", "cdb DescribeAsyncRequestInfo", "cdb DescribeDBInstanceCharset", "cdb DescribeTimeWindow", "cdb RestartDBInstances", "cynosdb CreateBackup", "cynosdb DescribeBackupList", "cynosdb DescribeClusterDetail", "cynosdb DescribeClusterParams", "cynosdb DescribeClusters", "cynosdb DescribeFlow", "cynosdb ModifyClusterParam", "cynosdb RollbackToNewCluster", "cynosdb RollBackCluster", "mariadb DescribeBackupFiles", "mariadb DescribeDBInstances", "mariadb DescribeDBParameters", "mariadb ModifyDBParameters"], "candidate": false},
+      {"id": "mongo-postgres", "what": "document-store backups and restores, PostgreSQL base backups, clones and parameters", "covers": ["mongodb CreateBackupDBInstance", "mongodb CreateDBInstanceHour", "mongodb DescribeAsyncRequestInfo", "mongodb DescribeDBBackups", "mongodb DescribeDBInstances", "mongodb DescribeInstanceParams", "mongodb DescribeSpecInfo", "mongodb ModifyInstanceParams", "mongodb RestoreDBInstance", "postgres CloneDBInstance", "postgres CreateBaseBackup", "postgres DescribeBaseBackups", "postgres DescribeDBInstanceAttribute", "postgres DescribeDBInstanceParameters", "postgres DescribeDBInstances", "postgres DescribeMaintainTimeWindow", "postgres DescribeTasks", "postgres ModifyDBInstanceParameters"], "candidate": false},
+      {"id": "redis-sqlserver", "what": "Redis clones, backups and parameters; SQL Server backups, parameters and restores", "covers": ["redis CloneInstances", "redis DescribeInstanceBackups", "redis DescribeInstanceParams", "redis DescribeInstances", "redis DescribeMaintenanceWindow", "redis DescribeTaskInfo", "redis ManualBackupInstance", "redis ModifyInstanceParams", "sqlserver CreateBackup", "sqlserver DescribeBackupByFlowId", "sqlserver DescribeBackups", "sqlserver DescribeDBInstances", "sqlserver DescribeInstanceParams", "sqlserver ModifyInstanceParam"], "candidate": false},
+      {"id": "restores-restarts", "what": "restores and rollbacks to a new or an existing instance, and restarts", "covers": ["redis RestoreInstance", "sqlserver RestoreInstance", "sqlserver RollbackInstance", "cdb RestartDBInstances", "cynosdb RollBackCluster"], "candidate": true, "rung": "rollback of a managed target to a backup (snapshot ladder)"}
+    ]},
+    "teradatasql": {"release": "teradatasql driver, not in the build", "capabilities": [
+      {"id": "connect-core", "what": "connect by host, user and password, with the database, the log-on mechanism and the session settings", "covers": ["connect host", "connect user", "connect password", "connect database", "connect logmech", "connect tmode", "connect sessions", "connect connect_timeout", "connect logon_timeout", "connect request_timeout"], "candidate": false},
+      {"id": "connect-tls", "what": "TLS and certificate settings for the session", "covers": ["connect sslmode", "connect sslca", "connect sslcapath", "connect sslcrl", "connect sslcipher", "connect sslprotocol", "connect sslnamedgroups", "connect sslocsp", "connect sslcrc", "connect sslbase64", "connect https_port"], "candidate": false},
+      {"id": "connect-oidc", "what": "an OpenID sign-in for the session", "covers": ["connect oidc_clientid", "connect oidc_token", "connect oidc_scope", "connect oidc_refresh", "connect oauth_scopes", "connect oauth_level"], "candidate": false},
+      {"id": "lob-values", "what": "large objects and the values of the session", "covers": ["connect lob_support", "connect teradata_values", "connect max_message_body", "connect encryptdata"], "candidate": true, "rung": "large values of a warehouse source (large values ladder)"},
+      {"id": "escape-introspection", "what": "the database version, errors, warnings and the connection state", "covers": ["escape teradata_database_version", "escape teradata_get_errors", "escape teradata_get_warnings", "escape teradata_connected", "escape teradata_driver_version", "escape teradata_nativesql"], "candidate": false},
+      {"id": "fast-load-export", "what": "fast load and fast export of the database", "covers": ["escape teradata_try_fastload", "escape teradata_require_fastload", "escape teradata_try_fastexport", "escape teradata_require_fastexport", "escape teradata_read_csv", "escape teradata_write_csv"], "candidate": true, "rung": "fast load of a warehouse target (bulk ladder)"}
+    ]},
+    "timestream": {"release": "boto3 1.43.96 (timestream services)", "capabilities": [
+      {"id": "write-records", "what": "write records to a table", "covers": ["write WriteRecords", "write MULTI", "write Version"], "candidate": false},
+      {"id": "table", "what": "create a table and enable magnetic writes", "covers": ["write CreateTable", "write EnableMagneticStoreWrites"], "candidate": false},
+      {"id": "batch-load", "what": "a batch load task from a file, and its status", "covers": ["write CreateBatchLoadTask", "write DescribeBatchLoadTask"], "candidate": false},
+      {"id": "query", "what": "run a query", "covers": ["query Query"], "candidate": false},
+      {"id": "scheduled-query", "what": "a scheduled query", "covers": ["query CreateScheduledQuery"], "candidate": true, "rung": "scheduled reading of a time series target (verify ladder)"}
+    ]},
+    "werkzeug": {"release": "werkzeug 3.1.9", "capabilities": [
+      {"id": "routing", "what": "routes and rules that map a path to a view", "covers": ["routes", "rules"], "candidate": false},
+      {"id": "requests-responses", "what": "parse requests and build responses", "covers": ["requests", "responses"], "candidate": false},
+      {"id": "forwarded", "what": "trust the headers a proxy sets", "covers": ["forwarded headers"], "candidate": false},
+      {"id": "errors", "what": "HTTP errors", "covers": ["errors"], "candidate": false},
+      {"id": "debugger-server", "what": "the debugger and the development server", "covers": ["debugger", "development server"], "candidate": false}
+    ]},
+    "zstandard": {"release": "zstandard 0.25.0", "capabilities": [
+      {"id": "compress-stream", "what": "compress a stream with a level and a checksum", "covers": ["ZstdCompressor level", "ZstdCompressor stream_reader", "ZstdCompressor write_checksum"], "candidate": false},
+      {"id": "decompress-stream", "what": "decompress a stream and its format", "covers": ["ZstdDecompressor stream_reader", "ZstdDecompressor format"], "candidate": false},
+      {"id": "threads", "what": "parallel compression threads", "covers": ["ZstdCompressor threads"], "candidate": true, "rung": "parallel compression of a dump stream (bulk ladder)"},
+      {"id": "dictionary", "what": "a trained dictionary for small records", "covers": ["ZstdCompressor dict_data", "ZstdDecompressor dict_data", "ZstdCompressor multi_compress_to_buffer", "ZstdDecompressor multi_decompress_to_buffer"], "candidate": true, "rung": "dictionary compression of many small rows (bulk ladder)"},
+      {"id": "chunked", "what": "chunked and framed compression and the size of the content", "covers": ["ZstdCompressor chunker", "ZstdCompressor compress", "ZstdCompressor compression_params", "ZstdCompressor copy_stream", "ZstdCompressor read_to_iter", "ZstdCompressor stream_writer", "ZstdCompressor write_content_size", "ZstdCompressor write_dict_id", "ZstdDecompressor copy_stream", "ZstdDecompressor decompress", "ZstdDecompressor decompressobj", "ZstdDecompressor max_window_size", "ZstdDecompressor read_to_iter", "ZstdDecompressor stream_writer"], "candidate": false}
+    ]}
+  },
+  "unaccounted": {
+    "airflow": {"release": "apache-airflow, not installed in the build", "capabilities": [
+      {"id": "dags", "what": "define and run DAGs of tasks on a schedule", "candidate": false},
+      {"id": "operators", "what": "run SQL and transfer operators against the source and target", "candidate": false},
+      {"id": "xcom", "what": "pass small values between tasks", "candidate": false},
+      {"id": "sensors", "what": "wait until a condition holds before a task runs", "candidate": false}
+    ]},
+    "atlas": {"release": "Atlas schema tool on the host (EULA; version as the host reports)", "capabilities": [
+      {"id": "schema-read", "what": "read the schema of a database into a file", "candidate": false},
+      {"id": "schema-diff", "what": "diff two schemas and plan the change", "candidate": true, "rung": "schema comparison before a conversion (schema ladder)"},
+      {"id": "apply", "what": "apply a planned change to a database", "candidate": false},
+      {"id": "lint", "what": "lint a schema for risky changes", "candidate": false}
+    ]},
+    "bson": {"release": "pymongo 4.18.1", "capabilities": [
+      {"id": "decode-encode", "what": "decode and encode BSON documents", "candidate": false},
+      {"id": "types", "what": "BSON types such as dates, decimals and binaries", "candidate": false},
+      {"id": "raw", "what": "raw BSON bytes without decoding", "candidate": true, "rung": "raw-BSON bucket digest of a document target (verify ladder)"}
+    ]},
+    "certifi": {"release": "certifi 2026.7.22", "capabilities": [
+      {"id": "ca-bundle", "what": "the bundle of trusted certificate authorities", "candidate": false},
+      {"id": "where", "what": "the path of the bundle for a client", "candidate": false},
+      {"id": "custom-bundle", "what": "a bundle the operator supplies in place of the default", "candidate": false}
+    ]},
+    "click": {"release": "click 8.5.0", "capabilities": [
+      {"id": "commands", "what": "command groups and subcommands with their options", "candidate": false},
+      {"id": "prompts", "what": "prompt for a value and hide a secret", "candidate": false},
+      {"id": "parameter-types", "what": "typed options, choices and paths", "candidate": false},
+      {"id": "testing", "what": "invoke a command in a test runner", "candidate": false}
+    ]},
+    "clickhouse_connect": {"release": "clickhouse-connect 1.9.0", "capabilities": [
+      {"id": "query", "what": "query and read results as rows or Arrow", "candidate": false},
+      {"id": "insert", "what": "insert rows or a dataframe in batches", "candidate": true, "rung": "batched insert to a columnar target (bulk ladder)"},
+      {"id": "admin", "what": "the server version and the connection settings", "candidate": false}
+    ]},
+    "confluent_kafka": {"release": "confluent-kafka, not installed in the build", "capabilities": [
+      {"id": "produce", "what": "produce messages to a topic with delivery reports", "candidate": false},
+      {"id": "consume", "what": "consume messages from a group with committed offsets", "candidate": false},
+      {"id": "admin", "what": "topics and their configuration", "candidate": false},
+      {"id": "schema", "what": "schema registry clients for the message format", "candidate": false}
+    ]},
+    "croniter": {"release": "croniter 6.2.4", "capabilities": [
+      {"id": "next-run", "what": "the next and previous times a cron expression fires", "candidate": false},
+      {"id": "expand", "what": "the time expression expanded for a range", "candidate": false},
+      {"id": "timezone", "what": "a schedule in a named time zone", "candidate": false}
+    ]},
+    "cryptography": {"release": "cryptography 50.0.1", "capabilities": [
+      {"id": "symmetric", "what": "AES-GCM and Fernet encryption of records", "candidate": false},
+      {"id": "kdf", "what": "key derivation from a passphrase", "candidate": false},
+      {"id": "x509", "what": "certificates and their verification", "candidate": false},
+      {"id": "hashes-mac", "what": "hashes and message authentication codes", "candidate": false}
+    ]},
+    "dagster": {"release": "dagster, not installed in the build", "capabilities": [
+      {"id": "assets", "what": "software-defined assets and their materialisation", "candidate": false},
+      {"id": "jobs", "what": "jobs and schedules over assets", "candidate": false},
+      {"id": "resources", "what": "configured resources shared by ops", "candidate": false}
+    ]},
+    "duckdb": {"release": "duckdb 1.5.5", "capabilities": [
+      {"id": "sql", "what": "run SQL over local files and Arrow tables", "candidate": false},
+      {"id": "pandas-arrow", "what": "read and write dataframes and Arrow tables", "candidate": false},
+      {"id": "extensions", "what": "load scanners for the formats the source uses", "candidate": false},
+      {"id": "copy", "what": "COPY a table to and from a file", "candidate": true, "rung": "local staging of a bulk copy (bulk ladder)"}
+    ]},
+    "ebcdic": {"release": "ebcdic 2.0.1", "capabilities": [
+      {"id": "decode", "what": "decode EBCDIC bytes to text", "candidate": false},
+      {"id": "codepages", "what": "the code pages it knows", "candidate": false},
+      {"id": "encode", "what": "encode text to EBCDIC", "candidate": false}
+    ]},
+    "fastavro": {"release": "fastavro 1.12.2", "capabilities": [
+      {"id": "read-write", "what": "read and write Avro files", "candidate": false},
+      {"id": "schema", "what": "parse and check an Avro schema", "candidate": false},
+      {"id": "block-codec", "what": "block compression codecs", "candidate": true, "rung": "compressed Avro staging of a bulk copy (bulk ladder)"},
+      {"id": "validate", "what": "validate records against the schema", "candidate": false}
+    ]},
+    "google_crc32c": {"release": "google-crc32c 1.9.0", "capabilities": [
+      {"id": "checksum", "what": "CRC32C of bytes", "candidate": false},
+      {"id": "extension", "what": "the compiled extension used for speed", "candidate": false}
+    ]},
+    "grpc": {"release": "grpcio 1.84.0", "capabilities": [
+      {"id": "channel", "what": "secure and insecure channels to a server", "candidate": false},
+      {"id": "unary-stream", "what": "unary and streaming calls", "candidate": false},
+      {"id": "credentials", "what": "channel credentials and the call metadata", "candidate": false}
+    ]},
+    "hypothesis": {"release": "hypothesis 6.168.1 (test library)", "capabilities": [
+      {"id": "strategies", "what": "generate values of a type for a property", "candidate": false},
+      {"id": "shrink", "what": "shrink a failing example to a minimal case", "candidate": false},
+      {"id": "database", "what": "keep failing examples between runs", "candidate": false}
+    ]},
+    "ibm_db": {"release": "ibm_db 3.3.0", "capabilities": [
+      {"id": "connect", "what": "connect to a Db2 server by a connection string", "candidate": false},
+      {"id": "statements", "what": "prepare, bind and execute statements", "candidate": false},
+      {"id": "catalog", "what": "the catalog of tables and columns", "candidate": false},
+      {"id": "lob", "what": "large objects read and written in parts", "candidate": true, "rung": "large values of a Db2 source (large values ladder)"}
+    ]},
+    "ibm_db_dbi": {"release": "ibm_db 3.3.0 (DB-API layer)", "capabilities": [
+      {"id": "dbapi-cursor", "what": "DB-API cursors over the connection", "candidate": false},
+      {"id": "fetch", "what": "fetch rows in batches", "candidate": false},
+      {"id": "params", "what": "bound parameters of a statement", "candidate": false}
+    ]},
+    "kafka": {"release": "kafka-python 3.0.11", "capabilities": [
+      {"id": "producer", "what": "produce messages with keys and partitions", "candidate": false},
+      {"id": "consumer", "what": "consume from a group with committed offsets", "candidate": false},
+      {"id": "admin", "what": "topics, groups and their configuration", "candidate": false},
+      {"id": "partitions", "what": "assign partitions and seek to an offset", "candidate": true, "rung": "offset seek of a change-stream leg (stream ladder)"},
+      {"id": "compression", "what": "message compression codecs", "candidate": false}
+    ]},
+    "keyring": {"release": "keyring 25.7.0", "capabilities": [
+      {"id": "get-set", "what": "get and set a secret in the operating system store", "candidate": false},
+      {"id": "backends", "what": "the store backends it can use", "candidate": false}
+    ]},
+    "lxml": {"release": "lxml 6.1.3", "capabilities": [
+      {"id": "parse", "what": "parse XML and HTML documents", "candidate": false},
+      {"id": "xpath", "what": "query a document by XPath", "candidate": false},
+      {"id": "schema", "what": "validate a document against a schema", "candidate": false}
+    ]},
+    "liquibase": {"release": "Liquibase on the host (FSL licence; version as the host reports)", "capabilities": [
+      {"id": "changelog", "what": "read a changelog of change sets", "candidate": false},
+      {"id": "diff", "what": "compare two databases and write the changes", "candidate": true, "rung": "schema comparison before a conversion (schema ladder)"},
+      {"id": "status", "what": "which change sets have run", "candidate": false},
+      {"id": "rollback", "what": "roll back a set of change sets", "candidate": false}
+    ]},
+    "lz4": {"release": "lz4 4.4.5", "capabilities": [
+      {"id": "frame", "what": "LZ4 frame compression of a stream", "candidate": false},
+      {"id": "block", "what": "LZ4 block compression of bytes", "candidate": false},
+      {"id": "level", "what": "a compression level", "candidate": true, "rung": "faster compression of a dump stream (bulk ladder)"}
+    ]},
+    "mssql_py_core": {"release": "mssql-python 1.15.0", "capabilities": [
+      {"id": "connect", "what": "connect to a SQL Server by connection string", "candidate": false},
+      {"id": "bulk-copy", "what": "bulk copy of rows into a table", "candidate": true, "rung": "bulk insert into a SQL Server target (bulk ladder)"},
+      {"id": "cursor", "what": "cursor execute and fetch", "candidate": false}
+    ]},
+    "mssql_python": {"release": "mssql-python 1.15.0", "capabilities": [
+      {"id": "connect", "what": "connect to a SQL Server by connection string", "candidate": false},
+      {"id": "cursor", "what": "cursor execute and fetch", "candidate": false},
+      {"id": "transactions", "what": "commit and roll back", "candidate": false}
+    ]},
+    "mysql": {"release": "MySQL client on the host (version as the host reports)", "capabilities": [
+      {"id": "client", "what": "run SQL statements in batch or interactive mode", "candidate": false},
+      {"id": "options-file", "what": "read the connection settings from an options file", "candidate": false},
+      {"id": "tls", "what": "TLS to the server", "candidate": false}
+    ]},
+    "mysqldump": {"release": "mysqldump on the host (version as the host reports)", "capabilities": [
+      {"id": "logical-dump", "what": "a logical dump of tables and their rows", "candidate": false},
+      {"id": "single-transaction", "what": "a consistent dump of InnoDB tables in one transaction", "candidate": false},
+      {"id": "routines-triggers", "what": "routines, triggers and events in the dump", "candidate": false},
+      {"id": "where-filter", "what": "dump only the rows a condition selects", "candidate": true, "rung": "row-range dump of a MySQL source (bulk ladder)"}
+    ]},
+    "numpy": {"release": "numpy 2.5.3", "capabilities": [
+      {"id": "arrays", "what": "typed arrays and their operations", "candidate": false},
+      {"id": "random", "what": "random generators for sampling", "candidate": false},
+      {"id": "datetime", "what": "datetime64 values and their arithmetic", "candidate": false}
+    ]},
+    "opensearchpy": {"release": "opensearch-py 3.2.0", "capabilities": [
+      {"id": "index-docs", "what": "index, get and delete documents", "candidate": false},
+      {"id": "bulk", "what": "bulk index actions", "candidate": true, "rung": "bulk indexing of a search target (bulk ladder)"},
+      {"id": "search", "what": "search and aggregate", "candidate": false}
+    ]},
+    "oracledb": {"release": "oracledb 26.0.0", "capabilities": [
+      {"id": "thin-thick", "what": "connect in thin mode or thick mode with a client", "candidate": false},
+      {"id": "pool", "what": "a connection pool with its limits", "candidate": false},
+      {"id": "fetch-lob", "what": "fetch rows and LOB values in full", "candidate": false},
+      {"id": "dml-returning", "what": "DML with RETURNING values", "candidate": false},
+      {"id": "dbobject", "what": "object types and their attributes", "candidate": false}
+    ]},
+    "packaging": {"release": "packaging 26.3", "capabilities": [
+      {"id": "version", "what": "parse and compare versions", "candidate": false},
+      {"id": "specifier", "what": "version specifiers and their matching", "candidate": false},
+      {"id": "requirement", "what": "parse a requirement line", "candidate": false}
+    ]},
+    "pandas": {"release": "pandas 3.0.5", "capabilities": [
+      {"id": "frames", "what": "data frames and their columns", "candidate": false},
+      {"id": "io", "what": "read and write CSV, Parquet and SQL", "candidate": false},
+      {"id": "groupby", "what": "group and aggregate rows", "candidate": false}
+    ]},
+    "pglast": {"release": "pglast 8.4", "capabilities": [
+      {"id": "parse", "what": "parse PostgreSQL SQL into a tree", "candidate": false},
+      {"id": "deparse", "what": "write a tree back as SQL", "candidate": false},
+      {"id": "visitors", "what": "walk the tree and find nodes", "candidate": false}
+    ]},
+    "psutil": {"release": "psutil 7.2.2", "capabilities": [
+      {"id": "memory-disk", "what": "memory and disk use of the host", "candidate": false},
+      {"id": "processes", "what": "processes and their resources", "candidate": false},
+      {"id": "network", "what": "network connections and interfaces", "candidate": false}
+    ]},
+    "psycopg": {"release": "psycopg 3.3.5", "capabilities": [
+      {"id": "connect", "what": "connect by a connection string", "candidate": false},
+      {"id": "copy", "what": "COPY in and out of a table", "candidate": false},
+      {"id": "pipeline", "what": "pipeline mode for many statements", "candidate": true, "rung": "pipelined statements on a PostgreSQL target (bulk ladder)"}
+    ]},
+    "psycopg2": {"release": "psycopg2-binary 2.9.13", "capabilities": [
+      {"id": "connect", "what": "connect by a connection string", "candidate": false},
+      {"id": "copy", "what": "COPY in and out of a table", "candidate": false},
+      {"id": "cursor", "what": "cursor execute, fetch and server-side cursors", "candidate": false},
+      {"id": "extras", "what": "extras such as JSON and range types", "candidate": false},
+      {"id": "logical-replication", "what": "the logical replication protocol", "candidate": true, "rung": "logical replication reading of a PostgreSQL source (stream ladder)"}
+    ]},
+    "pyarrow": {"release": "pyarrow 25.0.1", "capabilities": [
+      {"id": "tables", "what": "Arrow tables and their schemas", "candidate": false},
+      {"id": "parquet", "what": "read and write Parquet", "candidate": false},
+      {"id": "compute", "what": "compute functions over arrays", "candidate": false},
+      {"id": "flight-ipc", "what": "IPC streams and Flight", "candidate": false},
+      {"id": "dataset", "what": "datasets over partitioned files", "candidate": true, "rung": "partitioned file reading of a lake target (bulk ladder)"}
+    ]},
+    "pymongo": {"release": "pymongo 4.18.1", "capabilities": [
+      {"id": "crud", "what": "find, insert, update and delete documents", "candidate": false},
+      {"id": "change-stream", "what": "change streams with resume tokens", "candidate": false},
+      {"id": "aggregate", "what": "aggregation pipelines", "candidate": false},
+      {"id": "bulk", "what": "bulk write operations", "candidate": true, "rung": "bulk write to a document target (bulk ladder)"},
+      {"id": "gridfs", "what": "files stored in GridFS", "candidate": false}
+    ]},
+    "pymssql": {"release": "pymssql 2.4.1", "capabilities": [
+      {"id": "connect", "what": "connect to SQL Server", "candidate": false},
+      {"id": "cursor", "what": "execute and fetch", "candidate": false},
+      {"id": "bulk", "what": "bulk insert of rows", "candidate": true, "rung": "bulk insert into a SQL Server target (bulk ladder)"},
+      {"id": "tds", "what": "the TDS protocol settings", "candidate": false}
+    ]},
+    "pymysql": {"release": "PyMySQL 1.2.3", "capabilities": [
+      {"id": "connect", "what": "connect by host, user, password and TLS", "candidate": false},
+      {"id": "cursor", "what": "cursor execute, fetch and streaming cursors", "candidate": false},
+      {"id": "load-local", "what": "LOAD DATA LOCAL from the client", "candidate": true, "rung": "local file load into a MySQL target (bulk ladder)"},
+      {"id": "charset", "what": "character sets of the session", "candidate": false}
+    ]},
+    "pymysqlreplication": {"release": "mysql-replication 1.0.17", "capabilities": [
+      {"id": "binlog-stream", "what": "stream the binary log from a position", "candidate": false},
+      {"id": "row-events", "what": "row events with their before and after images", "candidate": false},
+      {"id": "gtid", "what": "GTID positions", "candidate": false},
+      {"id": "filters", "what": "filter the events by schema and table", "candidate": false},
+      {"id": "resume", "what": "resume from a saved binlog file and position", "candidate": true, "rung": "resume of a MySQL change-stream leg (stream ladder)"}
+    ]},
+    "pyodbc": {"release": "pyodbc 5.3.0", "capabilities": [
+      {"id": "connect", "what": "connect by a connection string or a data source name", "candidate": false},
+      {"id": "cursor", "what": "execute, fetch and bind parameters", "candidate": false},
+      {"id": "fast-executemany", "what": "batched inserts with fast executemany", "candidate": true, "rung": "batched inserts through ODBC (bulk ladder)"}
+    ]},
+    "requests": {"release": "requests 2.34.2", "capabilities": [
+      {"id": "session", "what": "sessions with cookies and adapters", "candidate": false},
+      {"id": "tls", "what": "TLS verification and client certificates", "candidate": false},
+      {"id": "retry", "what": "retry adapters for transient failures", "candidate": false},
+      {"id": "stream", "what": "stream a response body", "candidate": true, "rung": "streamed download of a large object (large values ladder)"}
+    ]},
+    "results": {"release": "results 2.0.1789346060 (the name the walk found)", "capabilities": [
+      {"id": "result-type", "what": "a result value that holds a value or an error", "candidate": false}
+    ]},
+    "rich": {"release": "rich 15.0.0", "capabilities": [
+      {"id": "console", "what": "console output with styles and tables", "candidate": false},
+      {"id": "progress", "what": "progress bars for a run", "candidate": false},
+      {"id": "traceback", "what": "pretty tracebacks", "candidate": false}
+    ]},
+    "sqlglot": {"release": "sqlglot 30.18.0", "capabilities": [
+      {"id": "parse-transpile", "what": "parse SQL in one dialect and write it in another", "candidate": false},
+      {"id": "optimise", "what": "optimise a query plan and the expressions", "candidate": false},
+      {"id": "lineage", "what": "column lineage of a query", "candidate": false},
+      {"id": "schema-check", "what": "check the columns of a query against a schema", "candidate": true, "rung": "column check of a converted view (verify ladder)"},
+      {"id": "dialect-functions", "what": "dialect function mappings", "candidate": false}
+    ]},
+    "pt-table-sync": {"release": "percona-toolkit pt-table-sync on the host (version as the host reports)", "capabilities": [
+      {"id": "sync-rows", "what": "make a table on one side match the other by rows", "candidate": false},
+      {"id": "bidirectional", "what": "sync in both directions", "candidate": false},
+      {"id": "chunk-size", "what": "sync in chunks by key range", "candidate": true, "rung": "repair of a differing key range (verify ladder)"}
+    ]},
+    "vacuumdb": {"release": "vacuumdb on the host (PostgreSQL client; version as the host reports)", "capabilities": [
+      {"id": "vacuum", "what": "vacuum a database or a table", "candidate": false},
+      {"id": "analyze", "what": "analyse statistics after a load", "candidate": false},
+      {"id": "parallel", "what": "vacuum several tables in parallel", "candidate": false}
+    ]},
+    "vault": {"release": "HashiCorp Vault CLI on the host (version as the host reports)", "capabilities": [
+      {"id": "read-secret", "what": "read a secret from a path", "candidate": false},
+      {"id": "write-secret", "what": "write a secret to a path", "candidate": false},
+      {"id": "dynamic-db", "what": "database credentials leased for a role", "candidate": false},
+      {"id": "token", "what": "tokens and their lookup", "candidate": false}
+    ]},
+    "yaml": {"release": "PyYAML 6.0.3", "capabilities": [
+      {"id": "load-dump", "what": "load and dump YAML documents", "candidate": false},
+      {"id": "safe-load", "what": "load without executing tags", "candidate": false},
+      {"id": "multi-document", "what": "several documents in one stream", "candidate": false}
+    ]},
+    "z3": {"release": "z3-solver 5.1.0.0", "capabilities": [
+      {"id": "solver", "what": "check a set of constraints for a model", "candidate": false},
+      {"id": "expressions", "what": "integer, real and boolean expressions", "candidate": false},
+      {"id": "optimise", "what": "optimise a goal under the constraints", "candidate": true, "rung": "decision choice under constraints (decide ladder)"}
+    ]}
   }
 }

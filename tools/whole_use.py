@@ -17,6 +17,9 @@ tool can do, by capability), and writes:
 A capability's state is computed from the registry, never written: used,
 topped up, partly used or unused. A catalogue key the registry does not hold,
 or a candidate that is now used, is an error: the catalogue is behind.
+The catalogue's `unaccounted` section holds the libraries and programs called
+with no account: capabilities only, so no state; a name no code calls is an
+error.
 
     python tools/whole_use.py            write both
     python tools/whole_use.py --check    exit 3 where either is behind
@@ -185,8 +188,16 @@ def build():
             rows.append({**c, "state": state, "why": why})
         caps[tool] = rows
     where, loose = sites(cat, names)
+    called = {n for _, n, _ in loose}
+    unaccounted = {}
+    for name, entry in cat.get("unaccounted", {}).items():
+        if name not in called:
+            problems.append(f"catalogue names {name}, which no code calls"
+                            " with no account")
+            continue
+        unaccounted[name] = entry["capabilities"]
     return {"cat": cat, "registry": registry, "caps": caps, "where": where,
-            "loose": loose, "problems": problems}
+            "loose": loose, "unaccounted": unaccounted, "problems": problems}
 
 
 def _cell(text):
@@ -242,6 +253,16 @@ def render(facts):
         if len(files) > 3:
             shown += f" +{len(files) - 3}"
         out.append(f"| {kind} | {name} | {shown} |")
+    for kind, name, _ in facts["loose"]:
+        out += ["", f"### {name} ({kind})", ""]
+        caps_of = facts["unaccounted"].get(name)
+        if caps_of is None:
+            out.append("No capabilities catalogued yet.")
+            continue
+        out += ["| capability | what | rung it would strengthen |", "|---|---|---|"]
+        for x in caps_of:
+            rung = x.get("rung", "") if x.get("candidate") else ""
+            out.append(f"| {x['id']} | {_cell(x['what'])} | {_cell(rung) or '-'} |")
     out += ["", "System programs left out (no account wanted): "
             + ", ".join(f"`{p}`" for p in sorted(
                 facts["cat"]["system_programs"])) + ".", ""]
@@ -259,6 +280,11 @@ def backlog_rows(facts):
         for x in rows:
             if x.get("candidate") and x["state"] in ("unused", "partly used"):
                 lines.append(f"* `0f.{n}.{x['id']}` ({x['state']}): {x['what']}"
+                             f" would strengthen {x['rung']}.")
+    for name, caps_of in facts["unaccounted"].items():
+        for x in caps_of:
+            if x.get("candidate"):
+                lines.append(f"* `0f.{name}.{x['id']}` (no account): {x['what']}"
                              f" would strengthen {x['rung']}.")
     for kind in ("library", "program"):
         names = [n for k, n, _ in facts["loose"] if k == kind]
