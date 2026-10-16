@@ -5132,7 +5132,8 @@ class HeteroEngine(Engine):
             until_=until if go else "stopped", on_start=started,
             on_end=ended, secrets=(self.hop.source.password,
                                    self.hop.target.password),
-            ledger=self.attempts().ledger if go else None)
+            ledger=self.attempts().ledger if go else None,
+            where_now=tailctl._where_now(self.src_engine, db))
 
     #: source engines whose change log carries every DDL, as it happened
     #: (`LOG_CARRIES_DDL`): a MySQL binlog logs each statement, and the

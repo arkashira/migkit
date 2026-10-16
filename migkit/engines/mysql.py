@@ -1,6 +1,7 @@
 import contextlib
 import difflib
 import json
+import os
 import queue
 import re
 import threading
@@ -1882,9 +1883,8 @@ class MySQLEngine(Engine):
             conn.close()
         # read as the tail on the other way reads it, under a replica id of
         # the proof's own: one the server already streams to is cut off
-        sid = int(self.hop.options.get("server_id", 4379))
-        reader = type(self)(dataclasses.replace(self.hop, options={
-            **self.hop.options, "server_id": 2 ** 31 + sid % 2 ** 31}))
+        reader = type(self)(self.hop)
+        reader._reader_purpose = "proof"
         # read on to the probe: what the application wrote meanwhile is
         # no part of the proof, and a table of its own the tail would stop
         # on does not hide what was read before it
@@ -2143,9 +2143,13 @@ class MySQLEngine(Engine):
                 connection_settings={"host": ep.host, "port": ep.port,
                                      "user": ep.user,
                                      "passwd": ep.password},
-                server_id=int(self.hop.options.get("server_id", 4379)),
+                server_id=self.reader_id(
+                    side, self.__dict__.get("_reader_purpose", "tail"), db),
                 blocking=streamed, resume_stream=True,
                 **({"slave_heartbeat": beat} if streamed else {}),
+                # registered, so the server lists the reader under its id:
+                # what another hop avoids and the quiet line asks after
+                report_slave=f"migkit {self.hop.name}"[:60],
                 log_file=token.get("log_file"),
                 log_pos=token.get("log_pos"),
                 only_schemas=[self._d(side, db)],
@@ -2344,6 +2348,14 @@ class MySQLEngine(Engine):
                     token = {"log_file": stream.log_file,
                              "log_pos": stream.log_pos}
         except pymysql.err.OperationalError as e:
+            # 1236 is also the server ending a reader another attached
+            # under its id: read again from where this read began, under a
+            # fresh id, once (`reader_collided`) - nothing it read is kept
+            if self.reader_collided(side, self.__dict__.get(
+                    "_reader_purpose", "tail"), e, db):
+                stream.close()
+                keep = False
+                return [], start
             # measured on 8.4 after `purge binary logs`: 1236, "Could not
             # find first log file name in binary log index file"
             if not (e.args and e.args[0] == 1236):
@@ -2381,6 +2393,166 @@ class MySQLEngine(Engine):
         held = self.__dict__.pop("_binlog_held", None)
         if held:
             held["stream"].close()
+
+    #: where a reader's replica ids are kept in its hop's run store
+    READER_IDS = "reader-ids.json"
+
+    def _reader_store(self, db=""):
+        return self.hop.report_dir(db) / self.READER_IDS
+
+    def _reader_source(self, side):
+        ep = self.hop.source if side == "src" else self.hop.target
+        return f"{ep.host}:{ep.port}"
+
+    def _ids_taken(self, side):
+        """{id: who holds it} on `side`'s server, from what it and this
+        machine say: its own id, the replicas it lists (where the account
+        may read them), the ids other hops recorded on this server, the
+        replica ids the hop names (`replica_server_ids`) and an id a
+        reader of this engine was ended under."""
+        import pymysql
+        from .. import config
+        taken = {}
+        try:
+            got = self._q(side, "select @@server_id")
+            if got and got[0][0] is not None:
+                taken[int(got[0][0])] = "the server itself"
+        except pymysql.err.MySQLError:
+            pass
+        for q in ("show replicas", "show slave hosts"):
+            try:
+                for row in self._q(side, q):
+                    taken.setdefault(int(row[0]), "a replica the server"
+                                     " lists")
+                break
+            except pymysql.err.MySQLError:
+                continue
+        here = self._reader_source(side)
+        for path in list(config.REPORTS.glob(f"*/{self.READER_IDS}")) + \
+                list(config.REPORTS.glob(f"*/*/{self.READER_IDS}")):
+            hop = path.relative_to(config.REPORTS).parts[0]
+            if hop == self.hop.name:
+                continue
+            try:
+                kept = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            for purpose, got in (kept or {}).items():
+                if isinstance(got, dict) and got.get("source") == here:
+                    taken.setdefault(int(got["id"]), f"hop {hop}'s"
+                                     f" {purpose} reader")
+        for rid in (self.hop.options or {}).get("replica_server_ids") or ():
+            taken.setdefault(int(rid), "a replica the hop names")
+        for rid in self.__dict__.get("_reader_ended", {}).values():
+            taken.setdefault(int(rid), "another reader attached under it")
+        return taken
+
+    def reader_id(self, side, purpose, db=""):
+        """The replica id a binlog reader of `side` attaches under for
+        `purpose` (the tail, a proof, a probe), decided once an engine
+        (`decide.reader_server_id`) and kept in the run store: two hops
+        on one source, or the tail and a probe of one hop, never share
+        one. A `server_id` the hop names is honoured, and refused, saying
+        who holds it, where another does."""
+        from .. import decide
+        ids = self.__dict__.setdefault("_reader_ids", {})
+        key = (side, purpose, db)
+        if key in ids:
+            return ids[key]
+        store = self._reader_store(db)
+        try:
+            kept = json.loads(store.read_text())
+        except (OSError, ValueError):
+            kept = {}
+        here = self._reader_source(side)
+        mine = kept.get(purpose) if isinstance(kept.get(purpose), dict) \
+            else {}
+        recorded = mine.get("id") if mine.get("source") == here else None
+        choice, got = decide.reader_server_id(decide.Facts(
+            {"named": (self.hop.options or {}).get("server_id"),
+             "recorded": recorded,
+             "identity": f"{self.hop.name}/{db}/{side}/{purpose}"},
+            taken=lambda: self._ids_taken(side)))
+        self.__dict__.setdefault("_reader_choices", {})[key] = choice
+        if got is None:
+            raise SystemExit(
+                f"the binlog reader's server_id cannot be used:"
+                f" {choice.reason}. Two readers under one id end each"
+                " other; name a free id, or leave server_id out and one is"
+                " chosen")
+        kept[purpose] = {"id": got, "source": here, "at": time.time()}
+        tmp = store.with_name(f".{store.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(kept, sort_keys=True))
+        os.replace(tmp, store)
+        ids[key] = got
+        return got
+
+    #: what the server says to a reader another attached under its id
+    COLLIDED = ("same server_uuid/server_id", "same server_id")
+
+    def reader_collided(self, side, purpose, e, db=""):
+        """True where `e` is the server ending this reader for another one
+        attached under its id: the id is set aside and the next read
+        attaches under a fresh one. Once: ended again, the reader stops
+        with the line, since an id that cannot hold says another reader
+        keeps choosing what this one chose."""
+        said = str(e.args[-1] if getattr(e, "args", None) else e)
+        if not any(w in said for w in self.COLLIDED):
+            return False
+        key = (side, purpose, db)
+        ended = self.__dict__.setdefault("_reader_ended", {})
+        rid = self.__dict__.get("_reader_ids", {}).pop(key, None)
+        if key in ended:
+            raise SystemExit(
+                f"the binlog reader was ended twice for another reader"
+                f" attached under its id (server_id {ended[key]}, then"
+                f" {rid}): another reader of this source chooses ids as"
+                " this one does - name a free server_id for one of the"
+                " hops")
+        if (self.hop.options or {}).get("server_id") not in (None, ""):
+            raise SystemExit(
+                f"the binlog reader was ended for another reader attached"
+                f" under the server_id the hop names ({rid}): name a free"
+                " one, or leave server_id out and one is chosen")
+        ended[key] = rid
+        return True
+
+    def tail_where(self, db, token):
+        """What the tail's quiet line stands on (`tailctl.run_loop`): the
+        position it is at, the server's now and how far that is past it,
+        whether the server still lists a reader under the tail's id, and
+        the provider's tables on the target."""
+        import pymysql
+        from .. import leftovers
+        at = f"{token.get('log_file')}:{token.get('log_pos')}" \
+            if token and token.get("log_file") else str(token or "")
+        out = {"at": at}
+        try:
+            now = self._binlog_position("src")
+        except pymysql.err.MySQLError as e:
+            return {**out, "attached": False,
+                    "why_detached": str(e).strip().splitlines()[0][:120]}
+        if now:
+            out["server"] = f"{now[0]}:{now[1]}"
+            if token and token.get("log_file") == now[0]:
+                out["moved"] = max(0, now[1] - int(token.get("log_pos")
+                                                   or 0))
+        rid = self.__dict__.get("_reader_ids", {}).get(("src", "tail", db))
+        try:
+            listed = {int(r[0]) for r in self._q("src", "show replicas")}
+        except pymysql.err.MySQLError:
+            listed = None
+        # a reader that reads the log to its end each batch holds no
+        # connection between batches: only a held stream can be missed
+        held = self.__dict__.get("_binlog_held") is not None
+        if not held:
+            listed = None
+        if listed is not None and rid is not None and rid not in listed:
+            out.update(attached=False, why_detached=f"the source lists no"
+                       f" reader under server_id {rid}")
+        elif listed is not None and rid is not None:
+            out["attached"] = True
+        return out
 
     def _binlog_position(self, side):
         """(file, position) the binlog is at now, or None when it is off.
@@ -2516,7 +2688,7 @@ class MySQLEngine(Engine):
         stream = BinLogStreamReader(
             connection_settings={"host": ep.host, "port": ep.port,
                                  "user": ep.user, "passwd": ep.password},
-            server_id=int(self.hop.options.get("server_id", 4379)),
+            server_id=self.reader_id(side, "first event"),
             blocking=False, resume_stream=True, log_file=name, log_pos=4,
             only_events=[FormatDescriptionEvent])
         try:
@@ -4445,7 +4617,7 @@ class MySQLEngine(Engine):
         stream = BinLogStreamReader(
             connection_settings={"host": ep.host, "port": ep.port,
                                  "user": ep.user, "passwd": ep.password},
-            server_id=int(self.hop.options.get("server_id", 4379)) + 1,
+            server_id=self.reader_id("dst", "who wrote", db),
             blocking=False, resume_stream=True,
             log_file=mark["log_file"], log_pos=int(mark["log_pos"]),
             only_schemas=[self._d("dst", db)], only_tables=[table],
@@ -4717,7 +4889,7 @@ class MySQLEngine(Engine):
         stream = BinLogStreamReader(
             connection_settings={"host": s.host, "port": s.port,
                                  "user": s.user, "passwd": s.password},
-            server_id=int(self.hop.options.get("server_id", 4379)) + 1,
+            server_id=self.reader_id("src", "delta", db),
             resume_stream=True, blocking=False,
             log_file=ck.get("log_file"), log_pos=ck.get("log_pos"),
             only_schemas=[db],

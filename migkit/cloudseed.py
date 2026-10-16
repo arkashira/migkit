@@ -968,7 +968,7 @@ def _first_missing(eng, name, have):
     stream = BinLogStreamReader(
         connection_settings={"host": ep.host, "port": ep.port,
                              "user": ep.user, "passwd": ep.password},
-        server_id=int((eng.hop.options or {}).get("server_id", 4379)) + 1,
+        server_id=eng.reader_id("src", "first transaction"),
         blocking=False, resume_stream=True, log_file=name, log_pos=4,
         only_events=[GtidEvent])
     try:

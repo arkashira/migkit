@@ -915,6 +915,12 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: the binlog's row image did not carry <...>, so migkit cannot say which row it meant
 
+* the binlog reader's server_id cannot be used: <...>. Two readers under one id end each other; name a free id, or leave server_id out and one is chosen
+
+* the binlog reader was ended twice for another reader attached under its id (server_id <...>, then <...>): another reader of this source chooses ids as this one does - name a free server_id for one of the hops
+
+* the binlog reader was ended for another reader attached under the server_id the hop names (<...>): name a free one, or leave server_id out and one is chosen
+
 * the binlog is off on this server, so there is no change log to read - turn on log_bin, or move without CDC
 
 * the source's account cannot see the other sessions (PROCESS), so which commits are under way when the copy starts cannot be read, and a commit written to the binary log before the copy's position but not yet visible would be in neither the copy nor the tail. Grant it - `grant process on *.* to <the account>;` - or use a MariaDB server, whose snapshot says its binary log position. Nothing was copied

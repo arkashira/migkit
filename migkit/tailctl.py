@@ -508,7 +508,7 @@ def resume(where):
 def run_loop(where, db, look, log, noun, *, hop=None, go=True, token=None,
              save=None, reached=None, lost=None, beat_with=None,
              idle=(IDLE_LEAST, IDLE_MOST), secrets=(), until_=None,
-             on_start=None, on_end=None, ledger=None):
+             on_start=None, on_end=None, ledger=None, where_now=None):
     """The one follow loop (audit ST14, K14). Returns (how many `noun` it
     carried, why it ended: "asked", "slot", "caught up" or "interrupted").
 
@@ -537,7 +537,14 @@ def run_loop(where, db, look, log, noun, *, hop=None, go=True, token=None,
     wait that doubles to a minute, SIGTERM taken as ctrl-c, the beat
     written, and an idle wait that grows from 20 ms to `idle[1]` and is
     back at 20 ms at the next change. A run with `go` False writes
-    nothing: no lease, no position, no beat."""
+    nothing: no lease, no position, no beat.
+
+    `where_now(token)` (the source engine's `tail_where`) is asked while
+    the tail carries nothing, at most once in the longer of its idle wait
+    and the measured interval between its changes: what it says becomes a
+    line (`quiet_line`, `decide.tail_state`) each time the tail's state
+    changes - detached and why, quiet while the source writes elsewhere,
+    or the source writing nothing - never silence."""
     from . import failpoint, faults, notify, schedule
     from .util import is_transient, without_secret
     slot_ends = schedule.slot_end()
@@ -581,6 +588,33 @@ def run_loop(where, db, look, log, noun, *, hop=None, go=True, token=None,
     ended = "asked"
     running = Running(where, hop) if go else None
     beaten = [0.0]
+    # when the hop's last change came, the gaps between them, the quiet
+    # state last said and when `where_now` was last asked
+    began = changed = time.monotonic()
+    gaps, quiet = [], {"said": None, "asked": 0.0}
+
+    def quiet_check(token):
+        now = time.monotonic()
+        gap = sorted(gaps)[len(gaps) // 2] if gaps else None
+        if now - quiet["asked"] < max(gap or 0.0, idle[1]):
+            return
+        quiet["asked"] = now
+        try:
+            facts = dict(where_now(token) or {})
+        except Exception as e:  # noqa: BLE001 - said, the tail goes on
+            facts = {"attached": False, "why_detached": (str(e).strip(
+            ).splitlines() or [""])[0][:120]}
+        from . import decide
+        facts.update(quiet_for=now - changed, interval=gap)
+        got = decide.tail_state(facts)
+        before, quiet["said"] = quiet["said"], got.path
+        # following again after a state said is said too; following from
+        # the start is what the first line already said
+        if got.path != before and (got.path != "following"
+                                   or before is not None):
+                told(quiet_line(db, got.path, facts, seen,
+                                time.time() - (now - (changed if gaps
+                                                      else began))))
 
     def beat_now(force=False):
         if not go or (not force and time.monotonic() - beaten[0]
@@ -676,6 +710,14 @@ def run_loop(where, db, look, log, noun, *, hop=None, go=True, token=None,
                         ended = "caught up"
                         break
                 pace.saw(n)
+                if n:
+                    now = time.monotonic()
+                    gaps.append(now - changed)
+                    del gaps[:-64]
+                    changed = now
+                    quiet["said"] = None
+                elif settled and where_now is not None:
+                    quiet_check(token)
                 if n or not settled:
                     wait = idle[0]
                     continue
@@ -701,6 +743,32 @@ def run_loop(where, db, look, log, noun, *, hop=None, go=True, token=None,
             term.__exit__(None, None, None)
     return seen, ended
 
+
+
+def quiet_line(db, state, facts, applied, since):
+    """The line a tail says of `db` when its state changes while it
+    carries nothing (`decide.tail_state`): where it is attached, where the
+    source is, what it applied and since when, and what the quiet is."""
+    when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(since))
+    at = (f"attached at {facts.get('at')}" if facts.get("at")
+          else "attached")
+    head = (f"{db}: {at}, the source at {facts.get('server', 'unread')};"
+            f" {applied:,} changes on your tables applied, the last"
+            f" since {when}")
+    if state == "detached":
+        head = (f"{db}: the reader is not attached"
+                f" ({facts.get('why_detached') or 'reason unread'});"
+                f" last at {facts.get('at') or 'unknown'},"
+                f" {applied:,} changes applied, the last since {when}")
+    elif state == "elsewhere":
+        head += (f" - quiet: the source wrote {facts.get('moved'):,} bytes"
+                 " of its log elsewhere, none on your tables")
+    elif state == "idle":
+        head += " - quiet: the source wrote nothing"
+    if facts.get("sync_back"):
+        head += ("; the provider's transfer service also writes the"
+                 " target: " + ", ".join(facts["sync_back"][:3]))
+    return head
 
 
 class Pace:
@@ -880,7 +948,14 @@ def follow(eng, db, go, token_path, log, noun, look, behind, every=1.0):
              token=token, save=save,
              ledger=getattr(fn(), "ledger", None) if callable(fn) else None,
              secrets=(eng.hop.source.password, eng.hop.target.password),
-             idle=(min(every, IDLE_MOST) / 8, every))
+             idle=(min(every, IDLE_MOST) / 8, every),
+             where_now=_where_now(eng, db))
+
+
+def _where_now(eng, db):
+    """The engine's `tail_where` for `db`, or None where it has none."""
+    fn = getattr(eng, "tail_where", None)
+    return (lambda token: fn(db, token)) if callable(fn) else None
 
 
 from .engines import hooks  # noqa: E402

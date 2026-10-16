@@ -6514,3 +6514,120 @@ def saml_asks(facts):
                      " opened first where it is encrypted")), f,
         prove=False)
     return {"request": request, "logout": logout, "assertion": assertion}
+
+#: the replica ids a reader may be given: the upper half of the range a
+#: server takes, where the ids an operator gives the servers they run
+#: rarely are; 0 and 2**32 - 1 are never a replica's
+READER_IDS = (2 ** 31, 2 ** 32 - 2)
+
+
+def _derived_reader_id(identity, taken):
+    """The first id the reader's identity (hop, database, purpose) walks
+    to that nothing named in `taken` holds: the same identity comes to the
+    same id run after run, two identities to two, and a walk over as many
+    steps as ids are taken always finds one free."""
+    import zlib
+    low, high = READER_IDS
+    span = high - low + 1
+    base = zlib.crc32(str(identity).encode())
+    for k in range(len(taken) + 1):
+        got = low + (base + k * 2654435761) % span
+        if got not in taken:
+            return got
+    raise AssertionError("unreachable: more steps than ids taken")
+
+
+def reader_server_id(facts):
+    """The replica id a binlog reader attaches under, from what the source
+    and this machine say is taken. Two readers on one source under one id:
+    the server ends the first when the second attaches, and each then
+    takes the other's place again. Returns (the `Choice`, the id or None).
+
+    `facts`: `named` (the hop's `server_id`, None where not set: honoured
+    while free and refused, naming who holds it, where not), `recorded`
+    (the id this reader was given before, in its run store), `identity`
+    (hop, database and purpose the derived id is walked from) and `taken`
+    ({id: who holds it}: the source's own `@@server_id`, the replicas it
+    lists, the ids other hops on this machine recorded on this source, the
+    replica ids the operator named, and an id a reader was ended under)."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+
+    def taken(x):
+        return dict(x.get("taken") or {})
+
+    def held(key):
+        return lambda x: (f"{x.get(key)} is held by "
+                          f"{taken(x).get(int(x.get(key)))}")
+
+    unnamed = Need("no id named for the hop",
+                   lambda x: x.get("named") in (None, ""),
+                   lambda x: f"the hop names server_id {x.get('named')}")
+    choice = climb("which replica id the binlog reader attaches under", (
+        Rung("named", "the id the hop names",
+             needs=(Need("an id named", lambda x: x.get("named")
+                         not in (None, ""), "no id is named"),
+                    Need("the named id free", lambda x: int(x.get("named"))
+                         not in taken(x), held("named"))),
+             because="the operator's id, while nothing else holds it"),
+        Rung("recorded", "the id this reader attached under before",
+             needs=(unnamed,
+                    Need("an id recorded", lambda x: x.get("recorded")
+                         is not None, "no id is recorded for this reader"),
+                    Need("the recorded id free", lambda x: int(
+                        x.get("recorded")) not in taken(x),
+                        held("recorded"))),
+             because="the same id as before: the source sees one reader"),
+        Rung("derived", "an id of the reader's own, from the hop, the"
+             " database and what it reads for",
+             needs=(unnamed,),
+             because="free of every id the source and this machine hold")),
+        f, prove=False)
+    got = {"named": lambda: int(f.get("named")),
+           "recorded": lambda: int(f.get("recorded")),
+           "derived": lambda: _derived_reader_id(f.get("identity"),
+                                                 taken(f))}
+    return choice, (got[choice.path]() if choice.path else None)
+
+
+def tail_state(facts):
+    """What a tail that carried nothing lately is doing, so its line says
+    why, not silence: the reader is not attached (and why), the source
+    wrote elsewhere and nothing on the hop's tables for longer than its
+    measured write interval, the source wrote nothing at all, or the tail
+    is following and the quiet is still within what the source's pace
+    makes ordinary. `facts`: `attached` (False: the source lists no reader
+    under the tail's id, or the read failed; None: not readable),
+    `why_detached`, `moved` (bytes the source's log moved since the last
+    change on the hop's tables; None: not read), `quiet_for` (seconds
+    since that change, or since the tail started) and `interval` (the
+    measured seconds between the hop's changes; None: none measured yet,
+    so any quiet is past it)."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+
+    def past(x):
+        gap = x.get("interval")
+        return gap is None or (x.get("quiet_for") or 0) > gap
+    return climb("what a quiet tail is doing", (
+        Rung("detached", "the reader is not attached",
+             needs=(Need("the reader not attached",
+                         lambda x: x.get("attached") is False,
+                         "the reader is attached or cannot be told"),),
+             because="nothing reaches the tail until it attaches again"),
+        Rung("elsewhere", "quiet: the source writes, none of it on the"
+             " hop's tables",
+             needs=(Need("the source's log moved",
+                         lambda x: (x.get("moved") or 0) > 0,
+                         "the source's log did not move"),
+                    Need("quiet past the write interval", past,
+                         "the quiet is within the measured interval")),
+             because="the tail read past every write; none was the hop's"),
+        Rung("idle", "quiet: the source wrote nothing",
+             needs=(Need("the source's log still",
+                         lambda x: x.get("moved") == 0,
+                         "the source's log moved or was not read"),
+                    Need("quiet past the write interval", past,
+                         "the quiet is within the measured interval")),
+             because="nothing was written to carry"),
+        Rung("following", "following", because="the quiet is ordinary")),
+        f, prove=False)
+||||||| b4242c6d

@@ -40,7 +40,8 @@ class Named(str):
 # name depending on the shape the mover uses. Kept as data so an engine only
 # has to say what kind of object it found, never what it means.
 SIGNATURES = [
-    ("Tencent DTS", ["__tencentdb__", "tencentdb", "dts_"]),
+    ("Tencent DTS", ["__tencentdb__", "tencentdb", "dts_",
+                     "__dst__tencentdb__sync_"]),
     ("AWS DMS", ["awsdms_", "dms_"]),
     ("Debezium", ["debezium_", "dbz_"]),
     ("Maxwell", ["maxwell"]),
@@ -101,7 +102,23 @@ NOT_DATA_SCHEMAS = {"percona": "Percona Toolkit",
                     "pgstream": "pgstream",
                     "airbyte_internal": "Airbyte",
                     "_peerdb_internal": "PeerDB"}
-NOT_DATA_TABLES = [
+#: (provider, the table shape it writes on the TARGET, what the table is):
+#: a managed transfer service's own tables on the side it writes, as its
+#: documentation and the field name them - never the operator's rows, so
+#: left out of the scope, the counts, the check, a copy back and a repair
+#: (`Hop.excluded` through `bookkeeping`), and said in one line
+#: (`provider_table`). Tencent DTS's sync-back table was read as data in
+#: a MySQL -> PostgreSQL run behind it (`__dst__tencentdb__sync_<id>`);
+#: AWS DMS keeps its control tables under `awsdms_` on the target
+PROVIDER_TABLES = [
+    ("Tencent DTS", "__dst__tencentdb__sync_", "sync-back table"),
+    ("AWS DMS", Named("awsdms_apply_exceptions"), "control table"),
+    ("AWS DMS", Named("awsdms_status"), "control table"),
+    ("AWS DMS", Named("awsdms_suspended_tables"), "control table"),
+    ("AWS DMS", Named("awsdms_history"), "control table"),
+    ("AWS DMS", Named("awsdms_validation_failures_v1"), "control table"),
+]
+NOT_DATA_TABLES = [(mover, pat) for mover, pat, _ in PROVIDER_TABLES] + [
     ("gh-ost", ("_", "_ghc")), ("gh-ost", ("_", "_ghk")),
     ("dlt", Named("_dlt_loads")), ("dlt", Named("_dlt_pipeline_state")),
     ("dlt", Named("_dlt_version")),
@@ -221,6 +238,24 @@ def urgent(by_mover):
                     out.append((label, COSTLY[kind]))
                     break
     return sorted(out)
+
+
+def provider_table(name):
+    """The line said for a table a managed transfer service writes on the
+    target (`PROVIDER_TABLES`), or None where `name` is not one."""
+    low = str(name).rsplit(".", 1)[-1].lower()
+    for mover, pat, what in PROVIDER_TABLES:
+        if _matches(low, pat):
+            return (f"{name}: the provider's {what} ({mover}), not your"
+                    " data: left out of scope, counts and the check")
+    return None
+
+
+def provider_tables(names):
+    """The lines for those of `names` a provider writes (`provider_table`),
+    in name order."""
+    return [got for got in (provider_table(n) for n in sorted(names or ()))
+            if got]
 
 
 def is_replication_artifact(name, schema=None):
