@@ -18,9 +18,9 @@ None.
 | conversion | 6 | 58 | 39425 | a value or an object as another engine takes it: canonical text, transforms, types, stored code |
 | reporting | 7 | 10 | 7437 | what the operator reads: the verdict, the result shape, the log, the metrics, the notices |
 | decision | 8 | 31 | 31806 | choosing: the rungs, the cost model, the joint plan, what each engine can do |
-| engines | 9 | 78 | 124910 | the contract every engine fills and each engine's own adapter |
+| engines | 9 | 78 | 124922 | the contract every engine fills and each engine's own adapter |
 | integrations | 9 | 22 | 23381 | the programs, libraries and provider APIs migkit wraps, and the other tools it meets |
-| workflows | 10 | 36 | 48256 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
+| workflows | 10 | 36 | 48266 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
 | cli | 11 | 4 | 10085 | the command line and the guide that asks for two addresses |
 | web | 11 | 30 | 5988 | the web view and its API |
 | tools | - | 12 | 6984 | the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them |
@@ -261,7 +261,7 @@ None.
 | `migkit/engines/mssql.py` | - | 5106 | 5: engines, engines.ase, engines.db2, storedcode.corpus, users | conversion 14, decision 17, engines 13, execution 6, integrations 2, persistence 3, reporting 4, safety 1, workflows 8 | - | 49: mssql_stub.py, a_copier_reconciles_and_retunes, a_masked_column_is_proved_as_written (+46) |
 | `migkit/engines/mssql_log.py` | - | 413 | 1: engines.mssql | conversion 1, decision 2 | - | 1: sql_server_changes_are_read_from_its_log_and_its_backups |
 | `migkit/engines/my_pass.py` | - | 298 | 2: engines.mysql, ship | engines 3, execution 3 | - | 1: mysql_tls_on_every_path |
-| `migkit/engines/mysql.py` | - | 11291 | 9: costmodel, crossmove, dba, engines, engines.distmysql (+4) | configuration 8, conversion 31, decision 35, engines 30, execution 16, persistence 12, reporting 5, safety 3, workflows 41 | reladiff | 192: cutover_harness.py, mysql_pair.py, a_clone_plugin_offer_on_mysql (+189) |
+| `migkit/engines/mysql.py` | - | 11303 | 9: costmodel, crossmove, dba, engines, engines.distmysql (+4) | configuration 8, conversion 31, decision 35, engines 30, execution 16, persistence 12, reporting 5, safety 3, workflows 41 | reladiff | 192: cutover_harness.py, mysql_pair.py, a_clone_plugin_offer_on_mysql (+189) |
 | `migkit/engines/neo4j.py` | - | 1042 | 1: engines | conversion 2, decision 6, engines 4, workflows 2 | - | 4: neo4j_compares_settings_and_settles_statistics_on_a_server, qdrant_and_neo4j_close_their_loose_ends, qdrant_and_neo4j_go_deeper (+1) |
 | `migkit/engines/neptune.py` | - | 1203 | 2: engines.neo4j, tooluse | conversion 1, decision 6, engines 4, integrations 5 | gremlinpython, neptunedata | 4: every_engine_is_titled_and_its_hop_is_named, neptune_on_gremlin_and_sparql_servers, the_cloud_native_services_as_sides (+1) |
 | `migkit/engines/oceanbase.py` | - | 475 | 0 | conversion 1, decision 2, engines 7, workflows 1 | - | 4: oceanbase_as_a_side_of_a_pair, the_cloud_native_accounts_are_carried, the_cloud_native_services_as_sides (+1) |
@@ -336,7 +336,7 @@ None.
 | `migkit/barriers.py` | - | 479 | 6: engines.dynamodb, engines.kafka, engines.mongodb, engines.redis, freeze (+1) | configuration 13, workflows 3 | - | 2: the_mark_travels_in_the_atomic_unit_on_kafka, tombstones_and_barriers |
 | `migkit/changetopic.py` | - | 1396 | 2: described, engines.firestore | configuration 6, conversion 4, engines 3 | - | 7: cosmos_fake.py, a_change_feed_is_read_in_commit_order, cockroachdb_follows_through_its_changefeed (+4) |
 | `migkit/consolidate.py` | - | 1313 | 6: archive, charsets, cli, hopkeys, reshard (+1) | configuration 2, conversion 3, decision 11, engines 8, reporting 1, workflows 3 | - | 6: a_consolidations_counters_are_of_the_tables_it_takes, a_split_and_a_consolidation_are_followed_and_cut_over_as_one, consolidation_follows_every_source (+3) |
-| `migkit/crossmove.py` | - | 1091 | 2: engines.hetero, tools | conversion 10, decision 13, engines 3, execution 2, safety 1, workflows 1 | - | 5: a_cross_engine_copy_goes_server_to_server, a_cross_engine_table_goes_the_way_measured_fastest, a_fault_in_each_copier_is_recovered_on_a_server (+2) |
+| `migkit/crossmove.py` | - | 1101 | 2: engines.hetero, tools | conversion 10, decision 13, engines 3, execution 2, safety 1, workflows 1 | - | 5: a_cross_engine_copy_goes_server_to_server, a_cross_engine_table_goes_the_way_measured_fastest, a_fault_in_each_copier_is_recovered_on_a_server (+2) |
 | `migkit/cutover.py` | - | 2543 | 10: approvals, cli, freeze, managed, planner (+5) | configuration 8, decision 10, engines 4, execution 2, persistence 11, reporting 9, safety 16, workflows 18 | - | 21: a_cutover_proof_on_postgres_reads_every_table, a_delta_reads_what_the_hop_takes_pg, a_kafka_cutover_drains_to_the_end_offsets (+18) |
 | `migkit/drainmark.py` | - | 338 | 3: capabilities, cli, cutover | engines 1, persistence 1, safety 2, workflows 2 | - | 4: a_resumed_range_and_a_seam_leave_their_record, drain_and_readiness_are_wired, drain_to_position_and_the_approval_gate (+1) |
 | `migkit/drift.py` | - | 385 | 10: cli, cutover, engines.hetero, engines.mssql, engines.mysql (+5) | engines 5, persistence 1, safety 1 | - | 9: a_check_says_what_changed_since_the_move, a_move_keeps_what_it_must, an_online_rewrites_working_tables_are_left_alone (+6) |

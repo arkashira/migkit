@@ -242,7 +242,17 @@ def _facts(eng, db, src_t, dst_t):
             cols()[0], (eng.src_engine.CANON_ENGINE,
                         eng.dst_engine.CANON_ENGINE)),
         # asked of a MySQL target once, and only for the rendered way
-        loads=lambda: _asked(eng.dst_engine._loads_here))
+        loads=lambda: _asked(lambda: _loads_here(eng.dst_engine)))
+
+
+def _loads_here(engine):
+    """Whether a MySQL target takes the bulk load, asked on its own
+    connection and closed after."""
+    conn = engine._conn("dst")
+    try:
+        return bool(engine._loads(conn))
+    finally:
+        conn.close()
 
 
 def _asked(read):

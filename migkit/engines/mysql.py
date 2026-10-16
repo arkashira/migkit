@@ -63,6 +63,18 @@ PLAIN, BINARY = "plain", "binary"
 #: through its own dump they do not (4.64 s). The dump read both tables in
 #: 0.94 s, 280 MB/s over four workers - `read`, which sizes the chunks.
 MY_BENCH = "docker pair, 2026-09-28"
+#: Every session on either side reads and writes with its time zone pinned
+#: here, so a temporal value is the same bytes on both sides.
+SESSION_ZONE = "+00:00"
+
+
+def _ql(value):
+    """A value as a MySQL string literal. MySQL reads a backslash inside a
+    string as an escape unless the session sets NO_BACKSLASH_ESCAPES, which
+    the default sql_mode does not: doubling the quote alone would turn a
+    value holding `\\n` into a newline on the way in."""
+    return "'" + str(value).replace("\\", "\\\\").replace("'", "''") + "'"
+
 
 #: The pass-through, which `MY_BENCH` predates, measured on its tables
 #: 2026-10-01 (`bench/table_ladder.py`): the same pair and machine, the
@@ -338,8 +350,8 @@ class MySQLEngine(Engine):
                        read_timeout=15, write_timeout=rt,
                        local_infile=opener is not pymysql.connect,
                        init_command=(
-                           f"set session time_zone = '+00:00', sql_mode = '{self.WRITE_SQL_MODE}'"
-                           if side == "dst" else "set session time_zone = '+00:00'"))
+                           f"set session time_zone = '{SESSION_ZONE}', sql_mode = '{self.WRITE_SQL_MODE}'"
+                           if side == "dst" else f"set session time_zone = '{SESSION_ZONE}'"))
             c._read_timeout = rt
             from ..attempts import transport
             sock = getattr(c, "_sock", None)
