@@ -132,6 +132,18 @@ Owner rule, 2026-10-17. Binding for every change, in this order:
 8. The hand-back is honest: commit, files, rows done / split / left with the
    exact remainder, cells moved, what was not run. Built without a run is left.
 
+## Merge gate
+
+Owner rule, 2026-10-17. A backlog row becomes DONE only after an independent
+review: the critic (a different model from the builder) reads the diff against
+the row's text and the implementation rules, and its PASS is recorded in
+`docs/agents/GATES.md` (row, date, verdict, reviewer, commit). The pre-commit
+hook (`tools/check_merge_gate.py --staged`) stops a commit that sets a row DONE
+without that line. A row that fails review is set to REVIEW with the finding in
+its status cell, never left DONE. A module nothing imports, a choice made
+outside `decide`, a swallowed exception reported as success, or a test that
+only mocks the owners is a REVISE, whatever the row says.
+
 ## Tests
 
 Write tests with every change; run them once, at the end (`tools/final_suite.py`). Mid-way, run only `python -m compileall -q migkit tests` and the guards: `tests/test_the_report_does_not_name_its_tools.py`, `tests/test_no_method_is_said_twice.py`, `tests/test_the_code_map_is_current.py`, `tests/test_every_engine_is_as_deep_as_postgres_and_mysql.py` (the depth matrix: a way you add needs a test naming it in its module's `PROVES`, or an `UNPROVED` entry; a gap you close loses its declaration in `capabilities.DEPTH_GAPS`), and `tests/test_the_scope_reads_alike_everywhere.py::test_a_listed_table_is_asked_of_the_scope_one_way`. Never connect to a real database: the docker sandbox only.

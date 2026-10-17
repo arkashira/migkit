@@ -10,6 +10,9 @@ py=".venv/bin/python"; [ -x "$py" ] || py=python3
   exit 1
 }
 
+# a backlog row goes DONE only through a recorded review (docs/agents/GATES.md)
+"$py" tools/check_merge_gate.py --staged || exit 1
+
 # the manual and the site are written from the code (tools/gen_docs.py): a
 # page behind it is written again here and the commit stopped, so the pages
 # go in with the change that moved them. A checkout without its own

@@ -179,7 +179,7 @@ STATE = ROOT / "docs" / "agents" / "STATE.md"
 CALLERS = ROOT / ".codemap" / "CALLERS.tsv"
 LOCAL = ROOT / ".codemap" / "LOCAL.md"
 INDEX = ROOT / "docs" / "backlog-index.md"
-STATUSES = ("DONE", "PARTLY", "IN PROGRESS", "OPEN", "BLOCKED",
+STATUSES = ("DONE", "REVIEW", "PARTLY", "IN PROGRESS", "OPEN", "BLOCKED",
             "NOT PURSUED")
 
 
@@ -317,7 +317,7 @@ def state():
         lines.append(f"| {area} | " + " | ".join(str(c.get(s, 0))
                                                 for s in STATUSES) + " |")
     left = [i for i, st, _ in rows if st in ("OPEN", "IN PROGRESS",
-                                             "PARTLY", "BLOCKED")]
+                                             "PARTLY", "BLOCKED", "REVIEW")]
     lines += ["", f"Not done ({len(left)}): " + ", ".join(left), ""]
     return "\n".join(lines) + "\n"
 
@@ -551,10 +551,10 @@ OUTSIDE = (("tools", "the generators, the full suite and the checks run"
 _BY_NAME = {
     "configuration": "hopkeys envkeys config addresses engineat clouds"
                      " variants managed init exit_portability",
-    "scope": "rowfilter case result_scope resume_scope",
+    "scope": "rowfilter case result_scope resume_scope partial_access",
     "persistence": "state checkpoint durable repairlog revert audit digests"
                    " evidence session runlog kept anchor setaside claims"
-                   " shared snapshot_state control_upgrade",
+                   " shared snapshot_state control_upgrade effect_checkpoint",
     "safety": "redact egress tls approvals interlock fencing ownership"
               " masking freeze leftovers lease lock_capability",
     "execution": "runner schedule throttle stall attempts ranges util"
@@ -563,16 +563,16 @@ _BY_NAME = {
     "conversion": "canon canon_oracle rowtext render transforms nanotime intervals geo"
                   " vectors bsontype charsets commercial zones copybook"
                   " pieces ddl ddl_shield merkle schema schema_drift loadtext schemaformats described tally grants"
-                  " identity_semantics partial_images private_proof",
+                  " identity_semantics partial_images private_proof lineage_evidence schema_epoch_plan",
     "reporting": "verdict report wording diagnostics export"
                  " troubleshooting telemetry traces notify servicecheck query_guard"
-                 " progress_cause support_reproducer",
+                 " progress_cause support_reproducer demand_benchmark",
     "decision": "decide costmodel jointplan factbook guarantees scanplan"
                 " tuning tune capabilities planner tableway repairways userways"
                 " scenarios legs sizing changedepth lacks sourcechange"
                 " bulkways ready cloud_readiness dba handwork rehearsal"
                 " faults model"
-                " machine topology waysaid workload advisors keyless offset_diag cost_envelope",
+                " machine topology waysaid workload advisors keyless offset_diag cost_envelope adaptive_bounds",
     "engines": "catalog pgslot binlog_marks binlog_payload logddl standby"
                " tailwhere quiet_source",
     "integrations": "tools tooluse toolversion cloudapi cloudseed"
@@ -587,7 +587,7 @@ _BY_NAME = {
                  " drainmark applyway replicasum rules leaves unchanged"
                  " streamout changetopic fleet second_reader proxy ring_buffer"
                  " ratchet rollback handoff_overlap"
-                 " backfill_race lob_transaction rollback_set"
+                 " backfill_race lob_transaction rollback_set shadow_resync"
                  " dag_scheduler reverse autopilot",
     "cli": "cli guide ui estate",
 }

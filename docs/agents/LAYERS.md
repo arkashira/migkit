@@ -26,23 +26,28 @@ A package imports its own rank and the ranks below it, never one above. A rank o
 
 Outside the rule: `tools` (the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them); `data` (the files migkit ships as resources).
 
-## Upward imports still listed: 430
+## Upward imports still listed: 437
 
 ### (not listed)
 
 - `migkit/__init__.py:3` configuration -> execution (`ack_lattice`)
+- `migkit/__init__.py:3` configuration -> decision (`adaptive_bounds`)
 - `migkit/__init__.py:3` configuration -> workflows (`backfill_race`)
 - `migkit/__init__.py:3` configuration -> execution (`cancel_recovery`)
 - `migkit/__init__.py:3` configuration -> persistence (`control_upgrade`)
 - `migkit/__init__.py:3` configuration -> decision (`cost_envelope`)
 - `migkit/__init__.py:3` configuration -> execution (`decomp_budget`)
+- `migkit/__init__.py:3` configuration -> reporting (`demand_benchmark`)
+- `migkit/__init__.py:3` configuration -> persistence (`effect_checkpoint`)
 - `migkit/__init__.py:3` configuration -> conversion (`grants`)
 - `migkit/__init__.py:3` configuration -> workflows (`handoff_overlap`)
 - `migkit/__init__.py:3` configuration -> conversion (`identity_semantics`)
+- `migkit/__init__.py:3` configuration -> conversion (`lineage_evidence`)
 - `migkit/__init__.py:3` configuration -> workflows (`lob_transaction`)
 - `migkit/__init__.py:3` configuration -> safety (`lock_capability`)
 - `migkit/__init__.py:3` configuration -> conversion (`merkle`)
 - `migkit/__init__.py:3` configuration -> decision (`offset_diag`)
+- `migkit/__init__.py:3` configuration -> scope (`partial_access`)
 - `migkit/__init__.py:3` configuration -> conversion (`partial_images`)
 - `migkit/__init__.py:3` configuration -> conversion (`private_proof`)
 - `migkit/__init__.py:3` configuration -> execution (`process_memory`)
@@ -54,6 +59,8 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/__init__.py:3` configuration -> workflows (`rollback`)
 - `migkit/__init__.py:3` configuration -> workflows (`rollback_set`)
 - `migkit/__init__.py:3` configuration -> conversion (`schema_drift`)
+- `migkit/__init__.py:3` configuration -> conversion (`schema_epoch_plan`)
+- `migkit/__init__.py:3` configuration -> workflows (`shadow_resync`)
 - `migkit/__init__.py:3` configuration -> persistence (`snapshot_state`)
 - `migkit/__init__.py:3` configuration -> reporting (`support_reproducer`)
 - `migkit/checkpoint.py:33` persistence -> decision (`sizing`)
