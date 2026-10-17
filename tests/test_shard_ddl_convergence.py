@@ -19,8 +19,21 @@ from migkit.shard_ddl import (
     ShardSplitError,
     UnrepresentableShardDDLError,
     validate_keyspace_and_routing,
+    decide_shard_ddl_compatibility,
 )
 from migkit.topology import KeySpace
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("shard_ddl", "shard_ddl_compatibility_rungs", "continue_async", "holds"),
+    ("shard_ddl", "shard_ddl_compatibility_rungs", "continue_async", "refuses"),
+    ("shard_ddl", "shard_ddl_compatibility_rungs", "barrier_sync", "holds"),
+    ("shard_ddl", "shard_ddl_compatibility_rungs", "barrier_sync", "refuses"),
+    ("shard_ddl", "shard_ddl_compatibility_rungs", "drain_and_lock", "holds"),
+    ("shard_ddl", "shard_ddl_compatibility_rungs", "drain_and_lock", "refuses"),
+    ("shard_ddl", "shard_ddl_compatibility_rungs", "refuse_incompatible_shard_ddl", "holds"),
+]
+
 
 
 def _base_columns():
@@ -823,3 +836,43 @@ def test_routing_key_migration_and_post_arrival_shard_split():
     ver = coord.verify_placement_and_schema("orders")
     assert ver.ok is True
     assert ver.total_rows_verified == 2
+
+
+def test_shard_ddl_compatibility_rungs_reachability():
+    """Prove all branches of shard_ddl_compatibility_rungs under watched()."""
+    with watched():
+        # 1. continue_async holds
+        c1 = decide_shard_ddl_compatibility({
+            "has_active_shards": True,
+            "pks_compatible": True,
+            "is_non_breaking_widening": True,
+        })
+        assert c1.rung.name == "continue_async"
+
+        # 2. continue_async refuses, barrier_sync holds
+        c2 = decide_shard_ddl_compatibility({
+            "has_active_shards": True,
+            "pks_compatible": True,
+            "is_non_breaking_widening": False,
+            "supremum_resolvable": True,
+        })
+        assert c2.rung.name == "barrier_sync"
+
+        # 3. barrier_sync refuses, drain_and_lock holds
+        c3 = decide_shard_ddl_compatibility({
+            "has_active_shards": True,
+            "pks_compatible": False,
+            "is_non_breaking_widening": False,
+            "is_table_level_operation": True,
+        })
+        assert c3.rung.name == "drain_and_lock"
+
+        # 4. drain_and_lock refuses, refuse_incompatible_shard_ddl holds
+        c4 = decide_shard_ddl_compatibility({
+            "has_active_shards": False,
+            "pks_compatible": False,
+            "is_non_breaking_widening": False,
+            "is_table_level_operation": False,
+        })
+        assert c4.rung.name == "refuse_incompatible_shard_ddl"
+

@@ -33,6 +33,46 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
+from . import decide
+
+
+# ---------------------------------------------------------------------------
+# Decision Engine Rungs (Row 636: RCH28)
+# ---------------------------------------------------------------------------
+
+def document_verification_strategy_rungs(facts: Optional[decide.Facts] = None) -> Tuple[decide.Rung, ...]:
+    """Ladder for selecting document model transformation verification strategies."""
+    return (
+        decide.Rung(
+            "indexed_lookup",
+            "verify documents via selective indexed point lookups",
+            needs=(
+                decide.Need("has_usable_index", lambda f: bool(f.get("has_usable_index"))),
+                decide.Need("selective_keys", lambda f: bool(f.get("selective_keys"))),
+                decide.Need("small_document_footprint", lambda f: bool(f.get("small_document_footprint"))),
+            ),
+        ),
+        decide.Rung(
+            "batched_fetch",
+            "verify documents via batched index range fetches",
+            needs=(
+                decide.Need("has_usable_index", lambda f: bool(f.get("has_usable_index"))),
+                decide.Need("moderate_working_set", lambda f: bool(f.get("moderate_working_set"))),
+            ),
+        ),
+        decide.Rung(
+            "stream_compare",
+            "verify documents via ordered cursor stream scan",
+        ),
+    )
+
+
+def decide_document_verification_strategy(facts: Union[Dict[str, Any], decide.Facts]) -> decide.Choice:
+    """Evaluates document verification strategy via decide ladder."""
+    f = facts if isinstance(facts, decide.Facts) else decide.Facts(facts)
+    return decide.climb("document_verification_strategy", document_verification_strategy_rungs(f), f)
+
+
 
 # ---------------------------------------------------------------------------
 # Enums and Care Badges

@@ -32,7 +32,21 @@ from migkit.cache_semantics import (
     UnsafeTestHostError,
     is_safe_test_host,
     validate_test_host,
+    decide_cache_eviction_pressure,
 )
+
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("cache_semantics", "cache_eviction_pressure_rungs", "nominal_pass", "holds"),
+    ("cache_semantics", "cache_eviction_pressure_rungs", "nominal_pass", "refuses"),
+    ("cache_semantics", "cache_eviction_pressure_rungs", "warning_review", "holds"),
+    ("cache_semantics", "cache_eviction_pressure_rungs", "warning_review", "refuses"),
+    ("cache_semantics", "cache_eviction_pressure_rungs", "volatile_under_pressure", "holds"),
+    ("cache_semantics", "cache_eviction_pressure_rungs", "volatile_under_pressure", "refuses"),
+    ("cache_semantics", "cache_eviction_pressure_rungs", "refuse_pressure_violation", "holds"),
+]
+
 
 
 def test_safe_test_host_enforcement():
@@ -655,4 +669,42 @@ def test_pure_ascii_compliance():
     for p in (mod_path, test_path):
         content = p.read_text(encoding="utf-8")
         assert all(ord(c) < 128 for c in content), f"non-ASCII character found in {p}"
+
+
+def test_cache_eviction_pressure_rungs_reachability():
+    """Prove all branches of cache_eviction_pressure_rungs under watched()."""
+    with watched():
+        # 1. nominal_pass holds
+        c1 = decide_cache_eviction_pressure({
+            "below_warning_threshold": True,
+            "zero_evictions": True,
+        })
+        assert c1.rung.name == "nominal_pass"
+
+        # 2. nominal_pass refuses, warning_review holds
+        c2 = decide_cache_eviction_pressure({
+            "below_warning_threshold": False,
+            "below_critical_threshold": True,
+            "zero_persistent_evicted": True,
+        })
+        assert c2.rung.name == "warning_review"
+
+        # 3. warning_review refuses, volatile_under_pressure holds
+        c3 = decide_cache_eviction_pressure({
+            "below_warning_threshold": False,
+            "below_critical_threshold": False,
+            "volatile_policy_approved": True,
+            "zero_persistent_evicted": True,
+        })
+        assert c3.rung.name == "volatile_under_pressure"
+
+        # 4. volatile_under_pressure refuses, refuse_pressure_violation holds
+        c4 = decide_cache_eviction_pressure({
+            "below_warning_threshold": False,
+            "below_critical_threshold": False,
+            "volatile_policy_approved": False,
+            "zero_persistent_evicted": False,
+        })
+        assert c4.rung.name == "refuse_pressure_violation"
+
 

@@ -30,7 +30,54 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
+from . import decide
+
 logger = logging.getLogger(__name__)
+
+
+# -----------------------------------------------------------------------------
+# Decision Engine Rungs (Row 632: RCH24)
+# -----------------------------------------------------------------------------
+
+def principal_security_policy_rungs(facts: Optional[decide.Facts] = None) -> Tuple[decide.Rung, ...]:
+    """Ladder for certifying principal security migration policies."""
+    return (
+        decide.Rung(
+            "strict_unwidened",
+            "execute strict unwidened principal migration",
+            needs=(
+                decide.Need("no_privilege_widening", lambda f: bool(f.get("no_privilege_widening"))),
+                decide.Need("no_silent_ownership", lambda f: bool(f.get("no_silent_ownership"))),
+                decide.Need("mapped_principals_valid", lambda f: bool(f.get("mapped_principals_valid"))),
+            ),
+        ),
+        decide.Rung(
+            "remediated_mapping",
+            "execute principal migration with explicit remediated mappings",
+            needs=(
+                decide.Need("remediation_mapped", lambda f: bool(f.get("remediation_mapped"))),
+                decide.Need("migrator_ownership_remediated", lambda f: bool(f.get("migrator_ownership_remediated"))),
+            ),
+        ),
+        decide.Rung(
+            "quarantined_approval",
+            "quarantine principal conflicts pending explicit operator signoff",
+            needs=(
+                decide.Need("conflicts_quarantined", lambda f: bool(f.get("conflicts_quarantined"))),
+            ),
+        ),
+        decide.Rung(
+            "unresolved_safety_violation",
+            "refuse migration due to unresolved security or provider account violation",
+        ),
+    )
+
+
+def decide_principal_security_policy(facts: Union[Dict[str, Any], decide.Facts]) -> decide.Choice:
+    """Evaluates principal security policy via decide ladder."""
+    f = facts if isinstance(facts, decide.Facts) else decide.Facts(facts)
+    return decide.climb("principal_security_policy", principal_security_policy_rungs(f), f)
+
 
 
 # -----------------------------------------------------------------------------

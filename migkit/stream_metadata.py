@@ -33,8 +33,56 @@ import time
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
+from . import decide
+
+
+# -----------------------------------------------------------------------------
+# Decision Engine Rungs (Row 635: RCH27)
+# -----------------------------------------------------------------------------
+
+def stream_promotion_readiness_rungs(facts: Optional[decide.Facts] = None) -> Tuple[decide.Rung, ...]:
+    """Ladder for certifying stream metadata and consumer promotion readiness."""
+    return (
+        decide.Rung(
+            "ready_for_promotion",
+            "promote target stream with zero lag and quiesced consumers",
+            needs=(
+                decide.Need("producers_fenced", lambda f: bool(f.get("producers_fenced"))),
+                decide.Need("lag_drained", lambda f: bool(f.get("lag_drained"))),
+                decide.Need("consumers_quiesced", lambda f: bool(f.get("consumers_quiesced"))),
+                decide.Need("schema_compatible", lambda f: bool(f.get("schema_compatible"))),
+            ),
+        ),
+        decide.Rung(
+            "quiesce_consumers_required",
+            "await active consumer group drain and quiescence",
+            needs=(
+                decide.Need("producers_fenced", lambda f: bool(f.get("producers_fenced"))),
+                decide.Need("lag_drained", lambda f: bool(f.get("lag_drained"))),
+            ),
+        ),
+        decide.Rung(
+            "drain_lag_required",
+            "await mirror lag drain behind fenced producers",
+            needs=(
+                decide.Need("producers_fenced", lambda f: bool(f.get("producers_fenced"))),
+            ),
+        ),
+        decide.Rung(
+            "refuse_unfenced_stream",
+            "refuse promotion because producers are not fenced or schema is incompatible",
+        ),
+    )
+
+
+def decide_stream_promotion_readiness(facts: Union[Dict[str, Any], decide.Facts]) -> decide.Choice:
+    """Evaluates stream promotion readiness via decide ladder."""
+    f = facts if isinstance(facts, decide.Facts) else decide.Facts(facts)
+    return decide.climb("stream_promotion_readiness", stream_promotion_readiness_rungs(f), f)
+
 
 SAFE_TEST_HOSTS: FrozenSet[str] = frozenset({"127.0.0.1", "localhost", "0.0.0.0", "::1"})
+
 
 
 # -----------------------------------------------------------------------------

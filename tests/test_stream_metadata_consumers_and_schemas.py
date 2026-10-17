@@ -49,11 +49,24 @@ from migkit.stream_metadata import (
     verify_consumer_restart,
     verify_schema_registry_state,
     verify_topic_and_retained_ranges,
+    decide_stream_promotion_readiness,
 )
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("stream_metadata", "stream_promotion_readiness_rungs", "ready_for_promotion", "holds"),
+    ("stream_metadata", "stream_promotion_readiness_rungs", "ready_for_promotion", "refuses"),
+    ("stream_metadata", "stream_promotion_readiness_rungs", "quiesce_consumers_required", "holds"),
+    ("stream_metadata", "stream_promotion_readiness_rungs", "quiesce_consumers_required", "refuses"),
+    ("stream_metadata", "stream_promotion_readiness_rungs", "drain_lag_required", "holds"),
+    ("stream_metadata", "stream_promotion_readiness_rungs", "drain_lag_required", "refuses"),
+    ("stream_metadata", "stream_promotion_readiness_rungs", "refuse_unfenced_stream", "holds"),
+]
 
 
 # -----------------------------------------------------------------------------
 # Fixtures and Builders
+
 # -----------------------------------------------------------------------------
 
 def _make_partitions(
@@ -830,3 +843,39 @@ def test_safe_test_hosts_and_pure_ascii_report() -> None:
     test_path = Path(__file__).resolve()
     assert mod_path.read_text(encoding="utf-8").isascii()
     assert test_path.read_text(encoding="utf-8").isascii()
+
+
+def test_stream_promotion_readiness_rungs_reachability():
+    """Prove all branches of stream_promotion_readiness_rungs under watched()."""
+    with watched():
+        # 1. ready_for_promotion holds
+        c1 = decide_stream_promotion_readiness({
+            "producers_fenced": True,
+            "lag_drained": True,
+            "consumers_quiesced": True,
+            "schema_compatible": True,
+        })
+        assert c1.rung.name == "ready_for_promotion"
+
+        # 2. ready_for_promotion refuses, quiesce_consumers_required holds
+        c2 = decide_stream_promotion_readiness({
+            "producers_fenced": True,
+            "lag_drained": True,
+            "consumers_quiesced": False,
+            "schema_compatible": True,
+        })
+        assert c2.rung.name == "quiesce_consumers_required"
+
+        # 3. quiesce_consumers_required refuses, drain_lag_required holds
+        c3 = decide_stream_promotion_readiness({
+            "producers_fenced": True,
+            "lag_drained": False,
+        })
+        assert c3.rung.name == "drain_lag_required"
+
+        # 4. drain_lag_required refuses, refuse_unfenced_stream holds
+        c4 = decide_stream_promotion_readiness({
+            "producers_fenced": False,
+        })
+        assert c4.rung.name == "refuse_unfenced_stream"
+

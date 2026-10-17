@@ -23,6 +23,54 @@ from migkit.schema_drift import (
     parse_type_signature,
 )
 from migkit.topology import KeySpace, Proof, Route, overlaps, prove_partition, range_gaps
+from . import decide
+
+
+# -----------------------------------------------------------------------------
+# Decision Engine Rungs (Row 638: RCH30)
+# -----------------------------------------------------------------------------
+
+def shard_ddl_compatibility_rungs(facts: Optional[decide.Facts] = None) -> Tuple[decide.Rung, ...]:
+    """Ladder for coordinating shard DDL compatibility and schema evolution."""
+    return (
+        decide.Rung(
+            "continue_async",
+            "permit asynchronous shard DDL without cross-shard execution barrier",
+            needs=(
+                decide.Need("has_active_shards", lambda f: bool(f.get("has_active_shards"))),
+                decide.Need("pks_compatible", lambda f: bool(f.get("pks_compatible"))),
+                decide.Need("is_non_breaking_widening", lambda f: bool(f.get("is_non_breaking_widening"))),
+            ),
+        ),
+        decide.Rung(
+            "barrier_sync",
+            "coordinate shard DDL using synchronized convergence barrier across active shards",
+            needs=(
+                decide.Need("has_active_shards", lambda f: bool(f.get("has_active_shards"))),
+                decide.Need("pks_compatible", lambda f: bool(f.get("pks_compatible"))),
+                decide.Need("supremum_resolvable", lambda f: bool(f.get("supremum_resolvable"))),
+            ),
+        ),
+        decide.Rung(
+            "drain_and_lock",
+            "drain pending events and acquire exclusive table lock for destructive DDL",
+            needs=(
+                decide.Need("has_active_shards", lambda f: bool(f.get("has_active_shards"))),
+                decide.Need("is_table_level_operation", lambda f: bool(f.get("is_table_level_operation"))),
+            ),
+        ),
+        decide.Rung(
+            "refuse_incompatible_shard_ddl",
+            "refuse shard DDL due to primary key divergence, missing shards, or unresolvable supremum",
+        ),
+    )
+
+
+def decide_shard_ddl_compatibility(facts: Union[Dict[str, Any], decide.Facts]) -> decide.Choice:
+    """Evaluates shard DDL compatibility via decide ladder."""
+    f = facts if isinstance(facts, decide.Facts) else decide.Facts(facts)
+    return decide.climb("shard_ddl_compatibility", shard_ddl_compatibility_rungs(f), f)
+
 
 
 class CareBadge(str, enum.Enum):

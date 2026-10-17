@@ -34,6 +34,59 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
+from . import decide
+
+
+# -----------------------------------------------------------------------------
+# Decision Engine Rungs (Row 634: RCH26)
+# -----------------------------------------------------------------------------
+
+def history_capture_mechanism_rungs(facts: Optional[decide.Facts] = None) -> Tuple[decide.Rung, ...]:
+    """Ladder for selecting CDC and change history capture mechanisms."""
+    return (
+        decide.Rung(
+            "wal_cdc",
+            "capture complete change history using write-ahead log CDC stream",
+            needs=(
+                decide.Need("has_wal_cdc", lambda f: bool(f.get("has_wal_cdc"))),
+                decide.Need("retention_window_valid", lambda f: bool(f.get("retention_window_valid"))),
+            ),
+        ),
+        decide.Rung(
+            "change_tracking",
+            "capture row version history using native change tracking",
+            needs=(
+                decide.Need("has_change_tracking", lambda f: bool(f.get("has_change_tracking"))),
+                decide.Need("version_tracking_enabled", lambda f: bool(f.get("version_tracking_enabled"))),
+            ),
+        ),
+        decide.Rung(
+            "temporal_tables",
+            "capture system-versioned temporal audit history",
+            needs=(
+                decide.Need("has_temporal_tables", lambda f: bool(f.get("has_temporal_tables"))),
+            ),
+        ),
+        decide.Rung(
+            "snapshot_polling",
+            "capture final state convergence via periodic snapshot polling",
+            needs=(
+                decide.Need("is_final_state_goal", lambda f: bool(f.get("is_final_state_goal"))),
+            ),
+        ),
+        decide.Rung(
+            "refuse_incompatible_history",
+            "refuse migration due to unachievable history contract",
+        ),
+    )
+
+
+def decide_history_capture_mechanism(facts: Union[Dict[str, Any], decide.Facts]) -> decide.Choice:
+    """Evaluates history capture mechanism via decide ladder."""
+    f = facts if isinstance(facts, decide.Facts) else decide.Facts(facts)
+    return decide.climb("history_capture_mechanism", history_capture_mechanism_rungs(f), f)
+
+
 
 # -----------------------------------------------------------------------------
 # Care Badges and Core Enums

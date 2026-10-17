@@ -35,7 +35,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
-from . import checkpoint, decide, lease
+from . import checkpoint, decide, lease, principal_migration
 
 CARE_ACTION = "ACTION"
 CARE_REVIEW = "REVIEW"

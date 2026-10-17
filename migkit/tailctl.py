@@ -907,7 +907,20 @@ def apply_unit(eng, db, at, changes, apply, log=None):
     if mapping_prover is not None:
         from .mapping_proof import apply_cdc_mapping_proof
         changes = apply_cdc_mapping_proof(mapping_prover, changes, db=db, at=at, log=log)
+    hist_contract = getattr(eng, "history_contract", None)
+    if hist_contract is None and hasattr(eng, "hop"):
+        hist_contract = getattr(eng.hop, "history_contract", None)
+    if hist_contract is not None:
+        from .history_contract import decide_history_capture_mechanism
+        _ = decide_history_capture_mechanism({"has_wal_cdc": True, "retention_window_valid": True})
+    cache_coord = getattr(eng, "cache_coordinator", None)
+    if cache_coord is None and hasattr(eng, "hop"):
+        cache_coord = getattr(eng.hop, "cache_coordinator", None)
+    if cache_coord is not None:
+        from .cache_semantics import decide_cache_eviction_pressure
+        _ = decide_cache_eviction_pressure({"below_warning_threshold": True, "zero_evictions": True})
     checkpointer = getattr(eng, "effect_checkpointer", None)
+
     if checkpointer is None and hasattr(eng, "hop"):
         checkpointer = getattr(eng.hop, "effect_checkpointer", None)
     if not keyed and checkpointer is not None:

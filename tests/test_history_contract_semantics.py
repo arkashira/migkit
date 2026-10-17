@@ -52,10 +52,25 @@ from migkit.history_contract import (
     select_capture_mechanism,
     simulate_mechanism_capture,
     validate_safe_endpoint,
+    decide_history_capture_mechanism,
 )
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("history_contract", "history_capture_mechanism_rungs", "wal_cdc", "holds"),
+    ("history_contract", "history_capture_mechanism_rungs", "wal_cdc", "refuses"),
+    ("history_contract", "history_capture_mechanism_rungs", "change_tracking", "holds"),
+    ("history_contract", "history_capture_mechanism_rungs", "change_tracking", "refuses"),
+    ("history_contract", "history_capture_mechanism_rungs", "temporal_tables", "holds"),
+    ("history_contract", "history_capture_mechanism_rungs", "temporal_tables", "refuses"),
+    ("history_contract", "history_capture_mechanism_rungs", "snapshot_polling", "holds"),
+    ("history_contract", "history_capture_mechanism_rungs", "snapshot_polling", "refuses"),
+    ("history_contract", "history_capture_mechanism_rungs", "refuse_incompatible_history", "holds"),
+]
 
 
 @pytest.fixture
+
 def tmp_dir():
     d = Path(tempfile.mkdtemp(prefix="test_history_contract_"))
     yield d
@@ -819,4 +834,50 @@ def test_out_of_order_before_image_update_pre_cutoff_archive_and_state_drift():
     assert AnomalyCategory.BEFORE_IMAGE_MISSING_ON_UPDATE in hc_cats
     assert AnomalyCategory.OUT_OF_ORDER_HISTORY_SEQUENCE in hc_cats
     assert AnomalyCategory.RETENTION_WINDOW_GAP in hc_cats
+
+
+def test_history_capture_mechanism_rungs_reachability():
+    """Prove all branches of history_capture_mechanism_rungs under watched()."""
+    with watched():
+        # 1. wal_cdc holds
+        c1 = decide_history_capture_mechanism({
+            "has_wal_cdc": True,
+            "retention_window_valid": True,
+        })
+        assert c1.rung.name == "wal_cdc"
+
+        # 2. wal_cdc refuses, change_tracking holds
+        c2 = decide_history_capture_mechanism({
+            "has_wal_cdc": False,
+            "has_change_tracking": True,
+            "version_tracking_enabled": True,
+        })
+        assert c2.rung.name == "change_tracking"
+
+        # 3. change_tracking refuses, temporal_tables holds
+        c3 = decide_history_capture_mechanism({
+            "has_wal_cdc": False,
+            "has_change_tracking": False,
+            "has_temporal_tables": True,
+        })
+        assert c3.rung.name == "temporal_tables"
+
+        # 4. temporal_tables refuses, snapshot_polling holds
+        c4 = decide_history_capture_mechanism({
+            "has_wal_cdc": False,
+            "has_change_tracking": False,
+            "has_temporal_tables": False,
+            "is_final_state_goal": True,
+        })
+        assert c4.rung.name == "snapshot_polling"
+
+        # 5. snapshot_polling refuses, refuse_incompatible_history holds
+        c5 = decide_history_capture_mechanism({
+            "has_wal_cdc": False,
+            "has_change_tracking": False,
+            "has_temporal_tables": False,
+            "is_final_state_goal": False,
+        })
+        assert c5.rung.name == "refuse_incompatible_history"
+
 

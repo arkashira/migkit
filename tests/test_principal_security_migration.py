@@ -51,12 +51,25 @@ from migkit.principal_migration import (
     SecurityType,
     SequenceDependency,
     SilentMigratorOwnershipError,
+    decide_principal_security_policy,
 )
+from tests.rung_branches import watched
 
 PROVES = [
     ("principal-migration.security-semantics", "postgres"),
     ("principal-migration.security-semantics", "mysql"),
 ]
+
+PROVES_RUNGS = [
+    ("principal_migration", "principal_security_policy_rungs", "strict_unwidened", "holds"),
+    ("principal_migration", "principal_security_policy_rungs", "strict_unwidened", "refuses"),
+    ("principal_migration", "principal_security_policy_rungs", "remediated_mapping", "holds"),
+    ("principal_migration", "principal_security_policy_rungs", "remediated_mapping", "refuses"),
+    ("principal_migration", "principal_security_policy_rungs", "quarantined_approval", "holds"),
+    ("principal_migration", "principal_security_policy_rungs", "quarantined_approval", "refuses"),
+    ("principal_migration", "principal_security_policy_rungs", "unresolved_safety_violation", "holds"),
+]
+
 
 
 # -----------------------------------------------------------------------------
@@ -620,3 +633,44 @@ def test_durable_checkpoint_resume_o1():
         assert loaded.is_verified("TABLE", "public.users", "hash_abc_123") is True
         assert loaded.is_verified("TABLE", "public.users", "hash_different") is False
         assert loaded.is_verified("TABLE", "public.orders", "hash_abc_123") is False
+
+
+# -----------------------------------------------------------------------------
+# Test 14: Decide Ladder Rung Reachability under watched()
+# -----------------------------------------------------------------------------
+
+def test_principal_security_policy_rungs_reachability():
+    """Prove all branches of principal_security_policy_rungs under watched()."""
+    with watched():
+        # 1. strict_unwidened holds
+        c1 = decide_principal_security_policy({
+            "no_privilege_widening": True,
+            "no_silent_ownership": True,
+            "mapped_principals_valid": True,
+        })
+        assert c1.rung.name == "strict_unwidened"
+
+        # 2. strict_unwidened refuses, remediated_mapping holds
+        c2 = decide_principal_security_policy({
+            "no_privilege_widening": False,
+            "remediation_mapped": True,
+            "migrator_ownership_remediated": True,
+        })
+        assert c2.rung.name == "remediated_mapping"
+
+        # 3. remediated_mapping refuses, quarantined_approval holds
+        c3 = decide_principal_security_policy({
+            "no_privilege_widening": False,
+            "remediation_mapped": False,
+            "conflicts_quarantined": True,
+        })
+        assert c3.rung.name == "quarantined_approval"
+
+        # 4. quarantined_approval refuses, unresolved_safety_violation holds
+        c4 = decide_principal_security_policy({
+            "no_privilege_widening": False,
+            "remediation_mapped": False,
+            "conflicts_quarantined": False,
+        })
+        assert c4.rung.name == "unresolved_safety_violation"
+

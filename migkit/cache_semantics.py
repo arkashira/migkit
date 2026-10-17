@@ -11,7 +11,54 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from . import decide
+
 SAFE_TEST_HOSTS = {"127.0.0.1", "localhost", "0.0.0.0", "::1"}
+
+
+# ---------------------------------------------------------------------------
+# Decision Engine Rungs (Row 637: RCH29)
+# ---------------------------------------------------------------------------
+
+def cache_eviction_pressure_rungs(facts: Optional[decide.Facts] = None) -> Tuple[decide.Rung, ...]:
+    """Ladder for certifying cache eviction dynamics and memory pressure."""
+    return (
+        decide.Rung(
+            "nominal_pass",
+            "cache memory utilization and eviction within nominal limits",
+            needs=(
+                decide.Need("below_warning_threshold", lambda f: bool(f.get("below_warning_threshold"))),
+                decide.Need("zero_evictions", lambda f: bool(f.get("zero_evictions"))),
+            ),
+        ),
+        decide.Rung(
+            "warning_review",
+            "cache memory approaching warning threshold but zero persistent evictions",
+            needs=(
+                decide.Need("below_critical_threshold", lambda f: bool(f.get("below_critical_threshold"))),
+                decide.Need("zero_persistent_evicted", lambda f: bool(f.get("zero_persistent_evicted"))),
+            ),
+        ),
+        decide.Rung(
+            "volatile_under_pressure",
+            "volatile key eviction approved under memory pressure",
+            needs=(
+                decide.Need("volatile_policy_approved", lambda f: bool(f.get("volatile_policy_approved"))),
+                decide.Need("zero_persistent_evicted", lambda f: bool(f.get("zero_persistent_evicted"))),
+            ),
+        ),
+        decide.Rung(
+            "refuse_pressure_violation",
+            "refuse cache migration due to persistent key eviction or memory exhaustion",
+        ),
+    )
+
+
+def decide_cache_eviction_pressure(facts: Union[Dict[str, Any], decide.Facts]) -> decide.Choice:
+    """Evaluates cache eviction memory pressure via decide ladder."""
+    f = facts if isinstance(facts, decide.Facts) else decide.Facts(facts)
+    return decide.climb("cache_eviction_pressure", cache_eviction_pressure_rungs(f), f)
+
 
 
 class CacheSemanticsError(Exception):

@@ -33,11 +33,22 @@ from migkit.document_model import (
     VerificationFetchStrategy,
     VerificationLeaseLock,
     select_verification_strategy,
+    decide_document_verification_strategy,
 )
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("document_model", "document_verification_strategy_rungs", "indexed_lookup", "holds"),
+    ("document_model", "document_verification_strategy_rungs", "indexed_lookup", "refuses"),
+    ("document_model", "document_verification_strategy_rungs", "batched_fetch", "holds"),
+    ("document_model", "document_verification_strategy_rungs", "batched_fetch", "refuses"),
+    ("document_model", "document_verification_strategy_rungs", "stream_compare", "holds"),
+]
 
 
 # ---------------------------------------------------------------------------
 # Fixtures & Sample Relational-to-Document Schema
+
 # ---------------------------------------------------------------------------
 
 
@@ -680,3 +691,30 @@ def test_pure_ascii_and_zero_clutter_compliance() -> None:
             raw = f.read()
         non_ascii = [b for b in raw if b > 127]
         assert not non_ascii, f"Non-ASCII bytes found in {path}"
+
+
+def test_document_verification_strategy_rungs_reachability():
+    """Prove all branches of document_verification_strategy_rungs under watched()."""
+    with watched():
+        # 1. indexed_lookup holds
+        c1 = decide_document_verification_strategy({
+            "has_usable_index": True,
+            "selective_keys": True,
+            "small_document_footprint": True,
+        })
+        assert c1.rung.name == "indexed_lookup"
+
+        # 2. indexed_lookup refuses, batched_fetch holds
+        c2 = decide_document_verification_strategy({
+            "has_usable_index": True,
+            "selective_keys": False,
+            "moderate_working_set": True,
+        })
+        assert c2.rung.name == "batched_fetch"
+
+        # 3. batched_fetch refuses, stream_compare holds
+        c3 = decide_document_verification_strategy({
+            "has_usable_index": False,
+        })
+        assert c3.rung.name == "stream_compare"
+
