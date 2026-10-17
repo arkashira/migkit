@@ -4519,10 +4519,47 @@ def digest_expr(engine, row_expr, way="md5"):
     raise ValueError(f"no cross-engine digest for engine {engine!r}")
 
 
-def row_expr(engine, columns):
+def lob_projection(engine, col, is_binary=False):
+    """Server-side lightweight projection hash for LOB columns > 64KB (FIELD-OPS06).
+    Produces a fixed 32-hex MD5 combining length, head 1024 bytes, and tail 1024 bytes.
+    Avoids multi-megabyte row concatenation in SQL memory and network egress."""
+    engine = dialect(engine)
+    if engine == "mysql":
+        c = f"`{col}`"
+        len_expr = f"coalesce(octet_length({c}), 0)"
+        if is_binary:
+            head = f"hex(substr({c}, 1, 1024))"
+            tail = f"hex(substr({c}, -1024))"
+        else:
+            head = f"substr({c}, 1, 1024)"
+            tail = f"substr({c}, -1024)"
+        return f"md5(concat({len_expr}, ':', {head}, ':', {tail}))"
+    if engine == "postgres":
+        c = f'"{col}"'
+        len_expr = f"coalesce(octet_length({c}), 0)::text"
+        if is_binary:
+            head = f"encode(substr({c}, 1, 1024), 'hex')"
+            tail = f"encode(right({c}, 1024), 'hex')"
+        else:
+            head = f"substr({c}::text, 1, 1024)"
+            tail = f"right({c}::text, 1024)"
+        return f"md5({len_expr} || ':' || {head} || ':' || {tail})"
+    if engine == "sqlite":
+        c = f'"{col}"'
+        len_expr = f"coalesce(length({c}), 0)"
+        head = f"substr({c}, 1, 1024)"
+        tail = f"substr({c}, -1024)"
+        return f"({len_expr} || ':' || {head} || ':' || {tail})"
+    raise ValueError(f"no lob projection for engine {engine!r}")
+
+
+def row_expr(engine, columns, lobs=frozenset()):
     """The canonical injective row text for `[(name, class)]`."""
     from . import rowtext
-    parts = [expr(engine, name, cls) for name, cls in columns]
+    lobs = frozenset(lobs or ())
+    parts = [lob_projection(engine, name, cls == "blob") if name in lobs
+             else expr(engine, name, cls)
+             for name, cls in columns]
     engine = dialect(engine)
     if engine == "mysql":
         return rowtext.mysql_row_from(parts)

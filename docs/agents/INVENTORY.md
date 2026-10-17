@@ -15,7 +15,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 | persistence | 3 | 15 | 6880 | state that outlives a process: checkpoints, the audit record, the run's own files, the undo |
 | safety | 4 | 11 | 11423 | who may write, what must not leak, what keeps a mover from writing twice |
 | execution | 5 | 12 | 7694 | the running of work: processes, ranges, retries, pacing, stalls, sizing of what runs at once |
-| conversion | 6 | 62 | 42660 | a value or an object as another engine takes it: canonical text, transforms, types, stored code |
+| conversion | 6 | 62 | 42697 | a value or an object as another engine takes it: canonical text, transforms, types, stored code |
 | reporting | 7 | 11 | 8378 | what the operator reads: the verdict, the result shape, the log, the metrics, the notices |
 | decision | 8 | 32 | 33795 | choosing: the rungs, the cost model, the joint plan, what each engine can do |
 | engines | 9 | 79 | 127866 | the contract every engine fills and each engine's own adapter |
@@ -30,7 +30,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 
 | file | owner | lines | imported by | reaches | wraps | tests |
 |---|---|---|---|---|---|---|
-| `migkit/__init__.py` | - | 1 | 47: avrostream, barriers, binlog_marks, capabilities, cli (+42) | - | - | 800: conftest.py, holdkit.py, large_values_rig.py (+797) |
+| `migkit/__init__.py` | - | 1 | 47: avrostream, barriers, binlog_marks, capabilities, cli (+42) | - | - | 801: conftest.py, holdkit.py, large_values_rig.py (+798) |
 | `migkit/addresses.py` | - | 529 | 10: config, diagnostics, engineat, guide, hopkeys (+5) | configuration 2, engines 4 | - | 5: a_hop_file_is_checked_whole_at_load, a_hop_from_two_addresses, copybook_files_as_a_side_of_a_pair (+2) |
 | `migkit/clouds.py` | - | 337 | 13: case, cli, cloudseed, engines.kafka, engines.mysql (+8) | configuration 3 | - | 11: a_hop_from_two_addresses, a_managed_mysql_says_how_long_its_log_is_kept, a_managed_side_is_read_and_held_by_what_its_admin_may_do (+8) |
 | `migkit/config.py` | scope: Hop.excluded, Hop.carries, Hop.target_table_in | 2456 | 61: approvals, backupseed, carriers, changetopic, cli (+56) | configuration 14, conversion 1, engines 1, execution 9, integrations 4, persistence 3, reporting 1, safety 4 | - | 837: bigquery_fake.py, cosmos_fake.py, dynamodb_on_moto.py (+834) |
@@ -106,7 +106,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 | file | owner | lines | imported by | reaches | wraps | tests |
 |---|---|---|---|---|---|---|
 | `migkit/bsontype.py` | - | 341 | 2: canon, engines.base | conversion 10 | - | 1: type_fidelity_classes |
-| `migkit/canon.py` | - | 4742 | 91: applyway, archive, avrostream, bsontype, changetopic (+86) | conversion 40, decision 1, engines 2 | - | 100: a_bigquery_pair_follows_the_hops_mapping, a_column_renders_as_canon_renders, a_cross_engine_copy_goes_server_to_server (+97) |
+| `migkit/canon.py` | - | 4779 | 91: applyway, archive, avrostream, bsontype, changetopic (+86) | conversion 40, decision 1, engines 2 | - | 101: a_bigquery_pair_follows_the_hops_mapping, a_column_renders_as_canon_renders, a_cross_engine_copy_goes_server_to_server (+98) |
 | `migkit/charsets.py` | - | 1873 | 4: cli, engines.base, hopkeys, tableengine | configuration 1, conversion 10, decision 3, engines 5, safety 1, workflows 2 | - | 2: a_character_set_change_is_planned_and_proved, the_move_way_rungs_hold_and_refuse |
 | `migkit/commercial.py` | - | 639 | 5: canon, engines.base, engines.hetero, engines.mssql, engines.oracle | conversion 9, engines 1 | - | 3: a_column_renders_as_canon_renders, type_fidelity_classes, types_only_commercial_engines_have |
 | `migkit/copybook.py` | - | 1617 | 2: engines.copybook, engines.db2i | - | - | 2: copybook_files_move_into_postgresql, copybook_records_read_as_ibm_documents |

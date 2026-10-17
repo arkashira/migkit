@@ -13049,7 +13049,7 @@ Acceptance test: A table with 30 text columns is verified for row count, content
 
 ### FIELD-OPS06.lob-projection-hash-pushdown — Server-side length and chunked substring hashing for LOB columns > 64KB
 
-**OPEN — P0; verify; size M; index row 682.**
+**DONE (2026-10-17; canon.lob_projection server-side pushdown; tests/test_lob_projection_hash.py) — P0; verify; size M; index row 682.**
 
 Parent/dependencies and code: `migkit/scanplan.py`, `migkit/leaves.py`.
 
