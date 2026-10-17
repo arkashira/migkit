@@ -6,6 +6,7 @@ __all__ = (
     "ack_lattice",
     "adaptive_bounds",
     "agent_control",
+    "anti_corruption",
     "ai_proof_loop",
     "backfill_race",
     "cache_semantics",

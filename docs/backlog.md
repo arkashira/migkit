@@ -12491,7 +12491,7 @@ Status discipline: Implemented and verified by the module and test named in the 
 
 ### RCH39.anti-corruption — Test the verifier against its own blind spots
 
-**OPEN — P1; research-derived extension; size L; index row 647.**
+**REVIEW 2026-10-17 — P1; research-derived extension; size L; index row 647.**
 
 Existing parent/dependencies: SMART-N10, existing mutation infrastructure. Code surfaces: canon, storedcode/mutants, tests.
 
@@ -12501,7 +12501,7 @@ Proposed deeper mechanism: Extend mutation testing beyond stored code: intention
 
 Acceptance evidence: Mutation score reported per coverage class and engine; surviving mutants are explicit proof debt, not passed tests; false-same regressions block releases.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status discipline: Implemented and verified by the module and test named in the index row.
 
 ### RCH40.end-to-end-bar — Gate superiority claims on reproducible complete migrations
 

@@ -10,7 +10,7 @@ None.
 
 | package | rank | files | lines | responsibility |
 |---|---|---|---|---|
-| configuration | 1 | 11 | 10477 | what a hop says: its keys, the environment, the endpoints and the addresses it is built from |
+| configuration | 1 | 11 | 10478 | what a hop says: its keys, the environment, the endpoints and the addresses it is built from |
 | scope | 2 | 5 | 3101 | which objects and rows a hop carries |
 | persistence | 3 | 18 | 8997 | state that outlives a process: checkpoints, the audit record, the run's own files, the undo |
 | safety | 4 | 12 | 12198 | who may write, what must not leak, what keeps a mover from writing twice |
@@ -20,7 +20,7 @@ None.
 | decision | 8 | 36 | 36710 | choosing: the rungs, the cost model, the joint plan, what each engine can do |
 | engines | 9 | 80 | 128671 | the contract every engine fills and each engine's own adapter |
 | integrations | 9 | 23 | 24368 | the programs, libraries and provider APIs migkit wraps, and the other tools it meets |
-| workflows | 10 | 77 | 99394 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
+| workflows | 10 | 78 | 99605 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
 | cli | 11 | 4 | 10423 | the command line and the guide that asks for two addresses |
 | web | 11 | 30 | 6451 | the web view and its API |
 | tools | - | 13 | 7186 | the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them |
@@ -30,7 +30,7 @@ None.
 
 | file | owner | lines | imported by | reaches | wraps | tests |
 |---|---|---|---|---|---|---|
-| `migkit/__init__.py` | - | 75 | 51: avrostream, barriers, binlog_marks, capabilities, cli (+46) | - | - | 818: conftest.py, holdkit.py, large_values_rig.py (+815) |
+| `migkit/__init__.py` | - | 76 | 51: avrostream, barriers, binlog_marks, capabilities, cli (+46) | - | - | 819: conftest.py, holdkit.py, large_values_rig.py (+816) |
 | `migkit/addresses.py` | - | 529 | 10: config, diagnostics, engineat, guide, hopkeys (+5) | configuration 2, engines 4 | - | 5: a_hop_file_is_checked_whole_at_load, a_hop_from_two_addresses, copybook_files_as_a_side_of_a_pair (+2) |
 | `migkit/clouds.py` | - | 337 | 13: case, cli, cloudseed, engines.kafka, engines.mysql (+8) | configuration 3 | - | 11: a_hop_from_two_addresses, a_managed_mysql_says_how_long_its_log_is_kept, a_managed_side_is_read_and_held_by_what_its_admin_may_do (+8) |
 | `migkit/config.py` | scope: Hop.excluded, Hop.carries, Hop.target_table_in | 2478 | 61: approvals, backupseed, carriers, changetopic, cli (+56) | configuration 14, conversion 1, engines 1, execution 13, integrations 4, persistence 3, reporting 1, safety 4 | - | 840: bigquery_fake.py, cosmos_fake.py, dynamodb_on_moto.py (+837) |
@@ -361,12 +361,13 @@ None.
 | `migkit/toolversion.py` | - | 268 | 5: engines.base, movers, runner, tools, unchanged | execution 4, integrations 1 | - | 6: handwork_pg, one_runner_for_every_program, the_install_is_pinned (+3) |
 | `migkit/workflow_exporter.py` | - | 176 | 1: integrations | configuration 1 | - | 1: the_folded_ha_and_workflow_ways |
 
-## workflows (77 files)
+## workflows (78 files)
 
 | file | owner | lines | imported by | reaches | wraps | tests |
 |---|---|---|---|---|---|---|
 | `migkit/agent_control.py` | - | 1714 | 0 | decision 1, execution 1, persistence 1, reporting 1, safety 1, workflows 1 | - | 1: agent_control_constrained_ops |
 | `migkit/ai_proof_loop.py` | - | 1078 | 0 | - | - | 1: ai_proof_loop_executable_evidence |
+| `migkit/anti_corruption.py` | - | 211 | 0 | - | - | 1: anti_corruption_verifier_blind_spots |
 | `migkit/applyway.py` | - | 359 | 1: engines.base | conversion 1, decision 1, engines 1 | - | 2: the_apply_way_climbs_to_columns, the_move_way_rungs_hold_and_refuse |
 | `migkit/appversions.py` | - | 458 | 6: cli, cutover, engines.base, engines.mysql, engines.postgres (+1) | - | - | 1: a_migration_run_on_one_side_only_is_found |
 | `migkit/archive.py` | - | 678 | 2: cli, hopkeys | conversion 2, decision 6, engines 3, safety 2, workflows 1 | - | 2: old_rows_are_archived_then_removed_only_once_proved, the_move_way_rungs_hold_and_refuse |

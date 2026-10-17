@@ -22,7 +22,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - [`docs/agents/INVENTORY.md`](INVENTORY.md) - every file of `migkit/` and `tools/`: its responsibility package, owner domain, size, importers, the packages it reaches, the programs it wraps and the tests that reach it
 - [`docs/agents/LAYERS.md`](LAYERS.md) - the layering rule (a package imports its own rank and below) and every upward import still listed, with its reason
 
-## `migkit/` (253 modules)
+## `migkit/` (254 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/ack_lattice.py` - (no docstring) Classes: PipelineStage, MonotoneRegressionError, SourceAckRefusedError, CutoverRefusedError, CutoverAuthorization, PositionLattice.
@@ -32,6 +32,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/agent_control.py` - Expose resumable constrained migration operations to agents (Row 641: RCH33.agent-control). Classes: CareBadge, AgentPhase, AdmissionVerdict, AgentControlError, UnsupportedInterfaceVersionError, ScopeWideningRefusedError.
 - `migkit/ai_proof_loop.py` - AI Proof Loop with independent executable evidence (RCH19.ai-proof-loop). Classes: CareBadge, ProofStatus, SemanticFaultType, TransactionState, AiAnnotation, CandidateProvenance.
 - `migkit/anchor.py` - Signed checkpoints of the audit record, kept in a bucket that cannot be rewritten (backlog R5.anchor). Classes: Refused, Blocked.
+- `migkit/anti_corruption.py` - Test the verifier against its own blind spots (backlog RCH39, row 647). Classes: World, Defect, Verifier, Outcome, Report.
 - `migkit/applyway.py` - How a batch of changes is applied (backlog W9): collapsed change by change, or its keys collapsed as columns and each table's net rows hande Classes: Pace, Plan.
 - `migkit/approvals.py` - A step the hop says needs approval waits for it: approvers sign the step's request with their own SSH keys, and migkit checks each signature
 - `migkit/appversions.py` - The schema version each side stands on, from the application's own migration history table (backlog 26.versions). Classes: Tool, History, Apart.
