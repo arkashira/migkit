@@ -1,4 +1,5 @@
 import dataclasses
+import enum
 import hashlib
 import json
 import math
@@ -8,6 +9,40 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 from . import config, durable
+
+
+class CareBadge(str, enum.Enum):
+    ACTION = "ACTION"
+    REVIEW = "REVIEW"
+    BENIGN = "BENIGN"
+    PASS = "PASS"
+
+
+def collapse_plan_literals(text: str) -> str:
+    """Collapses string, numeric, date/time, hex/UUID, and IN-list literals into bind variables (?).
+
+    Ensures plan filters, scan conditions, and index predicates produce deterministic,
+    prompt-cacheable structural representations regardless of runtime parameter values.
+    """
+    if not text:
+        return ""
+    # Single and double quoted string literals
+    out = re.sub(r"'([^'\\]|\\.)*'", "'?'", text)
+    # Hex, bit, and UUID literals
+    out = re.sub(r"\b0x[0-9a-fA-F]+\b", "?", out)
+    out = re.sub(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b", "?", out)
+    # Numbers (integers, floats, scientific notation)
+    out = re.sub(r"\b\d+(\.\d+)?([eE][+-]?\d+)?\b", "?", out)
+    # Array / list literals e.g. '{PAID,SHIPPED}'::text[] or ANY('{...}')
+    out = re.sub(r"'\{[^}]*\}'", "'{?}'", out)
+    # IN (...) clauses with literals
+    out = re.sub(r"\bIN\s*\(\s*(?:\?|'\?')(?:,\s*(?:\?|'\?'))*\s*\)", "IN (?)", out, flags=re.IGNORECASE)
+    # Whitespace normalization
+    out = re.sub(r"\s+", " ", out).strip()
+    return out
+
+
+EXPLAIN_TIMEOUT_MS = 2000
 
 
 @dataclasses.dataclass
@@ -46,6 +81,47 @@ class ExecutionPlan:
     tables_accessed: List[str] = dataclasses.field(default_factory=list)
     warnings: List[str] = dataclasses.field(default_factory=list)
 
+    def compact_representation(self) -> str:
+        """Generates a compact, token-efficient structural representation of the plan.
+
+        All literals in predicates and filters are collapsed into bind variables (?),
+        reducing token consumption by >90% compared to raw EXPLAIN JSON/text.
+        """
+        parts = []
+        if self.node_types:
+            parts.append(f"Nodes={'>'.join(self.node_types)}")
+        if self.scans:
+            scans_rep = []
+            for s in self.scans:
+                tbl = s.get("table", "")
+                stype = s.get("scan_type", "")
+                idx = s.get("index_name") or ""
+                filt = collapse_plan_literals(str(s.get("filter") or ""))
+                rep = f"{stype}:{tbl}"
+                if idx:
+                    rep += f"[{idx}]"
+                if filt:
+                    rep += f"({filt})"
+                scans_rep.append(rep)
+            parts.append(f"Scans={';'.join(sorted(scans_rep))}")
+        if self.joins:
+            joins_rep = [j.get("join_type", "") for j in self.joins if j.get("join_type")]
+            if joins_rep:
+                parts.append(f"Joins={';'.join(joins_rep)}")
+        if not parts:
+            return f"Plan[{self.dialect}]:empty"
+        return f"Plan[{self.dialect}]:{'|'.join(parts)}"
+
+    def fingerprint(self) -> str:
+        """Generates a 16-character canonical plan fingerprint with all literals collapsed into bind variables.
+
+        Excludes volatile runtime execution metrics (actual execution time, cost, loops, memory hits)
+        and collapses all predicate literals into '?' so structurally equivalent plans
+        share identical fingerprints for prompt caching and token efficiency.
+        """
+        compact = self.compact_representation()
+        return hashlib.sha256(compact.encode("utf-8")).hexdigest()[:16]
+
 
 @dataclasses.dataclass
 class ParityIssue:
@@ -60,6 +136,7 @@ class ParityIssue:
     latency_ratio: float = 1.0
     cost_ratio: float = 1.0
     recommendation: str = ""
+    care_badge: str = CareBadge.ACTION.value
 
 
 @dataclasses.dataclass
@@ -89,6 +166,7 @@ class QueryParityReport:
     latency_anomalies: List[Dict[str, Any]]
     summary_stats: Dict[str, Any]
     sla_checks: Dict[str, bool]
+    care_badge: str = CareBadge.PASS.value
 
     def to_dict(self) -> Dict[str, Any]:
         return dataclasses.asdict(self)
@@ -101,7 +179,7 @@ class QueryParityReport:
             "=" * 78,
             " CONTINUOUS QUERY OPTIMIZER & LATENCY PARITY GUARD (SUPER.query-guard)",
             "=" * 78,
-            f"Hop: {self.hop_name or 'unnamed'} | Status: {'READY' if self.can_cutover else 'BLOCKED'} | Verdict: {self.verdict}",
+            f"Hop: {self.hop_name or 'unnamed'} | Status: {'READY' if self.can_cutover else 'BLOCKED'} | Badge: [{self.care_badge}] | Verdict: {self.verdict}",
             f"Cutover Approved: {self.can_cutover} (Latency regression threshold: {self.threshold_latency_ratio:.1f}x)",
             f"Queries Analyzed: {self.total_queries_analyzed} | Issues Found: {len(self.parity_issues)}",
             "-" * 78,
@@ -114,11 +192,11 @@ class QueryParityReport:
         if self.parity_issues:
             lines.append("Parity Degradation & Regression Issues:")
             for issue in self.parity_issues[:10]:
-                sev = issue.get("severity", "WARN")
+                badge = issue.get("care_badge") or (CareBadge.ACTION.value if issue.get("severity") == "CRITICAL" else CareBadge.REVIEW.value)
                 itype = issue.get("issue_type", "ISSUE")
                 tbl = issue.get("table", "")
                 desc = issue.get("description", "")
-                lines.append(f"  [{sev:<8}] {itype:<20} {tbl:<15} {desc}")
+                lines.append(f"  [{badge:<8}] {itype:<20} {tbl:<15} {desc}")
             if len(self.parity_issues) > 10:
                 lines.append(f"  ... and {len(self.parity_issues) - 10} more issues")
             lines.append("-" * 78)
@@ -131,7 +209,7 @@ class QueryParityReport:
                 lines.append(f"  ... and {len(self.index_recommendations) - 10} more recommendations")
             lines.append("-" * 78)
 
-        lines.append(f"SLA Verdict: {'PASS' if self.can_cutover else 'FAIL'}")
+        lines.append(f"SLA Verdict: {'PASS' if self.can_cutover else 'FAIL'} | Care Badge: [{self.care_badge}]")
         lines.append("=" * 78)
         return "\n".join(lines)
 
@@ -190,7 +268,7 @@ class QueryOptimizerParityGuard:
         target_eng=None,
         source_eng=None,
         db: str = "",
-        latency_threshold: float = 2.0,
+        latency_threshold: Optional[float] = None,
         options: Optional[Dict[str, Any]] = None,
         say: Optional[Callable] = None,
     ):
@@ -198,8 +276,12 @@ class QueryOptimizerParityGuard:
         self.target_eng = target_eng
         self.source_eng = source_eng
         self.db = db
-        self.latency_threshold = float(latency_threshold)
         self.options = options or {}
+        from . import decide
+        th = decide.query_guard_thresholds(hop, self.options)
+        self.latency_threshold = float(latency_threshold if latency_threshold is not None else th.latency_threshold)
+        self.sample_size = th.sample_size
+        self.last_report: Optional[QueryParityReport] = None
         self.say = say or (lambda msg: None)
 
     def extract_from_slow_log(self, log_content: Union[str, Iterable[str]], dialect: str = "auto") -> List[QueryPattern]:
@@ -398,8 +480,9 @@ class QueryOptimizerParityGuard:
         return result
 
     def sample_workload(
-        self, patterns: List[QueryPattern], sample_size: int = 50, strategy: str = "hybrid"
+        self, patterns: List[QueryPattern], sample_size: Optional[int] = None, strategy: str = "hybrid"
     ) -> List[QueryPattern]:
+        sample_size = self.sample_size if sample_size is None else sample_size
         if len(patterns) <= sample_size:
             return list(patterns)
         if strategy == "frequency":
@@ -429,12 +512,10 @@ class QueryOptimizerParityGuard:
         dialect = getattr(eng, "dialect", pattern.dialect or "postgres")
         is_dml = bool(re.search(r"\b(INSERT|UPDATE|DELETE|REPLACE|MERGE|TRUNCATE|DROP|ALTER)\b", sql, re.IGNORECASE))
 
-        if is_dml and read_only:
+        if is_dml:
             explain_cmd = f"EXPLAIN {sql}"
+            analyze = False
             needs_rollback = False
-        elif is_dml and analyze:
-            explain_cmd = f"EXPLAIN (ANALYZE, COSTS, VERBOSE, FORMAT JSON) {sql}" if dialect == "postgres" else f"EXPLAIN ANALYZE {sql}"
-            needs_rollback = True
         else:
             if dialect == "postgres":
                 explain_cmd = (
@@ -446,21 +527,21 @@ class QueryOptimizerParityGuard:
                 explain_cmd = f"EXPLAIN FORMAT=JSON {sql}" if not analyze else f"EXPLAIN ANALYZE {sql}"
             needs_rollback = False
 
+        timeout_ms = int(self.options.get("explain_timeout_ms", EXPLAIN_TIMEOUT_MS))
+        timeout_ms = min(timeout_ms, EXPLAIN_TIMEOUT_MS)
         raw_result = None
         if executor is not None:
             raw_result = executor(explain_cmd, analyze, needs_rollback)
         elif eng is not None:
             if hasattr(eng, "explain"):
-                raw_result = eng.explain(db_name, explain_cmd, rollback=needs_rollback)
+                import inspect
+                kw = {"rollback": needs_rollback}
+                if "timeout_ms" in inspect.signature(eng.explain).parameters:
+                    kw["timeout_ms"] = timeout_ms
+                    kw["read_only"] = True
+                raw_result = eng.explain(db_name, explain_cmd, **kw)
             elif hasattr(eng, "query"):
-                if needs_rollback:
-                    eng.query(db_name, "BEGIN;")
-                    try:
-                        raw_result = eng.query(db_name, explain_cmd)
-                    finally:
-                        eng.query(db_name, "ROLLBACK;")
-                else:
-                    raw_result = eng.query(db_name, explain_cmd)
+                raw_result = eng.query(db_name, explain_cmd)
 
         if raw_result is None:
             if pattern.metadata.get("target_plan"):
@@ -695,6 +776,7 @@ class QueryOptimizerParityGuard:
                             source_metric={"scan_type": src_type, "index": src_idx},
                             target_metric={"scan_type": tgt_type, "index": tgt_idx},
                             recommendation=ddl,
+                            care_badge=CareBadge.ACTION.value,
                         )
                     )
                 else:
@@ -712,6 +794,7 @@ class QueryOptimizerParityGuard:
                                 source_metric=None,
                                 target_metric={"scan_type": tgt_type},
                                 recommendation=ddl,
+                                care_badge=CareBadge.REVIEW.value,
                             )
                         )
 
@@ -724,6 +807,7 @@ class QueryOptimizerParityGuard:
                 cost = tj.get("cost", 0.0)
                 if ("Hash Join" in src_joins or "Merge Join" in src_joins) or loops >= 50 or cost >= 5000:
                     sev = "CRITICAL" if (loops >= 50 or "Hash Join" in src_joins) else "HIGH"
+                    badge = CareBadge.ACTION.value if sev == "CRITICAL" else CareBadge.REVIEW.value
                     src_j_str = ", ".join(src_joins) if src_joins else "set join"
                     issues.append(
                         ParityIssue(
@@ -736,6 +820,7 @@ class QueryOptimizerParityGuard:
                             source_metric={"joins": src_joins},
                             target_metric=tj,
                             recommendation="Analyze table statistics (ANALYZE / VACUUM ANALYZE) or adjust join work_mem",
+                            care_badge=badge,
                         )
                     )
 
@@ -748,6 +833,7 @@ class QueryOptimizerParityGuard:
             ratio = tgt_time / src_time
             if ratio > thresh:
                 sev = "CRITICAL" if ratio >= 5.0 else "HIGH"
+                badge = CareBadge.ACTION.value if sev == "CRITICAL" else CareBadge.REVIEW.value
                 issues.append(
                     ParityIssue(
                         issue_id=f"latency_anom_{qid}",
@@ -760,6 +846,7 @@ class QueryOptimizerParityGuard:
                         target_metric=tgt_time,
                         latency_ratio=round(ratio, 3),
                         recommendation="Optimize query execution path or provision missing index",
+                        care_badge=badge,
                     )
                 )
 
@@ -863,10 +950,13 @@ class QueryOptimizerParityGuard:
         can_cutover = critical_count == 0
         if not can_cutover:
             verdict = "FAIL"
+            care_badge = CareBadge.ACTION.value
         elif high_count > 0:
             verdict = "WARN"
+            care_badge = CareBadge.REVIEW.value
         else:
             verdict = "PASS"
+            care_badge = CareBadge.PASS.value
 
         sla_checks = {
             "no_critical_plan_regressions": critical_count == 0,
@@ -906,8 +996,10 @@ class QueryOptimizerParityGuard:
             latency_anomalies=latency_anoms,
             summary_stats=summary_stats,
             sla_checks=sla_checks,
+            care_badge=care_badge,
         )
 
+        self.last_report = report
         if self.hop and hasattr(self.hop, "report_dir"):
             try:
                 rep_dir = Path(self.hop.report_dir(self.db))

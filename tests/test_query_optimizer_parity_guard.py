@@ -204,7 +204,8 @@ def test_replay_on_target_mutation_safety():
     pat_dml = QueryPattern("q_dml", "DELETE FROM orders WHERE id = 1", "DELETE FROM orders WHERE id = ?")
     guard.replay_on_target(pat_dml, analyze=True, read_only=False)
     assert len(eng.queries_executed) == 2
-    assert eng.queries_executed[1][2] is True
+    assert eng.queries_executed[1][2] is False
+    assert "ANALYZE" not in eng.queries_executed[1][1]
 
 
 def test_parse_postgres_plan_json():

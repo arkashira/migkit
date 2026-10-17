@@ -253,6 +253,11 @@ def autopilot_cutover_gate_rungs() -> Tuple[decide.Rung, ...]:
                     lambda facts: bool(facts.get("auto_approve", True)) or bool(facts.get("operator_consented", False)),
                     "operator cutover consent required",
                 ),
+                decide.Need(
+                    "no critical query plan regression on the target",
+                    lambda facts: bool(facts.get("query_parity_ok", True)),
+                    "query optimizer parity guard found a critical plan or latency regression",
+                ),
             ),
         ),
         decide.Rung(
@@ -691,6 +696,13 @@ class AutopilotOrchestrator:
             raise RuntimeError(f"Shadow cutover flight simulator failed SLA: {cert.sla_verdict}")
         return {"certificate": cert.to_dict(), "care_badge": CareBadge.PASS.value}
 
+    def _query_parity_ok(self) -> bool:
+        guard = getattr(self, "query_guard", None) or getattr(self.hop, "query_guard", None)
+        if guard is None:
+            return True
+        report = guard.last_report if hasattr(guard, "last_report") else None
+        return True if report is None else bool(report.can_cutover)
+
     def _step_seamless_cutover(self) -> Dict[str, Any]:
         work = f"autopilot:{self.hop_name}:cutover_gate"
         cutover_facts = {
@@ -698,6 +710,7 @@ class AutopilotOrchestrator:
             "auto_approve": self.auto_approve,
             "operator_consented": self.operator_consented,
             "data_divergence": not self._zero_drift_verified,
+            "query_parity_ok": self._query_parity_ok(),
         }
         choice = decide.climb(work, autopilot_cutover_gate_rungs(), cutover_facts)
         if choice.rung is None or choice.rung.name == "abort_cutover_data_divergence":

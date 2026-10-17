@@ -1,8 +1,10 @@
 """Hierarchical in-database recursive Merkle tree folding (SUPER.merkle-fold)."""
+from collections import defaultdict
+from dataclasses import dataclass, field
 import hashlib
 import math
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+import time
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 EMPTY_LEAF_HASH = hashlib.sha256(b"").digest()
 
@@ -704,3 +706,116 @@ def register_sqlite_merkle_functions(conn: Any) -> None:
     conn.create_function("md5", 1, _md5)
     conn.create_function("sha256", 1, _sha256)
     conn.create_function("sha2", 2, _sha2)
+
+
+@dataclass
+class VerificationSlice:
+    slice_id: str
+    table: str
+    key_range: Optional[Tuple[Any, Any]] = None
+    merkle_root: Optional[str] = None
+    status: str = "VALID"
+    invalidated_at: Optional[float] = None
+    invalidation_reason: Optional[str] = None
+
+
+class VerificationSliceManager:
+    def __init__(self):
+        self._slices: Dict[str, VerificationSlice] = {}
+        self._table_index: Dict[str, Set[str]] = defaultdict(set)
+
+    def register_slice(
+        self,
+        slice_id: str,
+        table: str,
+        key_range: Optional[Tuple[Any, Any]] = None,
+        merkle_root: Optional[str] = None,
+    ) -> VerificationSlice:
+        sl = VerificationSlice(
+            slice_id=slice_id,
+            table=table,
+            key_range=key_range,
+            merkle_root=merkle_root,
+            status="VALID",
+        )
+        self._slices[slice_id] = sl
+        self._table_index[table].add(slice_id)
+        return sl
+
+    def register_tree(
+        self,
+        slice_id: str,
+        table: str,
+        tree: MerkleTree,
+        key_range: Optional[Tuple[Any, Any]] = None,
+    ) -> VerificationSlice:
+        root_hex = tree.root.hash_hex if tree.root else None
+        return self.register_slice(
+            slice_id=slice_id,
+            table=table,
+            key_range=key_range,
+            merkle_root=root_hex,
+        )
+
+    def get_slice(self, slice_id: str) -> Optional[VerificationSlice]:
+        return self._slices.get(slice_id)
+
+    def get_slices_for_table(self, table: str) -> List[VerificationSlice]:
+        return [self._slices[sid] for sid in self._table_index.get(table, set())]
+
+    def invalidate_table(
+        self,
+        table: str,
+        key_range: Optional[Tuple[Any, Any]] = None,
+        reason: str = "DDL_MUTATION",
+    ) -> List[str]:
+        invalidated = []
+        now = time.time()
+        for sid in self._table_index.get(table, set()):
+            sl = self._slices[sid]
+            if key_range is not None and sl.key_range is not None:
+                r_start, r_end = key_range
+                s_start, s_end = sl.key_range
+                if r_start is not None and s_end is not None and r_start >= s_end:
+                    continue
+                if r_end is not None and s_start is not None and r_end <= s_start:
+                    continue
+            sl.status = "INVALID"
+            sl.invalidated_at = now
+            sl.invalidation_reason = reason
+            invalidated.append(sid)
+        return invalidated
+
+    def get_invalid_slices(self, table: Optional[str] = None) -> List[VerificationSlice]:
+        if table:
+            return [
+                self._slices[sid]
+                for sid in self._table_index.get(table, set())
+                if self._slices[sid].status == "INVALID"
+            ]
+        return [s for s in self._slices.values() if s.status == "INVALID"]
+
+    def get_valid_slices(self, table: Optional[str] = None) -> List[VerificationSlice]:
+        if table:
+            return [
+                self._slices[sid]
+                for sid in self._table_index.get(table, set())
+                if self._slices[sid].status == "VALID"
+            ]
+        return [s for s in self._slices.values() if s.status == "VALID"]
+
+    def revalidate_slice(self, slice_id: str, new_merkle_root: Optional[str] = None) -> None:
+        sl = self._slices.get(slice_id)
+        if sl:
+            sl.status = "VALID"
+            if new_merkle_root is not None:
+                sl.merkle_root = new_merkle_root
+            sl.invalidated_at = None
+            sl.invalidation_reason = None
+
+    def total_slices(self) -> int:
+        return len(self._slices)
+
+    def invalid_count(self) -> int:
+        return sum(1 for s in self._slices.values() if s.status == "INVALID")
+

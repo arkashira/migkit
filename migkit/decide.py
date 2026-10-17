@@ -7718,3 +7718,57 @@ def schema_evolution_rungs():
     from .schema_drift import schema_evolution_rungs as _ser
     return _ser()
 
+
+@dataclass(frozen=True)
+class QueryGuardThresholds:
+    latency_threshold: float
+    sample_size: int
+
+
+def query_guard_threshold_rungs():
+    return (
+        Rung("strict", "strict latency parity tolerance (1.25x latency, 100 queries sampled)",
+             needs=(Need("strict latency SLA requested",
+                         lambda f: f.get("profile") == "strict" or f.get("latency_sla") == "strict",
+                         "strict profile not requested"),),
+             because="mission-critical tier requires tight latency bounding"),
+        Rung("balanced", "standard latency parity tolerance (2.0x latency, 50 queries sampled)",
+             needs=(Need("standard or balanced profile",
+                         lambda f: f.get("profile") in (None, "balanced", "default"),
+                         "standard profile not requested"),),
+             because="standard threshold accommodates minor cross-engine plan divergence"),
+        Rung("permissive", "permissive latency tolerance (3.5x latency, 20 queries sampled)",
+             needs=(Need("permissive or fast profile requested",
+                         lambda f: f.get("profile") in ("permissive", "fast") or bool(f.get("heterogeneous")),
+                         "permissive profile not requested"),),
+             because="cross-engine rewrite can exhibit variance prior to target index tuning"),
+    )
+
+
+def query_guard_thresholds(hop=None, options=None) -> QueryGuardThresholds:
+    opts = {}
+    if hop is not None and hasattr(hop, "options") and isinstance(hop.options, dict):
+        opts.update(hop.options)
+    if options and isinstance(options, dict):
+        opts.update(options)
+
+    lat_override = opts.get("query_guard_latency_threshold") or opts.get("latency_threshold")
+    sample_override = opts.get("query_guard_sample_size") or opts.get("sample_size")
+
+    facts = {
+        "profile": opts.get("profile") or opts.get("query_guard_profile"),
+        "latency_sla": opts.get("latency_sla"),
+        "heterogeneous": bool(getattr(hop, "heterogeneous", False)) if hop else False,
+    }
+    choice = climb("query guard threshold", query_guard_threshold_rungs(), facts)
+    if choice.rung and choice.rung.name == "strict":
+        default_lat, default_sample = 1.25, 100
+    elif choice.rung and choice.rung.name == "permissive":
+        default_lat, default_sample = 3.5, 20
+    else:
+        default_lat, default_sample = 2.0, 50
+
+    lat = float(lat_override) if lat_override is not None else default_lat
+    sample = int(sample_override) if sample_override is not None else default_sample
+    return QueryGuardThresholds(latency_threshold=lat, sample_size=sample)
+

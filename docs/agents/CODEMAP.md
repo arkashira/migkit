@@ -177,7 +177,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/mapping_proof.py` - Composed mapping proof for load and CDC (RCH17.mapping-proof). Classes: CareBadge, LossinessCategory, MultiplicityKind, ChangeOp, Discrepancy, StageLineage.
 - `migkit/marks.py` - How a two-way tail tells its own writes apart on a side: the rungs (backlog R3, decided 2026-09-27).
 - `migkit/masking.py` - Values from the rows, masked where the hop asks, wherever a person or a report sees them (G2).
-- `migkit/merkle.py` - Hierarchical in-database recursive Merkle tree folding (SUPER.merkle-fold). Classes: DiscordantRange, MerkleNode, MerkleTree, MerkleTreeFolder.
+- `migkit/merkle.py` - Hierarchical in-database recursive Merkle tree folding (SUPER.merkle-fold). Classes: DiscordantRange, MerkleNode, MerkleTree, MerkleTreeFolder, VerificationSlice, VerificationSliceManager.
 - `migkit/mirror.py` - A Kafka cluster copied through the cluster mirror Kafka ships (backlog F7.mm2).
 - `migkit/model.py` - Every resource a move uses, in one model: which one binds, how many at once carry it, what it takes of this machine's memory, and why (backl Classes: Stage, Model.
 - `migkit/movers.py` - Best-tool movers. Classes: Beside, builds_beside, client_defaults, Ran, Squeeze, Leg.
@@ -202,7 +202,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/proof_planning.py` - Plan the deepest required proof with explicit coverage (Row 590: SMART-N7.proof-planning). Classes: CareBadge, ProofPlanningError, UnsafeEndpointHostError, ProofDAGCycleError, ProofDAGDependencyError, InvalidDependencyCertificateError.
 - `migkit/provider_path.py` - Differentiate provider-native and generic migration paths (Row 609: RCH01.provider-path). Classes: CareBadge, MigrationPathKind, SecondaryObjectKind, SecondaryValidationStrategy, ProviderResourceKind, ProviderResourceState.
 - `migkit/proxy.py` - Pooler and proxy coordinators and seamless cutover traffic shifting. Classes: ProxyShiftResult, BaseProxyCoordinator, PgBouncerCoordinator, ProxySQLCoordinator, EnvoyXdsCoordinator.
-- `migkit/query_guard.py` - (no docstring) Classes: QueryPattern, ExecutionPlan, ParityIssue, IndexRecommendation, QueryParityReport, QueryOptimizerParityGuard.
+- `migkit/query_guard.py` - (no docstring) Classes: CareBadge, QueryPattern, ExecutionPlan, ParityIssue, IndexRecommendation, QueryParityReport.
 - `migkit/query_regression.py` - Continuous query regression and behavioral performance envelope gating (RCH23, row 631). Classes: QueryRegressionError, UnsafeEndpointError, SyntheticBenchmarkLabelError, WorkloadNotApprovedError, ParameterDistribution, WorkloadQuery.
 - `migkit/quiet_source.py` - (no docstring) Classes: SourceEvent, HeartbeatAuditRecord, QuietSourceProgress, AdvanceResult, QuietSourceManager.
 - `migkit/ranges.py` - A large table copied as ranges of its key, side by side. Classes: ReadPool, Slots, WorkerGone, Pending, Keyless, Stats.

@@ -1,5 +1,6 @@
 import dataclasses
 import re
+import threading
 import time
 import uuid
 from collections import defaultdict
@@ -8,6 +9,8 @@ from typing import Any, Callable, Dict, Generator, Iterable, List, Optional, Set
 import sqlglot
 from sqlglot import exp
 from sqlglot.errors import ParseError
+
+from .merkle import VerificationSlice, VerificationSliceManager  # noqa: F401
 
 
 class DDLShieldError(Exception):
@@ -86,103 +89,6 @@ class BarrierResult:
     paused_at: float
     resumed_at: float
     error: Optional[str] = None
-
-
-@dataclasses.dataclass
-class VerificationSlice:
-    slice_id: str
-    table: str
-    key_range: Optional[Tuple[Any, Any]] = None
-    merkle_root: Optional[str] = None
-    status: str = "VALID"
-    invalidated_at: Optional[float] = None
-    invalidation_reason: Optional[str] = None
-
-
-class VerificationSliceManager:
-    def __init__(self):
-        self._slices: Dict[str, VerificationSlice] = {}
-        self._table_index: Dict[str, Set[str]] = defaultdict(set)
-
-    def register_slice(
-        self,
-        slice_id: str,
-        table: str,
-        key_range: Optional[Tuple[Any, Any]] = None,
-        merkle_root: Optional[str] = None,
-    ) -> VerificationSlice:
-        sl = VerificationSlice(
-            slice_id=slice_id,
-            table=table,
-            key_range=key_range,
-            merkle_root=merkle_root,
-            status="VALID",
-        )
-        self._slices[slice_id] = sl
-        self._table_index[table].add(slice_id)
-        return sl
-
-    def get_slice(self, slice_id: str) -> Optional[VerificationSlice]:
-        return self._slices.get(slice_id)
-
-    def get_slices_for_table(self, table: str) -> List[VerificationSlice]:
-        return [self._slices[sid] for sid in self._table_index.get(table, set())]
-
-    def invalidate_table(
-        self,
-        table: str,
-        key_range: Optional[Tuple[Any, Any]] = None,
-        reason: str = "DDL_MUTATION",
-    ) -> List[str]:
-        invalidated = []
-        now = time.time()
-        for sid in self._table_index.get(table, set()):
-            sl = self._slices[sid]
-            if key_range is not None and sl.key_range is not None:
-                r_start, r_end = key_range
-                s_start, s_end = sl.key_range
-                if r_start is not None and s_end is not None and r_start >= s_end:
-                    continue
-                if r_end is not None and s_start is not None and r_end <= s_start:
-                    continue
-            sl.status = "INVALID"
-            sl.invalidated_at = now
-            sl.invalidation_reason = reason
-            invalidated.append(sid)
-        return invalidated
-
-    def get_invalid_slices(self, table: Optional[str] = None) -> List[VerificationSlice]:
-        if table:
-            return [
-                self._slices[sid]
-                for sid in self._table_index.get(table, set())
-                if self._slices[sid].status == "INVALID"
-            ]
-        return [s for s in self._slices.values() if s.status == "INVALID"]
-
-    def get_valid_slices(self, table: Optional[str] = None) -> List[VerificationSlice]:
-        if table:
-            return [
-                self._slices[sid]
-                for sid in self._table_index.get(table, set())
-                if self._slices[sid].status == "VALID"
-            ]
-        return [s for s in self._slices.values() if s.status == "VALID"]
-
-    def revalidate_slice(self, slice_id: str, new_merkle_root: Optional[str] = None) -> None:
-        sl = self._slices.get(slice_id)
-        if sl:
-            sl.status = "VALID"
-            if new_merkle_root is not None:
-                sl.merkle_root = new_merkle_root
-            sl.invalidated_at = None
-            sl.invalidation_reason = None
-
-    def total_slices(self) -> int:
-        return len(self._slices)
-
-    def invalid_count(self) -> int:
-        return sum(1 for s in self._slices.values() if s.status == "INVALID")
 
 
 @dataclasses.dataclass
@@ -318,9 +224,15 @@ class TransactionalFence:
         self,
         target_executor: Optional[Callable[[str], Any]] = None,
         conn: Optional[Any] = None,
+        dialect: str = "postgres",
+        lock_timeout_s: int = 2,
+        statement_timeout_s: int = 5,
     ):
         self.target_executor = target_executor
         self.conn = conn
+        self.dialect = dialect.lower()
+        self.lock_timeout_s = int(lock_timeout_s)
+        self.statement_timeout_s = int(statement_timeout_s)
         self.in_transaction = False
         self.executed_statements: List[str] = []
 
@@ -343,6 +255,19 @@ class TransactionalFence:
                 self.conn.autocommit = False
         if self.target_executor is not None:
             self.target_executor("BEGIN")
+        for stmt in self._guards():
+            if self.conn is not None:
+                self.conn.cursor().execute(stmt)
+            elif self.target_executor is not None:
+                self.target_executor(stmt)
+
+    def _guards(self) -> List[str]:
+        if self.dialect in ("mysql", "mariadb"):
+            return [f"SET SESSION lock_wait_timeout = {self.lock_timeout_s}"]
+        return [
+            f"SET LOCAL lock_timeout = '{self.lock_timeout_s}s'",
+            f"SET LOCAL statement_timeout = '{self.statement_timeout_s}s'",
+        ]
 
     def execute(self, stmt: str):
         if not self.in_transaction:
@@ -374,24 +299,45 @@ class TransactionalFence:
 
 
 class CDCReplicationApplier:
-    def __init__(self):
+    def __init__(self, downstream: Optional[Callable[[Any], Any]] = None, drain_timeout_s: float = 30.0):
+        self._cv = threading.Condition()
         self.is_paused = False
         self.pause_count = 0
         self.resume_count = 0
+        self.in_flight = 0
+        self.drain_timeout_s = drain_timeout_s
+        self.downstream = downstream
         self.applied_events: List[Any] = []
 
     def pause(self) -> None:
-        self.is_paused = True
-        self.pause_count += 1
+        with self._cv:
+            self.is_paused = True
+            self.pause_count += 1
+            if not self._cv.wait_for(lambda: self.in_flight == 0, timeout=self.drain_timeout_s):
+                self.is_paused = False
+                self.resume_count += 1
+                self._cv.notify_all()
+                raise DDLBarrierError("in-flight DML did not drain before the DDL barrier")
 
     def resume(self) -> None:
-        self.is_paused = False
-        self.resume_count += 1
+        with self._cv:
+            self.is_paused = False
+            self.resume_count += 1
+            self._cv.notify_all()
 
     def apply_dml(self, event: Any) -> None:
-        if self.is_paused:
-            raise RuntimeError("Cannot apply DML: CDC replication applier is paused by DDL barrier")
-        self.applied_events.append(event)
+        with self._cv:
+            if self.is_paused:
+                raise RuntimeError("Cannot apply DML: CDC replication applier is paused by DDL barrier")
+            self.in_flight += 1
+        try:
+            if self.downstream is not None:
+                self.downstream(event)
+            self.applied_events.append(event)
+        finally:
+            with self._cv:
+                self.in_flight -= 1
+                self._cv.notify_all()
 
 
 SHADOW_PATTERNS = [
@@ -1129,6 +1075,7 @@ class OnlineDDLShield:
         active_fence = fence or TransactionalFence(
             target_executor=target_executor or self.target_executor,
             conn=conn,
+            dialect=self.target_dialect,
         )
         invalidated_slices: List[str] = []
         error_msg: Optional[str] = None

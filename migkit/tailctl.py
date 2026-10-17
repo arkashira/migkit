@@ -857,6 +857,17 @@ def apply_unit(eng, db, at, changes, apply, log=None):
         resolver = getattr(eng.hop, "drift_resolver", None) or getattr(eng.hop, "schema_drift_resolver", None)
     if resolver is not None and hasattr(resolver, "inspect_batch"):
         resolver.inspect_batch(eng, db, changes, log=log)
+    shield = getattr(eng, "ddl_shield", None)
+    if shield is None and hasattr(eng, "hop"):
+        shield = getattr(eng.hop, "ddl_shield", None)
+    if shield is not None and hasattr(shield, "apply_with_barrier"):
+        ddl = [c for c in changes if str(c.get("type", "")).upper() == "DDL" and c.get("sql")]
+        for c in ddl:
+            res = shield.apply_with_barrier(c["sql"], conn=c.get("conn"))
+            if log:
+                log(f"ddl barrier {res.barrier_id}: {res.status} {res.affected_table}")
+        if ddl:
+            changes = [c for c in changes if c not in ddl]
     columns = _columns(eng, changes)
 
     def check():
