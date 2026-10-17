@@ -11803,7 +11803,7 @@ Observed: test_ranked_movers_and_rungs::test_coverage_has_no_unhandled_cells fai
 
 ### REV-T2.tableway-fixtures — Update table-way fixtures for packet/row-width decisions
 
-**OPEN — P2; test debt; size S; index row 583.** Historical 750b38a5 reproduction; revalidate against current code before fixing/closing.
+**DONE 2026-10-17.** (Updated `_my` fixture to supply explicit target packet and source row-size probe mocks, verified normal, oversized, unavailable-probe and restart paths without weakening safety; tests/test_one_table_ladder.py 27/27 green).
 
 Observed: eight tests/test_one_table_ladder.py cases fail after writes_in_pieces sees packet/row-size facts unknown and requires the pieces-capable rows rung. Fixtures simulate costs/programs but do not supply the new probes. Fix fixtures with explicit packet and row-size facts, retain unknown/oversized conservative cases, then investigate any remaining ranking failures. These eight are not yet asserted to be runtime cost-ranking defects. Proof: normal, oversized, unavailable-probe and restart paths tested without weakening safety.
 
