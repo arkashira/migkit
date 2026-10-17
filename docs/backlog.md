@@ -11959,7 +11959,7 @@ Extend P0-MINIMAL-INPUT.acceptance, autonomous comparison/rehearsal and SMART-N1
 
 ### RCH01.provider-path — Differentiate provider-native and generic paths
 
-**OPEN — P1; research-derived extension; size M; index row 609.**
+**REVIEW 2026-10-17 (provider_path.py decide rungs for native backup/log restore, logical replication, dump/restore, generic CDC, secondary object coverage contracts, and resource lifecycle; tests/test_provider_path_differentiation.py) — P1; research-derived extension; size M; index row 609.**
 
 Existing parent/dependencies: SMART-N6, P0-CLOUDS. Code surfaces: movers, managed, cloudapi, decide.
 
@@ -11969,11 +11969,11 @@ Proposed deeper mechanism: Choose native backup/log restore, logical replication
 
 Acceptance evidence: Prove both native and generic paths for a pair, inject an omitted view/sequence/grant, and ensure native speed never earns unsupported coverage.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status: REVIEW 2026-10-17 (tests/test_provider_path_differentiation.py 14/14 green).
 
 ### RCH02.lob-policy — Choose LOB policy without truncation
 
-**OPEN — P1; research-derived extension; size M; index row 610.**
+**REVIEW 2026-10-17 (lob_policy.py decide rungs for size probes and inline/streamed/locator/chunked/separate LOB policies with non-truncating UTF-8/binary piece executor; tests/test_lob_policy_no_truncation.py) — P1; research-derived extension; size M; index row 610.**
 
 Existing parent/dependencies: SMART-N20, READ.chunk-loops. Code surfaces: decide, pieces, engines, tuning.
 
@@ -11983,11 +11983,11 @@ Proposed deeper mechanism: Make inline, streamed, locator, chunked and separatel
 
 Acceptance evidence: Mixed NULL/empty/binary/multibyte/extreme LOBs plus concurrent updates and failures produce exact final bytes, bounded memory and no premature checkpoint.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status: REVIEW 2026-10-17 (tests/test_lob_policy_no_truncation.py 10/10 green).
 
 ### RCH03.transaction-dag — Parallelize changes with explicit dependency guarantees
 
-**OPEN — P1; research-derived extension; size L; index row 611.**
+**REVIEW 2026-10-17 (transaction_dag.py decide rungs for PK/UK/FK dependency DAG, DDL/sequence/cutover barriers, huge-txn staging, contention pacing, and contiguous-prefix cutover gate; tests/test_transaction_dag_parallel_apply.py) — P1; research-derived extension; size L; index row 611.**
 
 Existing parent/dependencies: SUPER.dag-barrier, SMART-N8. Code surfaces: barriers, tail_apply, guarantees, jointplan.
 
@@ -11997,11 +11997,11 @@ Proposed deeper mechanism: Extend existing transaction DAG work with row/unique/
 
 Acceptance evidence: Cross-table FK cascades, unique-key swaps, DDL and kill/restart preserve source transaction atomicity; committed-prefix proof blocks cutover on holes.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status: REVIEW 2026-10-17 (tests/test_transaction_dag_parallel_apply.py 10/10 green).
 
 ### RCH04.apply-contract — Cost transactional and batch apply under different contracts
 
-**OPEN — P1; research-derived extension; size M; index row 612.**
+**REVIEW 2026-10-17 (apply_contract.py decide rungs for integrity/ordering/key/trigger mode contracts, spread-derived recovery/validation costing, and silent guarantee inheritance gate; tests/test_apply_contract_costing.py) — P1; research-derived extension; size M; index row 612.**
 
 Existing parent/dependencies: SMART-N1, SMART-N6. Code surfaces: decide, guarantees, tableway.
 
@@ -12011,11 +12011,11 @@ Proposed deeper mechanism: Declare the integrity, ordering, key and trigger assu
 
 Acceptance evidence: No-PK duplicates, cross-table transactions and a target without unique enforcement cannot silently inherit transactional guarantees from a batch path.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status: REVIEW 2026-10-17 (tests/test_apply_contract_costing.py 16/16 green).
 
 ### RCH05.repair-fence — Schedule repair against CDC without stale overwrite
 
-**OPEN — P1; research-derived extension; size M; index row 613.**
+**REVIEW 2026-10-17 (repair_fence.py decide rungs for repair scope, LSN/timestamp conflict resolution, interrupted recovery, and fenced gap-free CDC replay; tests/test_repair_fence_cdc_coordination.py) — P1; research-derived extension; size M; index row 613.**
 
 Existing parent/dependencies: repairways existing, SMART-N7. Code surfaces: repairways, tailtables, fencing.
 
@@ -12025,11 +12025,11 @@ Proposed deeper mechanism: Extend existing rows/spans/reload repair to establish
 
 Acceptance evidence: Delay a repair write while a later CDC update arrives; newest committed source value wins, replay is gap-free, and interrupted repair can undo or reconcile safely.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status: REVIEW 2026-10-17 (tests/test_repair_fence_cdc_coordination.py 10/10 green).
 
 ### RCH06.online-confirmation — Classify transient versus persistent divergence by positions
 
-**OPEN — P1; research-derived extension; size M; index row 614.**
+**REVIEW 2026-10-17 (online_confirmation.py decide rungs for position/generation confirmation, transient vs persistent drift disposition, proof unit denominators, and TTL expiry; tests/test_online_confirmation_divergence.py) — P1; research-derived extension; size M; index row 614.**
 
 Existing parent/dependencies: existing convergence checks, SMART-N7. Code surfaces: verifiers, delta, planner.
 
@@ -12039,11 +12039,11 @@ Proposed deeper mechanism: Extend existing delta/generation/fence logic with pos
 
 Acceptance evidence: Continuously changing rows, deleted-on-both rows and delayed transactions settle correctly; lag does not create false corruption and persistent drift is not suppressed.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status: REVIEW 2026-10-17 (tests/test_online_confirmation_divergence.py 6/6 green).
 
 ### RCH07.keyless-proof — Prove keyless multisets at scale
 
-**OPEN — P1; research-derived extension; size L; index row 615.**
+**REVIEW 2026-10-17 (keyless_proof.py decide rungs for multiset proof and row identity, duplicate-sensitive algebraic commitments, external K-way spill sort, and coalesced stream diffing; tests/test_keyless_proof_multiset_scale.py) — P1; research-derived extension; size L; index row 615.**
 
 Existing parent/dependencies: SMART-N7, REV-T1. Code surfaces: canon, verifiers, engines.
 
@@ -12053,7 +12053,7 @@ Proposed deeper mechanism: Use duplicate-sensitive multiset fingerprints with ex
 
 Acceptance evidence: Perfect duplicates with even-count cancellation, reorder, NULL/empty, equal-count corruption and billion-row spill scenarios cannot falsely pass.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status: REVIEW 2026-10-17 (tests/test_keyless_proof_multiset_scale.py 13/13 green).
 
 ### RCH08.effect-checkpoint — Bind keyless writes and dedup state atomically
 
