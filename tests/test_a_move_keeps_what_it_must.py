@@ -534,6 +534,27 @@ def test_a_refused_plan_stops_the_move_with_what_to_do(monkeypatch):
     assert jp.admitted and jp.as_evidence()["foreign_keys"] == "after"
 
 
+def test_a_plan_not_meeting_limits_stops_the_move_before_writing(monkeypatch):
+    from migkit import cli
+    def for_move(*a, **k):
+        return jointplan.Plan(placed={}, makespan=7200.0, meets=False,
+                              why="the deadline gives 3600s: the longest table sets it",
+                              admitted=True)
+    monkeypatch.setattr(jointplan, "for_move", for_move)
+    monkeypatch.setattr(jointplan, "semantics_of", lambda *a, **k: {})
+    monkeypatch.setattr(jointplan, "account", lambda *a, **k: {})
+    eng = _Engine(table_facts=lambda side, d: {},
+                  foreign_keys_in_load=lambda d: "after")
+    said = []
+    with pytest.raises(SystemExit) as stop:
+        cli._joint_for_move(_Engine(name="shop"), eng,
+                            _Engine(measured=True), "db", ["a"], 4,
+                            said.append)
+    assert "not started" in str(stop.value)
+    assert "cannot keep within the hop's limits" in str(stop.value)
+    assert "the deadline gives 3600s" in str(stop.value)
+
+
 def test_the_mover_says_whether_the_keys_hold_during_the_load():
     from migkit.engines.base import Engine
     assert Engine.foreign_keys_in_load(_Engine(), "db") == "during"

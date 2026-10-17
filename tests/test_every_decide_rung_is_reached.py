@@ -482,3 +482,20 @@ def test_the_recorder_tells_a_refused_need_from_a_lacking_capability():
     assert ("a", NO, "a needs y") in seen
     assert [b for n, b, _ in seen if n == "a"][-1] == LACKS
     assert decide.prune.__module__ == "migkit.decide"
+
+
+def test_proof_lazy_facts_are_recorded_in_choice_asked():
+    from migkit import decide
+
+    def prove_check(facts):
+        _ = facts["lazy_check_fact"]
+        return None
+
+    facts = decide.Facts({"initial_fact": True}, lazy_check_fact=lambda: "valid")
+    _ = facts["initial_fact"]
+    rung = decide.Rung("proving", "proving way", prove=prove_check)
+    choice = decide.climb("test_work", (rung,), facts=facts, prove=True)
+    assert choice.rung.name == "proving"
+    assert "initial_fact" in choice.asked
+    assert "lazy_check_fact" in choice.asked
+

@@ -472,7 +472,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a rung or plan reads `drift` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
-- `migkit/jointplan.py:1225` decision -> workflows (`drift`)
+- `migkit/jointplan.py:1228` decision -> workflows (`drift`)
 
 ### a rung or plan reads `jobs` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
@@ -997,7 +997,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### the decision engine asks an engine (`engines.base`) what it can do; ends when the engine contract is a package below decision
 
 - `migkit/capabilities.py:34` decision -> engines (`engines.base`)
-- `migkit/decide.py:2776` decision -> engines (`engines.base`)
+- `migkit/decide.py:2778` decision -> engines (`engines.base`)
 - `migkit/model.py:1111` decision -> engines (`engines.base`)
 - `migkit/scenarios.py:505` decision -> engines (`engines.base`)
 - `migkit/workload.py:133` decision -> engines (`engines.base`)
@@ -1040,7 +1040,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 - `migkit/capabilities.py:33` decision -> engines (`engines`)
 - `migkit/dba.py:311` decision -> engines (`engines`)
-- `migkit/decide.py:2775` decision -> engines (`engines`)
+- `migkit/decide.py:2777` decision -> engines (`engines`)
 - `migkit/machine.py:948` decision -> engines (`engines`)
 - `migkit/tableway.py:132` decision -> engines (`engines`)
 - `migkit/waysaid.py:71` decision -> engines (`engines`)

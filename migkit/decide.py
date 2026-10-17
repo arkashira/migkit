@@ -1320,11 +1320,13 @@ def climb(work, rungs, facts=None, need=(), costs=None, keep=None,
                 reason += f"; predicted the fastest here, {mine.said()}"
         runner = next(iter(order[i + 1:]), None)
         from . import guarantees as g
+        asked = tuple(getattr(facts, "asked", ()) or ())
         return Choice(work, r, reason, tuple(out + passed), tuple(ranked),
                       costs_of, runner,
                       _why_not(r, runner, priced) if runner else "",
                       tuple(g.named(g.of([r])).items()), asked,
                       float(trial[1]) if r.name in on_trial else 0.0)
+    asked = tuple(getattr(facts, "asked", ()) or ())
     return Choice(work, None,
                   _joined(w for _, w in out + passed) or "no way was given",
                   tuple(out + passed), tuple(ranked), costs_of, asked=asked)

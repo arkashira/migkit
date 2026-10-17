@@ -147,6 +147,7 @@ class Limits:
     workers: int = 4
     deadline: float = None
     money: float = None
+    billed_bytes: float = None
     #: bytes a second one index build writes, and how many build at once
     index_rate: float = None
     index_at_once: int = 2
@@ -926,16 +927,18 @@ def limits_of(hop, model=None, workers=None):
     money = None
     if lim.get("money") is not None:
         money = _number(lim.get("money"), "money")
+    billed_bytes = None
     if lim.get("bytes_billed") is not None:
         price = opts.get("transfer_price_per_gb")
-        billed = _bytes(lim.get("bytes_billed"), "bytes_billed")
-        as_money = billed / 2 ** 30 * float(price) if price else None
+        billed_bytes = _bytes(lim.get("bytes_billed"), "bytes_billed")
+        as_money = billed_bytes / 2 ** 30 * float(price) if price else None
         money = (as_money if money is None else
                  min(money, as_money) if as_money is not None else money)
     target = (getattr(model, "stages", None) or {}).get(TARGET)
     return Limits(caps=caps_of(model) if model is not None else {},
                   workers=most, deadline=machine.deadline(hop),
                   money=money,
+                  billed_bytes=billed_bytes,
                   index_rate=(target.per_stream if target is not None
                               else None),
                   source_share=(share_limit(lim.get("source_load"),

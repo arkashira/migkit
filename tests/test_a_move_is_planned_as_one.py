@@ -200,6 +200,12 @@ def test_the_hops_limits_are_read_and_a_wrong_one_stops(tmp_path):
     assert lim.source_share == pytest.approx(0.3)
     # 100 GB billed at 0.09 is 9, under the 20 the hop allows
     assert lim.money == pytest.approx(9.0)
+    assert lim.billed_bytes == 100 * 1024 ** 3
+    # without transfer_price_per_gb, billed_bytes is preserved independently of money
+    no_price = _hop(tmp_path, limits={"bytes_billed": "50GB"})
+    lim_no_price = jp.limits_of(no_price, None)
+    assert lim_no_price.billed_bytes == 50 * 1024 ** 3
+    assert lim_no_price.money is None
     # 10 connections carry 5 writers; 256 MB of the target's memory, 4
     assert lim.workers == 4
     for bad in ({"source_load": "130%"}, {"source_load": "most"},

@@ -11767,7 +11767,7 @@ Read docs/research/migration-mechanisms-and-roadmap-2026-10-17.md and docs/resea
 
 ### REV-D1.limit-gate — Enforce hard limits at the execution boundary
 
-**OPEN — P1; bug; size S; index row 577.** Historical 750b38a5 reproduction; revalidate against current code before fixing/closing.
+**DONE 2026-10-17.** (Enforced `jp.admitted and jp.meets` in `cli._joint_for_move`; verified with `test_a_plan_not_meeting_limits_stops_the_move_before_writing` in `tests/test_a_move_keeps_what_it_must.py`).
 
 Observed: jointplan._meets sets meets=False for deadline/money violations, but cli._joint_for_move (review baseline line 3966) rejects only not jp.admitted. Reproduced with a Plan(meets=False, admitted=True): the function returns it for execution. Fix: admission must require the contract's limits as well as correctness; a missing model or failed probe must not silently waive hard limits. Distinguish forecast infeasibility from enforceable runtime ceilings. Proof: unit regression plus installed-command sandbox tests that an over-budget/deadline move writes nothing, while an admissible within-limit move completes. Runtime money/byte counters must stop at safe boundaries before overspending, including fallback/retries.
 
@@ -11785,13 +11785,13 @@ Observed: space.best.runners contains combinations whose prove already failed; j
 
 ### REV-D4.billed-bytes — Preserve byte budgets independently of prices
 
-**OPEN — P2; bug; size M; index row 580.** Historical 750b38a5 reproduction; revalidate against current code before fixing/closing.
+**DONE 2026-10-17.** (Preserved `billed_bytes` independently of prices on `Limits` and `limits_of`; verified with `tests/test_a_move_is_planned_as_one.py` 15/15 green).
 
 Observed: jointplan.limits_of converts limits.bytes_billed to money only with a truthy transfer_price_per_gb (line 932). bytes_billed=1GB alone yields money=None and no independent byte field in Limits. Fix: track billed bytes as a distinct resource, with pricing only for monetary budgets. Count actual billable paths, compression and retry overhead. Proof: absent, zero and nonzero prices never erase the cap; multi-hop budgets cannot be double-spent; rollback/retry accounting is explicit.
 
 ### REV-D5.proof-facts — Record facts read by all proof attempts
 
-**OPEN — P2; bug; size S; index row 581.** Historical 750b38a5 reproduction; revalidate against current code before fixing/closing.
+**DONE 2026-10-17.** (Captured lazy facts queried during `r.prove()` into `Choice.asked` in `decide.climb`; verified with `test_proof_lazy_facts_are_recorded_in_choice_asked` in `tests/test_every_decide_rung_is_reached.py`).
 
 Observed: decide.climb snapshots Facts.asked before rung.prove (line 1289). A proof-only lazy reader appears in facts.asked but Choice.asked is empty. Fix: collect after proofs, including refused proofs, without executing readers twice; retain per-attempt attribution where needed. Proof: winner-only and failed-proof-only reads present, deterministic order, one lazy read, secret-safe evidence.
 

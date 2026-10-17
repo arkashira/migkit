@@ -3970,14 +3970,16 @@ def _joint_for_move(hop, eng, m, d, names, most, log):
         "snapshot": {d: _snapshot_of(
             getattr(eng, "src_engine", None) or eng, d)},
         "facts": jointplan.account(hop, m, facts, jp)}, log,
-        way="the tables planned as one" if jp.admitted else "stop",
-        reason=jp.refused or "; ".join(jointplan.lines(jp)))
-    if not jp.admitted:
-        # a plan that breaks what the move must keep is not run in part:
+        way="the tables planned as one" if (jp.admitted and jp.meets) else "stop",
+        reason=jp.refused or (jp.why if not jp.meets else "; ".join(jointplan.lines(jp))))
+    if not jp.admitted or not jp.meets:
+        # a plan that breaks what the move must keep or exceeds hard limits is not run in part:
         # the move stops before its first row, with what to do next
+        reason = jp.refused if not jp.admitted else f"the move cannot keep within the hop's limits: {jp.why}"
+        hop_name = getattr(hop, "name", "") or ""
         raise SystemExit(_words.copy_not_started(
             d, "the tables as planned do not keep what the move must keep:"
-            f" {jp.refused}", hop.name))
+            f" {reason}", hop_name))
     return jp
 
 
