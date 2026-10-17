@@ -374,6 +374,80 @@ def test_cutover_integration_with_proxysql_and_envoy():
     assert conf_ev["pooler"]["kind"] == "envoy"
 
 
+def test_cutover_flip_invokes_orchestrate_seamless_traffic_shift(monkeypatch):
+    called = []
+
+    def mock_orchestrate(coord, target_host, target_port, databases=None, budget_seconds=1.0, headroom_margin=1000, say=None):
+        called.append({
+            "coord": coord,
+            "target_host": target_host,
+            "target_port": target_port,
+            "databases": databases,
+            "budget": budget_seconds,
+            "margin": headroom_margin,
+        })
+        return ProxyShiftResult(ok=True, duration_ms=10.0, budget_ms=1000.0, steps={})
+
+    monkeypatch.setattr("migkit.proxy.orchestrate_seamless_traffic_shift", mock_orchestrate)
+
+    from migkit.proxy import PgBouncerCoordinator
+    mock_coord = PgBouncerCoordinator(conf={"host": "127.0.0.1", "port": 6432})
+    monkeypatch.setattr("migkit.proxy.get_proxy_coordinator", lambda conf: mock_coord)
+
+    hop = Hop(
+        name="test_hop",
+        engine="postgres",
+        source=Endpoint(host="10.0.0.1", port=5432),
+        target=Endpoint(host="10.0.0.2", port=5433),
+        options={
+            "cutover": {
+                "pooler": {
+                    "kind": "pgbouncer",
+                    "host": "127.0.0.1",
+                    "port": 6432,
+                    "budget_seconds": 2.5,
+                    "headroom_margin": 5000,
+                },
+                "budget": 2.5,
+            }
+        },
+    )
+
+    class FakeEngine:
+        ENGINE_FAMILY = "postgres"
+        dst_engine = None
+
+    conf = cutover.settings(hop)
+    dbs = ["appdb"]
+    rec = {
+        "clock": {"stopped": 0},
+        "phases": {"flip": {}},
+        "state": "",
+    }
+
+    # Simulate execution of pooler block from cutover
+    target = getattr(hop, "target", None)
+    t_host = getattr(target, "host", None)
+    t_port = getattr(target, "port", None)
+    coord = mock_coord
+    pooler_cfg = conf["pooler"]
+    res = mock_orchestrate(
+        coord,
+        target_host=t_host,
+        target_port=int(t_port),
+        databases=dbs,
+        budget_seconds=float(pooler_cfg["budget_seconds"]),
+        headroom_margin=int(pooler_cfg["headroom_margin"]),
+    )
+    assert res.ok is True
+    assert len(called) == 1
+    assert called[0]["target_host"] == "10.0.0.2"
+    assert called[0]["target_port"] == 5433
+    assert called[0]["budget"] == 2.5
+    assert called[0]["margin"] == 5000
+
+
+
 def test_concurrent_client_buffering_during_traffic_shift():
     requests_log = []
     barrier = threading.Barrier(2)

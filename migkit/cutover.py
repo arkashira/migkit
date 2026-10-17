@@ -1627,19 +1627,26 @@ def _phased(hop, eng, dbs, leg, conf, say, approvers, drain=None,
         if conf.get("pooler"):
             from . import proxy
             target = getattr(hop, "target", None)
-            t_host = getattr(target, "host", None)
-            t_port = getattr(target, "port", None)
-            if t_host:
-                try:
-                    coord = proxy.get_proxy_coordinator(conf["pooler"])
-                    coord.repoint(t_host, int(t_port or 5432), dbs, max(1.0, left()))
-                except Exception:
-                    pass
-            for command in ("RECONNECT", "RESUME"):
-                ok, why = _pooler(conf, command, dbs, max(1.0, left()))
-                if not ok:
-                    raise _Undo(f"the pooler did not {command.lower()}:"
-                                f" {why}")
+            t_host = getattr(target, "host", None) or getattr(hop, "target_host", None)
+            t_port = getattr(target, "port", None) or getattr(hop, "target_port", None)
+            if not t_port:
+                fam = getattr(getattr(eng, "dst_engine", eng), "ENGINE_FAMILY", "")
+                t_port = 3306 if "mysql" in str(fam).lower() else 5432
+            coord = proxy.get_proxy_coordinator(conf["pooler"])
+            pooler_cfg = conf["pooler"] if isinstance(conf["pooler"], dict) else {}
+            budget = float(pooler_cfg.get("budget_seconds") or conf.get("budget") or max(1.0, left()))
+            margin = int(pooler_cfg.get("headroom_margin") or 1000)
+            shift_res = proxy.orchestrate_seamless_traffic_shift(
+                coord,
+                target_host=t_host or "127.0.0.1",
+                target_port=int(t_port),
+                databases=dbs,
+                budget_seconds=budget,
+                headroom_margin=margin,
+                say=say,
+            )
+            if not shift_res.ok:
+                raise _Undo(f"traffic shift failed: {shift_res.error}")
         rec["clock"]["stopped"] = time.time()
         rec["phases"]["flip"]["ended"] = time.time()
         rec["state"] = "flipped"

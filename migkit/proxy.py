@@ -194,10 +194,30 @@ class PgBouncerCoordinator(BaseProxyCoordinator):
         databases: Optional[List[str]] = None,
         timeout: float = 5.0,
     ) -> Tuple[bool, str]:
+        import os
         dbs = list(databases or self.databases or [""])
-        ok, why, _ = self._execute(f"SET host = '{target_host}'", timeout=timeout)
-        if not ok:
-            pass
+        self.host = target_host
+        if target_port:
+            self.port = int(target_port)
+
+        ini_path = self.conf.get("ini_path") or self.conf.get("config_path")
+        if ini_path and os.path.exists(ini_path):
+            try:
+                import configparser
+                cfg = configparser.ConfigParser()
+                cfg.read(ini_path)
+                if not cfg.has_section("databases"):
+                    cfg.add_section("databases")
+                for db in dbs:
+                    if db:
+                        cfg.set("databases", db, f"host={target_host} port={int(target_port)}")
+                with open(ini_path, "w") as f:
+                    cfg.write(f)
+            except Exception as e:
+                return False, f"failed updating pgbouncer.ini: {e}"
+
+        self._execute("RELOAD", timeout=timeout)
+        self._execute(f"SET host = '{target_host}'", timeout=timeout)
         if target_port:
             self._execute(f"SET port = {int(target_port)}", timeout=timeout)
         for db in dbs:
@@ -209,10 +229,9 @@ class PgBouncerCoordinator(BaseProxyCoordinator):
                     self._execute(
                         f"SET database.{db}.port = {int(target_port)}", timeout=timeout
                     )
-                self.reconnect([db], timeout=timeout)
-        self.host = target_host
-        if target_port:
-            self.port = int(target_port)
+        rec_ok, rec_why = self.reconnect(dbs, timeout=timeout)
+        if not rec_ok:
+            return False, f"pgbouncer reconnect failed: {rec_why}"
         return True, ""
 
     def reconnect(
