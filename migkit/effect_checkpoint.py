@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import hashlib
 import json
 import sqlite3
@@ -43,6 +45,121 @@ WEAKER_ENGINES = {
     "pubsub",
     "kinesis",
 }
+
+
+def effect_semantics_rungs():
+    """Target effect checkpointing semantics rungs (Row 616)."""
+    from .decide import Need, Rung
+    return (
+        Rung(
+            "transactional_engine_semantics",
+            "atomic transaction bounding for target with multi-statement ACID capability",
+            needs=(
+                Need(
+                    "atomic transaction capability",
+                    lambda f: bool(f.get("transactional") or f.get("atomic")),
+                    "engine does not support atomic multi-statement transactions",
+                ),
+            ),
+            because="engine guarantees atomic commits combining data write and metadata checkpoint",
+        ),
+        Rung(
+            "at_least_once_engine_semantics",
+            "at-least-once replay with deterministic effect deduplication",
+            needs=(
+                Need(
+                    "replayable stream capability",
+                    lambda f: bool(f.get("replayable", True)),
+                    "engine does not support replayable writes",
+                ),
+            ),
+            because="engine lacks multi-statement atomicity but permits deterministic deduplication",
+        ),
+        Rung(
+            "best_effort_engine_semantics",
+            "best effort delivery for uncoordinated endpoints",
+            because="fallback delivery when transactions and replay guarantees are unavailable",
+        ),
+    )
+
+
+def decide_effect_semantics(engine: str, hop: Any = None, options: Optional[Dict[str, Any]] = None) -> EngineSemantics:
+    from . import decide
+    eng_str = str(engine).lower()
+    is_atomic = eng_str in ATOMIC_ENGINES
+    is_weaker = eng_str in WEAKER_ENGINES
+    facts = {
+        "engine": eng_str,
+        "transactional": is_atomic,
+        "atomic": is_atomic,
+        "replayable": is_atomic or is_weaker or (eng_str not in ("blackhole", "discard")),
+    }
+    if options and "declared_semantics" in options:
+        return EngineSemantics(options["declared_semantics"])
+    choice = decide.climb("engine effect checkpointing semantics", effect_semantics_rungs(), facts)
+    if choice.path == "transactional_engine_semantics":
+        return EngineSemantics.ATOMIC_TRANSACTION
+    if choice.path == "at_least_once_engine_semantics":
+        return EngineSemantics.AT_LEAST_ONCE
+    return EngineSemantics.BEST_EFFORT
+
+
+def retention_contract_rungs():
+    """Effect retention contract rungs (Row 616)."""
+    from .decide import Need, Rung
+    return (
+        Rung(
+            "configured_retention_bounds",
+            "explicit retention bounds configured on hop",
+            needs=(
+                Need(
+                    "custom retention parameters provided",
+                    lambda f: bool(f.get("has_custom_retention")),
+                    "no explicit retention overrides configured",
+                ),
+            ),
+            because="operator specified custom retention capacity or TTL for effect dedup",
+        ),
+        Rung(
+            "default_retention_bounds",
+            "production baseline retention bounds (100k entries, 7-day TTL)",
+            because="standard balanced dedup retention window for CDC replay",
+        ),
+    )
+
+
+def decide_retention_contract(hop: Any = None, options: Optional[Dict[str, Any]] = None) -> RetentionContract:
+    from . import decide
+    opts = {}
+    if hop is not None and hasattr(hop, "options") and isinstance(hop.options, dict):
+        opts.update(hop.options)
+    if options and isinstance(options, dict):
+        opts.update(options)
+
+    has_custom = bool(
+        "effect_retention_max" in opts
+        or "retention_max_entries" in opts
+        or "effect_retention_ttl" in opts
+        or "retention_ttl_seconds" in opts
+        or "min_retained_position" in opts
+        or "watermark_position" in opts
+    )
+    facts = {
+        "has_custom_retention": has_custom,
+    }
+    choice = decide.climb("effect retention bounds", retention_contract_rungs(), facts)
+    if choice.path == "configured_retention_bounds":
+        max_entries = opts.get("effect_retention_max", opts.get("retention_max_entries", 100000))
+        ttl = opts.get("effect_retention_ttl", opts.get("retention_ttl_seconds", 86400 * 7))
+        min_pos = opts.get("min_retained_position")
+        watermark = opts.get("watermark_position")
+        return RetentionContract(
+            max_retained_entries=int(max_entries),
+            retention_ttl_seconds=float(ttl),
+            min_retained_position=min_pos,
+            watermark_position=watermark,
+        )
+    return RetentionContract()
 
 
 class EffectCheckpointError(Exception):
@@ -154,17 +271,13 @@ class AtomicEffectCheckpointer:
         self.stream_id = str(stream_id)
         self.table = str(table)
         self.ownership = ownership or MetadataOwnershipContract()
-        self.retention = retention or RetentionContract()
+        self.retention = retention or decide_retention_contract()
         self.state_dir = Path(state_dir) if state_dir else None
 
         if declared_semantics is not None:
             self.declared_semantics = EngineSemantics(declared_semantics)
-        elif self.engine in ATOMIC_ENGINES:
-            self.declared_semantics = EngineSemantics.ATOMIC_TRANSACTION
-        elif self.engine in WEAKER_ENGINES:
-            self.declared_semantics = EngineSemantics.AT_LEAST_ONCE
         else:
-            self.declared_semantics = EngineSemantics.AT_LEAST_ONCE
+            self.declared_semantics = decide_effect_semantics(self.engine)
 
         self._local_dedup: Set[str] = set()
         self._local_last_pos: Optional[str] = None
@@ -314,8 +427,8 @@ class AtomicEffectCheckpointer:
             if hasattr(self.connection, "execute"):
                 try:
                     self._execute_effect_write(effect, self.connection)
-                except Exception:
-                    pass
+                except Exception as e:
+                    raise EffectCheckpointError(f"Failed to execute effect write on {self.engine}: {e}") from e
             elif hasattr(self.connection, "rows"):
                 self.connection.rows.append(effect.row_data)
             return True
@@ -408,8 +521,8 @@ class AtomicEffectCheckpointer:
                 if hasattr(self.connection, "execute"):
                     try:
                         self._execute_effect_write(effect, self.connection)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        raise EffectCheckpointError(f"Failed to execute effect write on {self.engine}: {e}") from e
                 elif hasattr(self.connection, "rows"):
                     self.connection.rows.append(effect.row_data)
 
@@ -544,3 +657,21 @@ class AtomicEffectCheckpointer:
             "discrepancies": discrepancies,
             "dedup_entries": len(self._local_dedup),
         }
+
+
+__all__ = [
+    "EngineSemantics",
+    "EffectCheckpointError",
+    "CheckpointReconstructionError",
+    "OwnershipViolationError",
+    "RetentionExpiredError",
+    "KeylessEffect",
+    "MetadataOwnershipContract",
+    "RetentionContract",
+    "CheckpointState",
+    "AtomicEffectCheckpointer",
+    "effect_semantics_rungs",
+    "decide_effect_semantics",
+    "retention_contract_rungs",
+    "decide_retention_contract",
+]

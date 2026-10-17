@@ -868,10 +868,26 @@ def apply_unit(eng, db, at, changes, apply, log=None):
                 log(f"ddl barrier {res.barrier_id}: {res.status} {res.affected_table}")
         if ddl:
             changes = [c for c in changes if c not in ddl]
+    checkpointer = getattr(eng, "effect_checkpointer", None)
+    if checkpointer is None and hasattr(eng, "hop"):
+        checkpointer = getattr(eng.hop, "effect_checkpointer", None)
+    if not keyed and checkpointer is not None:
+        from .effect_checkpoint import KeylessEffect
+        keyless_effects = [
+            KeylessEffect(
+                effect_id=c.get("id") or f"{db}:{c.get('table', '')}:{at}:{i}",
+                table=c.get("table", ""),
+                operation=str(c.get("type", "insert")).lower(),
+                row_data=tuple(c.get("row", {}).values()) if isinstance(c.get("row"), dict) else (c.get("row") or ()),
+                position=at,
+            )
+            for i, c in enumerate(changes) if not c.get("key")
+        ]
+        checkpointer.bind_atomic_batch(keyless_effects)
     columns = _columns(eng, changes)
 
     def check():
-        return (faults.NOTHING, None) if keyed else (None, None)
+        return (faults.NOTHING, None) if (keyed or checkpointer is not None) else (None, None)
 
     def run(choice):
         if choice.rung.name == "columns":

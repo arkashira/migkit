@@ -12,7 +12,23 @@ from migkit.effect_checkpoint import (
     OwnershipViolationError,
     RetentionContract,
     RetentionExpiredError,
+    decide_effect_semantics,
+    decide_retention_contract,
+    effect_semantics_rungs,
+    retention_contract_rungs,
 )
+from tests.rung_branches import HOLDS, REFUSES, branch, watched
+
+PROVES_RUNGS = [
+    ('effect_checkpoint', 'effect_semantics_rungs', 'transactional_engine_semantics', 'holds'),
+    ('effect_checkpoint', 'effect_semantics_rungs', 'transactional_engine_semantics', 'refuses'),
+    ('effect_checkpoint', 'effect_semantics_rungs', 'at_least_once_engine_semantics', 'holds'),
+    ('effect_checkpoint', 'effect_semantics_rungs', 'at_least_once_engine_semantics', 'refuses'),
+    ('effect_checkpoint', 'effect_semantics_rungs', 'best_effort_engine_semantics', 'holds'),
+    ('effect_checkpoint', 'retention_contract_rungs', 'configured_retention_bounds', 'holds'),
+    ('effect_checkpoint', 'retention_contract_rungs', 'configured_retention_bounds', 'refuses'),
+    ('effect_checkpoint', 'retention_contract_rungs', 'default_retention_bounds', 'holds'),
+]
 
 
 def _init_sqlite_db(path: Path) -> sqlite3.Connection:
@@ -455,3 +471,75 @@ def test_interleaved_streams_dedup_isolation(tmp_path):
     assert cp_a.bind_atomic_effect(e_a) is False
     assert cp_b.bind_atomic_effect(e_b) is False
     con.close()
+
+
+def test_effect_checkpoint_decide_rungs():
+    with watched() as seen:
+        s1 = decide_effect_semantics("postgres")
+        assert s1 == EngineSemantics.ATOMIC_TRANSACTION
+
+        s2 = decide_effect_semantics("clickhouse")
+        assert s2 == EngineSemantics.AT_LEAST_ONCE
+
+        s3 = decide_effect_semantics("discard")
+        assert s3 == EngineSemantics.BEST_EFFORT
+
+        r1 = decide_retention_contract(options={"effect_retention_max": 50000})
+        assert r1.max_retained_entries == 50000
+
+        r2 = decide_retention_contract()
+        assert r2.max_retained_entries == 100000
+
+    assert set(branch(seen, "transactional_engine_semantics")) == {HOLDS, REFUSES}
+    assert set(branch(seen, "at_least_once_engine_semantics")) == {HOLDS, REFUSES}
+    assert branch(seen, "best_effort_engine_semantics") == [HOLDS]
+    assert set(branch(seen, "configured_retention_bounds")) == {HOLDS, REFUSES}
+    assert branch(seen, "default_retention_bounds") == [HOLDS]
+
+
+def test_non_dbapi_write_error_unswallowed():
+    from migkit.effect_checkpoint import EffectCheckpointError
+
+    class FailingConnection:
+        def execute(self, sql, params):
+            raise sqlite3.OperationalError("disk I/O error")
+
+    cp = AtomicEffectCheckpointer(
+        engine="weaker_custom",
+        connection=FailingConnection(),
+        declared_semantics=EngineSemantics.AT_LEAST_ONCE,
+    )
+    effect = KeylessEffect("e1", "tbl", "insert", ("val",), position=1)
+    with pytest.raises(EffectCheckpointError, match="disk I/O error"):
+        cp.bind_atomic_effect(effect)
+
+
+def test_tailctl_apply_unit_with_effect_checkpointer(tmp_path):
+    from migkit import tailctl
+    db_path = tmp_path / "tailctl_keyless.db"
+    con = _init_sqlite_db(db_path)
+    cp = AtomicEffectCheckpointer(
+        engine="sqlite",
+        connection=con,
+        stream_id="tail_stream",
+        table="access_log",
+    )
+    cp.ensure_metadata_tables()
+
+    class FakeEngine:
+        def __init__(self, cp):
+            self.effect_checkpointer = cp
+            self.name = "sqlite"
+
+        def apply_columns(self, side, db, cols):
+            return 1
+
+    eng = FakeEngine(cp)
+    changes = [
+        {"table": "access_log", "type": "insert", "row": {"ip": "1.2.3.4", "path": "/p", "status": 200}},
+    ]
+    applied_count = []
+    tailctl.apply_unit(eng, "main", 500, changes, lambda c: applied_count.append(len(c)) or len(c))
+    assert cp.is_effect_applied("main:access_log:500:0") is True
+    con.close()
+
