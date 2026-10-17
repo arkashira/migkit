@@ -23,15 +23,107 @@ things that would invalidate its partials - the checksum expression and the
 range boundaries - and a mismatch discards the partials instead of trusting
 them.
 """
+import datetime
+import decimal
 import hashlib
 import json
 import threading
+import uuid
+
+from .sizing import (
+    AIMDChunkSizer, AdaptiveChunkSizer, AdaptiveBatchSizer,
+    aimd_adjust_chunk, aimd_chunk_size, is_lob_type, lob_length_sql,
+    auto_slice_lob_predicates, lob_bounded_predicates
+)
 
 FORMAT_VERSION = 1
 
 
+
+def serialize_cursor(val):
+    """Serialize a range cursor/boundary preserving canonical types."""
+    if val is None:
+        return None
+    if isinstance(val, datetime.datetime):
+        return {"_type": "datetime", "val": val.isoformat(), "ts": val.timestamp()}
+    if isinstance(val, datetime.date):
+        return {"_type": "date", "val": val.isoformat()}
+    if isinstance(val, uuid.UUID):
+        return {"_type": "uuid", "val": str(val)}
+    if isinstance(val, decimal.Decimal):
+        return {"_type": "decimal", "val": str(val)}
+    if isinstance(val, int):
+        return {"_type": "int", "val": val}
+    if isinstance(val, float):
+        return {"_type": "float", "val": val}
+    if isinstance(val, str):
+        return {"_type": "str", "val": val}
+    if isinstance(val, (list, tuple)):
+        return {"_type": "composite", "val": [serialize_cursor(x) for x in val]}
+    if isinstance(val, dict) and "_type" in val:
+        return val
+    return {"_type": "str", "val": str(val)}
+
+
+def deserialize_cursor(raw):
+    """Restore native Python type from typed cursor dict."""
+    if raw is None or not isinstance(raw, dict) or "_type" not in raw:
+        return raw
+    t = raw.get("_type")
+    v = raw.get("val")
+    if t == "datetime":
+        return datetime.datetime.fromisoformat(v)
+    if t == "date":
+        return datetime.date.fromisoformat(v)
+    if t == "uuid":
+        return uuid.UUID(v)
+    if t == "decimal":
+        return decimal.Decimal(v)
+    if t == "int":
+        return int(v)
+    if t == "float":
+        return float(v)
+    if t == "str":
+        return str(v)
+    if t == "composite" and isinstance(v, list):
+        return tuple(deserialize_cursor(x) for x in v)
+    return v
+
+
 def _key(lo, hi):
-    return f"{'' if lo is None else lo}..{'' if hi is None else hi}"
+    def _repr(x):
+        if x is None:
+            return ""
+        if isinstance(x, (datetime.datetime, datetime.date)):
+            return x.isoformat()
+        if isinstance(x, dict) and "_type" in x:
+            return str(x.get("val", ""))
+        return str(x)
+    return f"{_repr(lo)}..{_repr(hi)}"
+
+
+def record_progress_range(report_dir, hop_name, db, table, lo, hi, rows, checksum):
+    """Write sub-unit range completion to check-progress.jsonl for durable recovery."""
+    if not report_dir:
+        return
+    from pathlib import Path
+    pf = Path(report_dir) / "check-progress.jsonl"
+    pf.parent.mkdir(parents=True, exist_ok=True)
+    rec = {
+        "kind": "range",
+        "hop": str(hop_name or ""),
+        "db": str(db or ""),
+        "table": str(table or ""),
+        "range_id": _key(lo, hi),
+        "cursor": {
+            "lo": serialize_cursor(lo),
+            "hi": serialize_cursor(hi),
+        },
+        "rows": int(rows),
+        "checksum": str(checksum),
+    }
+    with open(pf, "a") as f:
+        f.write(json.dumps(rec) + "\n")
 
 
 def new_salt():
@@ -103,6 +195,17 @@ class Checkpoint:
                 table, {"fingerprint": "", "done": {}})["chunk"] = int(proposed)
             return int(proposed)
 
+    def aimd_sizer(self, table, initial=1000):
+        with self._lock:
+            sizers = getattr(self, "_aimd_sizers", None)
+            if sizers is None:
+                sizers = self._aimd_sizers = {}
+            if table not in sizers:
+                init = self.chunk_for(table, initial) if initial else 1000
+                sizers[table] = AIMDChunkSizer(initial=init)
+            return sizers[table]
+
+
     def begin(self, table, expr, ranges):
         """Register the plan for a table; returns the ranges still to do.
 
@@ -138,14 +241,51 @@ class Checkpoint:
                 entry["salt"] = fresh
             return entry["salt"]
 
+    def load_progress_journal(self, jsonl_path):
+        """Load range-level progress from check-progress.jsonl into checkpoint in O(1)."""
+        from pathlib import Path
+        p = Path(jsonl_path)
+        if not p.exists():
+            return 0
+        loaded = 0
+        with self._lock:
+            try:
+                for line in p.read_text().splitlines():
+                    if not line.strip():
+                        continue
+                    r = json.loads(line)
+                    if r.get("kind") != "range":
+                        continue
+                    tbl = r.get("table")
+                    rid = r.get("range_id")
+                    if not tbl or not rid:
+                        continue
+                    self._touched.add(tbl)
+                    entry = self._data["tables"].setdefault(tbl, {"fingerprint": "", "done": {}})
+                    if rid not in entry["done"]:
+                        entry["done"][rid] = [int(r.get("rows", 0)), str(r.get("checksum", "0"))]
+                        loaded += 1
+            except Exception:
+                pass
+            if loaded:
+                self._flush()
+        return loaded
+
     # ---- accumulating ----
 
-    def record(self, table, lo, hi, rows, checksum):
+    def record(self, table, lo, hi, rows, checksum, cursor=None):
         with self._lock:
             self._touched.add(table)
             entry = self._data["tables"].setdefault(
                 table, {"fingerprint": "", "done": {}})
-            entry["done"][_key(lo, hi)] = [int(rows), str(checksum)]
+            k = _key(lo, hi)
+            entry["done"][k] = [int(rows), str(checksum)]
+            entry.setdefault("cursors", {})[k] = {
+                "lo": serialize_cursor(lo),
+                "hi": serialize_cursor(hi),
+                "rows": int(rows),
+                "checksum": str(checksum),
+            }
             self._flush()
 
     def total(self, table):
@@ -303,11 +443,18 @@ class Rate:
     the next run in a form worth trusting.
     """
 
-    def __init__(self, rows_per_second=DEFAULT_ROWS_PER_SECOND):
+    def __init__(self, rows_per_second=DEFAULT_ROWS_PER_SECOND, aimd=False, initial_chunk=1000):
         self.value = float(rows_per_second)
         self.samples = 0
+        self.aimd = aimd
+        self.sizer = AIMDChunkSizer(initial=initial_chunk) if aimd else None
 
-    def observe(self, rows, seconds):
+    def enable_aimd(self, initial=1000):
+        self.aimd = True
+        self.sizer = AIMDChunkSizer(initial=initial)
+        return self.sizer
+
+    def observe(self, rows, seconds, bytes_count=None, memory_healthy=True):
         if rows <= 0 or seconds <= 0:
             return
         seen = rows / seconds
@@ -315,12 +462,23 @@ class Rate:
         # without letting one unlucky chunk redefine the plan
         self.value = seen if self.samples == 0 else self.value * 0.7 + seen * 0.3
         self.samples += 1
+        if self.sizer is not None:
+            self.sizer.adjust(latency=seconds, rows=rows, bytes_count=bytes_count,
+                              memory_healthy=memory_healthy)
 
     def chunk_rows(self, target_seconds=TARGET_SECONDS):
+        if self.sizer is not None:
+            return self.sizer.chunk
         # the ceiling is applied last on purpose: "never one giant query" is
         # the guarantee that makes a long verify restartable, so it wins over
         # the floor if the two are ever set inconsistently
         return min(MAX_CHUNK, max(MIN_CHUNK, int(self.value * target_seconds)))
+
+
+def plan_adaptive_ranges(lo, hi, sizer=None, initial_chunk=1000):
+    if sizer is None:
+        sizer = AIMDChunkSizer(initial=initial_chunk)
+    return plan_ranges(lo, hi, sizer.chunk)
 
 
 def plan_ranges(lo, hi, chunk):
@@ -332,12 +490,50 @@ def plan_ranges(lo, hi, chunk):
     source's minimum or above its maximum is exactly the kind of thing worth
     catching, so it must fall inside a range rather than between two.
     """
-    if lo is None or hi is None or chunk <= 0 or hi < lo:
+    if isinstance(chunk, AIMDChunkSizer):
+        chunk = chunk.chunk
+    if lo is None or hi is None or chunk <= 0:
         return [(None, None)]
-    cuts, start, hi = [], int(lo), int(hi)
-    while start <= hi:
+
+    if isinstance(lo, datetime.datetime) and isinstance(hi, datetime.datetime):
+        t_lo = lo.timestamp()
+        t_hi = hi.timestamp()
+
+        if t_hi < t_lo:
+            return [(None, None)]
+        cuts = []
+        cur = t_lo
+        step = float(chunk)
+        while cur <= t_hi:
+            cur += step
+            if cur <= t_hi:
+                cuts.append(datetime.datetime.fromtimestamp(cur, tz=lo.tzinfo))
+        bounds = [None] + cuts + [None]
+        return [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
+
+    if isinstance(lo, datetime.date) and isinstance(hi, datetime.date) and not isinstance(lo, datetime.datetime):
+        if hi < lo:
+            return [(None, None)]
+        cuts = []
+        cur = lo
+        delta = datetime.timedelta(days=max(1, int(chunk)))
+        while cur <= hi:
+            cur += delta
+            if cur <= hi:
+                cuts.append(cur)
+        bounds = [None] + cuts + [None]
+        return [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
+
+    try:
+        cuts, start, hi_int = [], int(lo), int(hi)
+    except (ValueError, TypeError):
+        return [(None, None)]
+
+    if hi_int < start:
+        return [(None, None)]
+    while start <= hi_int:
         start += int(chunk)
-        if start <= hi:
+        if start <= hi_int:
             cuts.append(start)
     bounds = [None] + cuts + [None]
     return [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
@@ -376,12 +572,38 @@ def mongo_filter(lo, hi):
     return {"_id": cond} if cond else {}
 
 
-def where(column, lo, hi):
+def _format_literal(v):
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    if isinstance(v, (datetime.datetime, datetime.date)):
+        return f"'{v.isoformat()}'"
+    if isinstance(v, uuid.UUID):
+        return f"'{v}'"
+    if isinstance(v, str):
+        if (v.startswith("'") and v.endswith("'")) or (v.startswith('"') and v.endswith('"')) or (v.startswith("(") and v.endswith(")")):
+            return v
+        if v.isdigit() or (v.startswith("-") and v[1:].isdigit()):
+            return v
+        return "'" + v.replace("'", "''") + "'"
+    return str(v)
+
+
+def where(column, lo, hi, lob_pred=None):
     """SQL predicate for one range. Quoting is the caller's business."""
     if lo is None and hi is None:
-        return ""
-    if hi is None:
-        return f"{column} >= {lo}"
-    if lo is None:
-        return f"{column} < {hi}"
-    return f"{column} >= {lo} and {column} < {hi}"
+        base = ""
+    elif hi is None:
+        base = f"{column} >= {_format_literal(lo)}"
+    elif lo is None:
+        base = f"{column} < {_format_literal(hi)}"
+    else:
+        base = f"{column} >= {_format_literal(lo)} and {column} < {_format_literal(hi)}"
+
+    if lob_pred:
+        return f"{base} and ({lob_pred})" if base else f"({lob_pred})"
+    return base
+

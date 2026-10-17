@@ -12999,7 +12999,7 @@ Acceptance test: Starting two concurrent `migkit check <hop>` processes on the s
 
 ### FIELD-OPS03.adaptive-aimd-batch-sizing — Dynamic AIMD batch and chunk autosizing adapting to row bytes and query latency
 
-**OPEN — P0; verify; size L; index row 679.**
+**DONE (2026-10-17; dynamic AIMD chunk autosizing and LOB auto-slicing; tests/test_adaptive_aimd_batch_sizing.py) — P0; verify; size L; index row 679.**
 
 Parent/dependencies and code: `migkit/sizing.py`, `migkit/scanplan.py`, `migkit/ranges.py`.
 
@@ -13033,7 +13033,7 @@ Acceptance test: On any single-table or multi-table verification run, an initial
 
 ### FIELD-OPS05.fused-pushdown-verification — Single-query fused aggregation combining row count, XOR hash, charset, and NULL ratios
 
-**OPEN — P0; verify; size L; index row 681.**
+**DONE (2026-10-17; scanplan.fused_pushdown_verification single-query fused aggregation; tests/test_fused_pushdown_verification.py) — P0; verify; size L; index row 681.**
 
 Parent/dependencies and code: `migkit/scanplan.py`, `migkit/engines/mysql.py`, `migkit/engines/postgres.py`.
 

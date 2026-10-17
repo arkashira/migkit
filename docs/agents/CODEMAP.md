@@ -158,7 +158,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/rules.py` - Business-rule checks: the operator's own questions, asked of both sides.
 - `migkit/runlog.py` - The run log: every event of a run as one JSON line, in migkit's words (audit 2026-10-01, LG5, LG12, LG13). Classes: RunLog.
 - `migkit/runner.py` - Every program migkit runs is started, watched, stopped and said one way. Classes: Failed, Transient, Blocked, Refused, Proc.
-- `migkit/scanplan.py` - The aggregates checks read of a table, planned as one set of reads (backlog P0-VERIFY-EXECUTION). Classes: Aggregate, Got, Evidence, RowText, RangeTexts.
+- `migkit/scanplan.py` - The aggregates checks read of a table, planned as one set of reads (backlog P0-VERIFY-EXECUTION). Classes: Aggregate, Got, Evidence, RowText, RangeTexts, FusedPushdownResult.
 - `migkit/scenarios.py` - Migration scenarios decided on observed facts (backlog P0-SCENARIOS): a managed service change through the provider's own operations (`cloud Classes: ScenarioDecision, TopologyCheck.
 - `migkit/schedule.py` - A hop that runs on a schedule of its own. Classes: NotDue, Slot.
 - `migkit/schema.py` - (no docstring)

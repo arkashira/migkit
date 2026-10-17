@@ -1073,3 +1073,127 @@ class Memory:
                           f" about {_bytes(self.each())}",
                           at_most=max(1, n))
         return None
+
+
+def aimd_adjust_chunk(chunk, latency=0.0, row_bytes=0, memory_healthy=True,
+                      min_chunk=100, max_chunk=50000, max_row_bytes=64 * 1024,
+                      max_latency=5.0, min_latency=1.0, expand_factor=1.5):
+    chunk = int(chunk)
+    if row_bytes > max_row_bytes or latency > max_latency:
+        return max(min_chunk, chunk // 2)
+    if latency < min_latency and memory_healthy:
+        return min(max_chunk, int(chunk * expand_factor))
+    return chunk
+
+
+aimd_chunk_size = aimd_adjust_chunk
+
+
+class AIMDChunkSizer:
+    MIN_CHUNK = 100
+    MAX_CHUNK = 50000
+    MAX_ROW_BYTES = 64 * 1024
+    LATENCY_HALVE = 5.0
+    LATENCY_EXPAND = 1.0
+    EXPAND_FACTOR = 1.5
+
+    def __init__(self, initial=1000, min_chunk=100, max_chunk=50000,
+                 max_row_bytes=64 * 1024, max_latency=5.0, min_latency=1.0,
+                 memory_healthy_fn=None):
+        self.min_chunk = min_chunk
+        self.max_chunk = max_chunk
+        self.max_row_bytes = max_row_bytes
+        self.max_latency = max_latency
+        self.min_latency = min_latency
+        self.memory_healthy_fn = memory_healthy_fn
+        self.chunk = max(min_chunk, min(int(initial), max_chunk))
+        self.history = [self.chunk]
+
+    def is_memory_healthy(self):
+        if self.memory_healthy_fn is not None:
+            try:
+                return bool(self.memory_healthy_fn())
+            except Exception:
+                return False
+        m = _memory()
+        return True if m is None else m >= RESERVE_MEMORY
+
+    def adjust(self, latency=0.0, row_bytes=0, rows=None, bytes_count=None,
+               memory_healthy=None):
+        if rows and bytes_count is not None and rows > 0:
+            row_bytes = bytes_count / rows
+        if memory_healthy is None:
+            memory_healthy = self.is_memory_healthy()
+        self.chunk = aimd_adjust_chunk(
+            self.chunk, latency=latency, row_bytes=row_bytes,
+            memory_healthy=memory_healthy, min_chunk=self.min_chunk,
+            max_chunk=self.max_chunk, max_row_bytes=self.max_row_bytes,
+            max_latency=self.max_latency, min_latency=self.min_latency,
+            expand_factor=self.EXPAND_FACTOR)
+        self.history.append(self.chunk)
+        return self.chunk
+
+    observe = adjust
+
+    def current(self):
+        return self.chunk
+
+
+AdaptiveChunkSizer = AIMDChunkSizer
+AdaptiveBatchSizer = AIMDChunkSizer
+
+
+_LOB_TYPES = frozenset({
+    "blob", "tinyblob", "mediumblob", "longblob", "bytea", "text",
+    "tinytext", "mediumtext", "longtext", "clob", "nclob", "json",
+    "jsonb", "raw", "bfile", "image", "binary", "varbinary"
+})
+
+
+def is_lob_type(type_name):
+    t = str(type_name or "").lower().split("(")[0].strip()
+    return t in _LOB_TYPES or any(x in t for x in ("blob", "clob", "json", "bytea", "text"))
+
+
+def lob_length_sql(engine, column):
+    from .canon import dialect
+    d = dialect(engine) if engine else "postgres"
+    if d == "mysql":
+        return f"coalesce(octet_length(`{column}`), 0)"
+    if d == "sqlite":
+        return f"coalesce(length(\"{column}\"), 0)"
+    return f"coalesce(octet_length(\"{column}\"::text), 0)"
+
+
+def auto_slice_lob_predicates(columns, threshold_bytes=64 * 1024, engine="postgres"):
+    lobs = []
+    if isinstance(columns, dict):
+        cols_iter = columns.items()
+    elif isinstance(columns, (list, tuple)) and columns and isinstance(columns[0], (list, tuple)):
+        cols_iter = columns
+    else:
+        cols_iter = [(c, "blob" if any(x in str(c).lower() for x in ("data", "payload", "blob", "json", "text")) else "other") for c in columns]
+
+    for col, typ in cols_iter:
+        if is_lob_type(typ):
+            lobs.append(col)
+
+    if not lobs:
+        return {"small": "", "large": "", "lobs": []}
+
+    small_parts = []
+    large_parts = []
+    for col in lobs:
+        len_expr = lob_length_sql(engine, col)
+        small_parts.append(f"{len_expr} <= {threshold_bytes}")
+        large_parts.append(f"{len_expr} > {threshold_bytes}")
+
+    return {
+        "small": " and ".join(small_parts),
+        "large": " or ".join(large_parts),
+        "lobs": lobs,
+    }
+
+
+lob_bounded_predicates = auto_slice_lob_predicates
+

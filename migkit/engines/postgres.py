@@ -6507,9 +6507,25 @@ select json_build_object(
             sch, tbl = self._split(t)
             try:
                 bounds = self._psql("src", db,
-                    f'select coalesce(min({_ident(col)}),0)||chr(124)||'
-                    f'coalesce(max({_ident(col)}),0) from {_ident(sch)}.{_ident(tbl)}').strip()
-                lo, hi = (int(x) for x in bounds.split("|"))
+                    f'select coalesce(min({_ident(col)})::text, \'\')||chr(124)||'
+                    f'coalesce(max({_ident(col)})::text, \'\') from {_ident(sch)}.{_ident(tbl)}').strip()
+                raw_lo, _, raw_hi = bounds.partition("|")
+                if not raw_lo and not raw_hi:
+                    lo, hi = None, None
+                elif (raw_lo.isdigit() or (raw_lo.startswith("-") and raw_lo[1:].isdigit())) and \
+                     (raw_hi.isdigit() or (raw_hi.startswith("-") and raw_hi[1:].isdigit())):
+                    lo, hi = int(raw_lo), int(raw_hi)
+                else:
+                    import datetime as _dt
+                    try:
+                        lo = _dt.datetime.fromisoformat(raw_lo)
+                        hi = _dt.datetime.fromisoformat(raw_hi)
+                    except (ValueError, TypeError):
+                        try:
+                            lo = _dt.date.fromisoformat(raw_lo)
+                            hi = _dt.date.fromisoformat(raw_hi)
+                        except (ValueError, TypeError):
+                            lo, hi = raw_lo, raw_hi
             except Exception as e:
                 return f"{t}: ERROR {str(e).splitlines()[-1][:80]}"
             chunk = cp.chunk_for(t, rate.chunk_rows())
@@ -6518,6 +6534,7 @@ select json_build_object(
             # the ranges' sums are of the rows the hop's row filter takes:
             # partials taken under another filter are not added in
             pred = self.row_filter(db, sch, tbl)
+            cp.load_progress_journal(self.hop.report_dir(db) / "check-progress.jsonl")
             todo = cp.begin(t, expr + (f" where {pred}" if pred else ""),
                             ranges)
             done_before = cp.resumed(t)
@@ -6556,7 +6573,9 @@ select json_build_object(
                     return (f"{t}: DIFF src={rows_a}|{a.split('|', 1)[1]}"
                             f" dst={rows_b}|{b.split('|', 1)[1]}"
                             f" where {pred}")
-                cp.record(t, rlo, rhi, *a.split("|", 1))
+                rows_done, csum_done = a.split("|", 1)
+                cp.record(t, rlo, rhi, rows_done, csum_done)
+                _cp.record_progress_range(self.hop.report_dir(db), self.hop.name, db, t, rlo, rhi, rows_done, csum_done)
             rows, total = cp.total(t)
             cp.clear(t)
             # the ranges' sums add up to the whole table's, so the one
@@ -7763,6 +7782,58 @@ select json_build_object(
         except Exception as e:  # noqa: BLE001 - said as what it is
             return None, {"the text columns":
                           (str(e).splitlines() or [""])[-1][:90]}
+
+    def fused_pushdown_query(self, db, table, *, hash_expr=None, hash_algo="xor",
+                             hash_agg=None, charset_columns=(), null_empty_conditions=(),
+                             null_empty_columns=(), where="", aliases=False,
+                             quote_identifiers=True):
+        from .. import scanplan
+        src_table = self._scope(db, table)
+        return scanplan.fused_pushdown_query(
+            "postgres", src_table, hash_expr=hash_expr, hash_algo=hash_algo,
+            hash_agg=hash_agg, charset_columns=charset_columns,
+            null_empty_conditions=null_empty_conditions,
+            null_empty_columns=null_empty_columns, where=where,
+            aliases=aliases, quote_identifiers=quote_identifiers)
+
+    def fused_pushdown_verification(self, db, table, *, text_columns=None,
+                                    hash_expr=None, hash_algo="xor", hash_agg=None,
+                                    null_empty_conditions=(), null_empty_columns=(),
+                                    parts=None, sides=("src", "dst")):
+        from .. import scanplan
+        if text_columns is None:
+            try:
+                cols = self._text_columns("src", db)
+                text_columns = cols.get(table, [])
+            except Exception:
+                text_columns = []
+        if hash_expr is None and hash_agg is None:
+            try:
+                hash_expr = self._row_hash_expr("src", db, table)
+            except Exception:
+                hash_expr = None
+
+        def _query(side, sql):
+            res = self._psql(side, db, sql)
+            if isinstance(res, list):
+                return res
+            return [ln.split("|") for ln in str(res).splitlines() if ln.strip()]
+
+        def _src(side, t):
+            if hasattr(self, "_split"):
+                parts = self._split(t)
+                return ".".join(_ident(x) for x in parts)
+            return _ident(t)
+
+        return scanplan.fused_pushdown_verify(
+            self, db, table, query=_query,
+            source=_src,
+            text_columns=text_columns, hash_expr=hash_expr, hash_algo=hash_algo,
+            hash_agg=hash_agg, null_empty_conditions=null_empty_conditions,
+            null_empty_columns=null_empty_columns, parts=parts, sides=sides)
+
+    _fused_pushdown_verification = fused_pushdown_verification
+
 
     def _text_columns(self, side, db):
         """{schema.table: [text column]} on a side, of the tables the hop

@@ -4044,6 +4044,44 @@ class MySQLEngine(Engine):
         except Exception:  # noqa: BLE001 - each check says its own error
             return None
 
+    def fused_pushdown_query(self, db, table, *, hash_expr=None, hash_algo="xor",
+                             hash_agg=None, charset_columns=(), null_empty_conditions=(),
+                             null_empty_columns=(), where="", aliases=False,
+                             quote_identifiers=True):
+        from .. import scanplan
+        src_table = self._scope("src", db, table)
+        return scanplan.fused_pushdown_query(
+            "mysql", src_table, hash_expr=hash_expr, hash_algo=hash_algo,
+            hash_agg=hash_agg, charset_columns=charset_columns,
+            null_empty_conditions=null_empty_conditions,
+            null_empty_columns=null_empty_columns, where=where,
+            aliases=aliases, quote_identifiers=quote_identifiers)
+
+    def fused_pushdown_verification(self, db, table, *, text_columns=None,
+                                    hash_expr=None, hash_algo="xor", hash_agg=None,
+                                    null_empty_conditions=(), null_empty_columns=(),
+                                    parts=None, sides=("src", "dst")):
+        from .. import scanplan
+        if text_columns is None:
+            try:
+                text_columns = [c for t, c in self._text_columns(db) if t == table]
+            except Exception:
+                text_columns = []
+        if hash_expr is None and hash_agg is None:
+            try:
+                hash_expr = self._row_expr(db, table)
+            except Exception:
+                hash_expr = None
+        return scanplan.fused_pushdown_verify(
+            self, db, table, query=lambda side, sql: self._q(side, sql),
+            source=lambda side, t: self._scope(side, db, t),
+            text_columns=text_columns, hash_expr=hash_expr, hash_algo=hash_algo,
+            hash_agg=hash_agg, null_empty_conditions=null_empty_conditions,
+            null_empty_columns=null_empty_columns, parts=parts, sides=sides)
+
+    _fused_pushdown_verification = fused_pushdown_verification
+
+
     def _charset_columns(self, db):
         return self._scoped_rows(db, self._q(
             "src", "select distinct table_name, column_name"

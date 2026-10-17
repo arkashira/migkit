@@ -730,3 +730,200 @@ def row_text_line(table, got):
     return (f"{table}: DIFF {rows} first key={'|'.join(key)} ({said})"
             f" where {where}"
             + (f" ({got.earlier_said()})" if got.earlier else ""))
+
+
+REPLACEMENT_CHAR = "\ufffd"
+
+
+@dataclass
+class FusedPushdownResult:
+    """One slice's verification totals from a single fused query."""
+    rows: int
+    data_hash: object
+    charset_anomalies: int
+    null_empty_diffs: int
+    extra: tuple = ()
+
+    def __iter__(self):
+        return iter((self.rows, self.data_hash, self.charset_anomalies, self.null_empty_diffs) + self.extra)
+
+    def __getitem__(self, idx):
+        return (self.rows, self.data_hash, self.charset_anomalies, self.null_empty_diffs, *self.extra)[idx]
+
+
+def _quote_ident(engine, name, quote=True):
+    if not quote:
+        return name
+    eng = str(engine).lower()
+    if eng == "mysql":
+        return name if name.startswith("`") and name.endswith("`") else f"`{name}`"
+    return name if name.startswith('"') and name.endswith('"') else f'"{name}"'
+
+
+def fused_pushdown_query(engine, table, hash_expr=None, *,
+                         hash_algo="xor",
+                         hash_agg=None,
+                         charset_columns=(),
+                         null_empty_conditions=(),
+                         null_empty_columns=(),
+                         where="",
+                         aliases=False,
+                         quote_identifiers=True,
+                         count_expr=None):
+    eng = str(engine).lower()
+    cols = []
+    cnt = count_expr or ("COUNT(*)" if aliases else "count(*)")
+    cols.append(f"{cnt} as total_rows" if aliases else cnt)
+
+    if hash_agg is not None:
+        h_part = str(hash_agg)
+    elif hash_expr is not None:
+        if hash_algo == "xor":
+            h_part = f"BIT_XOR({hash_expr})" if eng == "mysql" else f"bit_xor({hash_expr})"
+        else:
+            h_part = f"coalesce(sum({hash_expr}), 0)"
+    else:
+        h_part = "BIT_XOR(HASH_EXPR)" if hash_algo == "xor" else "sum(HASH_EXPR)"
+    cols.append(f"{h_part} as data_hash" if aliases else h_part)
+
+    if charset_columns:
+        preds = [_quote_ident(eng, c, quote_identifiers) for c in charset_columns]
+        cs_cond = " OR ".join(f"{c} LIKE '%{REPLACEMENT_CHAR}%'" for c in preds)
+        cs_expr = f"SUM(CASE WHEN {cs_cond} THEN 1 ELSE 0 END)"
+        cols.append(f"{cs_expr} as charset_anomalies" if aliases else cs_expr)
+
+    nec_preds = []
+    if null_empty_conditions:
+        nec_preds = list(null_empty_conditions)
+    elif null_empty_columns:
+        cols_list = list(null_empty_columns)
+        if cols_list and isinstance(cols_list[0], (list, tuple)):
+            for pair in cols_list:
+                if len(pair) >= 2:
+                    qa = _quote_ident(eng, pair[0], quote_identifiers)
+                    qb = _quote_ident(eng, pair[1], quote_identifiers)
+                    nec_preds.append(f"{qa} IS NULL AND {qb} = ''")
+                elif len(pair) == 1:
+                    qc = _quote_ident(eng, pair[0], quote_identifiers)
+                    nec_preds.append(f"{qc} IS NULL OR {qc} = ''")
+        elif len(cols_list) == 2:
+            qa = _quote_ident(eng, cols_list[0], quote_identifiers)
+            qb = _quote_ident(eng, cols_list[1], quote_identifiers)
+            nec_preds.append(f"{qa} IS NULL AND {qb} = ''")
+        else:
+            pairs = [cols_list[i:i + 2] for i in range(0, len(cols_list), 2)]
+            for pair in pairs:
+                if len(pair) == 2:
+                    qa = _quote_ident(eng, pair[0], quote_identifiers)
+                    qb = _quote_ident(eng, pair[1], quote_identifiers)
+                    nec_preds.append(f"{qa} IS NULL AND {qb} = ''")
+                else:
+                    qc = _quote_ident(eng, pair[0], quote_identifiers)
+                    nec_preds.append(f"{qc} IS NULL OR {qc} = ''")
+
+    for i, cond in enumerate(nec_preds):
+        ne_expr = f"SUM(CASE WHEN {cond} THEN 1 ELSE 0 END)"
+        if aliases:
+            ne_expr += " as null_empty_diffs" if i == 0 else f" as null_empty_diffs_{i}"
+        cols.append(ne_expr)
+
+    sql = f"SELECT {', '.join(cols)} FROM {table}"
+    if where:
+        w = where.strip()
+        sql += f" {w}" if w.lower().startswith("where ") else f" WHERE {w}"
+    return sql
+
+
+def fused_pushdown_verify(eng, db, table, *, query,
+                          source=None,
+                          text_columns=(),
+                          hash_expr=None,
+                          hash_algo="xor",
+                          hash_agg=None,
+                          null_empty_conditions=(),
+                          null_empty_columns=(),
+                          parts=None,
+                          sides=("src", "dst"),
+                          quote_identifiers=True):
+    from .engines.base import Result
+    dialect = getattr(eng, "CANON_ENGINE", "mysql")
+    if source is None:
+        source = lambda side, t: t
+    slices = list(parts) if parts is not None else [""]
+    if not slices:
+        slices = [""]
+
+    slice_results = {s: [] for s in sides}
+    for pred in slices:
+        for s in sides:
+            src_table = source(s, table)
+            sql = fused_pushdown_query(
+                dialect, src_table, hash_expr=hash_expr, hash_algo=hash_algo,
+                hash_agg=hash_agg, charset_columns=text_columns,
+                null_empty_conditions=null_empty_conditions,
+                null_empty_columns=null_empty_columns, where=pred,
+                quote_identifiers=quote_identifiers)
+            answer = query(s, sql)
+            if not answer:
+                raise RuntimeError(f"fused query returned no rows for {table} on {s}")
+            row = answer[0]
+            if isinstance(row, str):
+                row = row.split("|")
+            rows = int(row[0] or 0)
+            dhash = row[1] if len(row) > 1 and row[1] is not None else 0
+            cs_anom = int(row[2] or 0) if len(row) > 2 else 0
+            ne_diff = int(row[3] or 0) if len(row) > 3 else 0
+            extra = tuple(row[4:]) if len(row) > 4 else ()
+            slice_results[s].append(FusedPushdownResult(rows, dhash, cs_anom, ne_diff, extra))
+
+    if len(sides) == 1:
+        s = sides[0]
+        total_rows = sum(r.rows for r in slice_results[s])
+        return Result("deep", f"{db}.{table} fused", "ok",
+                      f"{table}: rows={total_rows} clean", category="verify.fused")
+
+    totals = {}
+    for s in ("src", "dst"):
+        s_rows = sum(r.rows for r in slice_results[s])
+        s_cs = sum(r.charset_anomalies for r in slice_results[s])
+        s_ne = sum(r.null_empty_diffs for r in slice_results[s])
+        if hash_algo == "xor":
+            s_hash = 0
+            for r in slice_results[s]:
+                try:
+                    s_hash ^= int(r.data_hash or 0)
+                except (ValueError, TypeError):
+                    s_hash = r.data_hash
+        else:
+            s_hash = 0
+            for r in slice_results[s]:
+                try:
+                    s_hash += int(r.data_hash or 0)
+                except (ValueError, TypeError):
+                    s_hash = r.data_hash
+        totals[s] = (s_rows, s_hash, s_cs, s_ne)
+
+    src_r, src_h, src_cs, src_ne = totals["src"]
+    dst_r, dst_h, dst_cs, dst_ne = totals["dst"]
+
+    if src_r != dst_r:
+        return Result("deep", f"{db}.{table} fused", "diff",
+                      f"{table}: row count mismatch: src={src_r} dst={dst_r}",
+                      category="verify.fused")
+    if src_h != dst_h:
+        return Result("deep", f"{db}.{table} fused", "diff",
+                      f"{table}: data hash mismatch: src={src_h} dst={dst_h}",
+                      category="verify.fused")
+    if dst_cs > src_cs:
+        return Result("deep", f"{db}.{table} fused", "diff",
+                      f"{table}: charset corruption: {dst_cs - src_cs} excess replacement characters on target",
+                      category="verify.fused")
+    if src_ne != dst_ne:
+        return Result("deep", f"{db}.{table} fused", "diff",
+                      f"{table}: null/empty drift: src={src_ne} dst={dst_ne}",
+                      category="verify.fused")
+
+    return Result("deep", f"{db}.{table} fused", "ok",
+                  f"{table}: OK rows={src_r} hash={src_h} clean",
+                  category="verify.fused")
+
