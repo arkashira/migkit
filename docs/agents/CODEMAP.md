@@ -22,7 +22,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - [`docs/agents/INVENTORY.md`](INVENTORY.md) - every file of `migkit/` and `tools/`: its responsibility package, owner domain, size, importers, the packages it reaches, the programs it wraps and the tests that reach it
 - [`docs/agents/LAYERS.md`](LAYERS.md) - the layering rule (a package imports its own rank and below) and every upward import still listed, with its reason
 
-## `migkit/` (265 modules)
+## `migkit/` (269 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/ack_lattice.py` - (no docstring) Classes: PipelineStage, MonotoneRegressionError, SourceAckRefusedError, CutoverRefusedError, CutoverAuthorization, PositionLattice.
@@ -76,6 +76,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/conflict_semantics.py` - (no docstring) Classes: CareBadge, MergeAlgebraKind, ConflictType, OriginIdentity, VersionVector, HybridLogicalClock.
 - `migkit/connector_capability.py` - Model schema drift and limitations per connector version (Row 640: RCH32.connector-capability). Classes: CareBadge, ReplicationMode, DriftOperation, SupportDisposition, DocReleaseStatus, ConnectorCapabilityError.
 - `migkit/consolidate.py` - Many databases or tenants into one (backlog P0-SCENARIOS): each source's rows carried into one target under a column the hop names, filled w Classes: Source, TablePlan, SliceVerdict.
+- `migkit/context_learning.py` - Transfer measurements without false confidence (Row 586: SMART-N3.context-learning). Classes: CareBadge, ContextLearningError, UnsafeEndpointHostError, CorruptedMeasurementError, VerificationLeaseError, UncalibratedIntervalError.
 - `migkit/control_upgrade.py` - (no docstring) Classes: StateSchemaVersion, InvariantViolationError, UpgradeRollbackError, HopDefinition, AdapterCheckpoint, DurableControlState.
 - `migkit/conversion_ledger.py` - Scope-distinct conversion ledger (RCH18.conversion-ledger). Classes: CareBadge, ArtefactKind, ArtefactCriticality, LifecycleStage, DebtType, DebtRecord.
 - `migkit/copybook.py` - COBOL copybooks, and the records they describe, read and written exactly. Classes: CopybookError, Unreadable, Figurative, Item, Picture, Leaf.
@@ -112,6 +113,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/execution_contract.py` - Compile intent into one checked execution contract (Row 584: SMART-N1.contract). Classes: CareBadge, MigrationGoalKind, ExecutionPathClass, LifecycleBoundary, IrreversibleBoundaryKind, ProofCoverageLevel.
 - `migkit/exit_portability.py` - (no docstring) Classes: PortabilityValidationError, NeutralType, NeutralSchema, CollisionStrategy, PortableManifestExporter, PortableStateImporter.
 - `migkit/export.py` - The evidence of a migration, exported: what migkit did on a hop and what it measured, in the forms audit and change processes take - HTML an
+- `migkit/fact_validity.py` - Make facts and decisions valid for a bounded context (Row 585: SMART-N2.fact-validity). Classes: CareBadge, FactValidityError, StaleFactError, CrossContextLeakError, InvalidEpochMutationError, IrreversibleStepBlockedError.
 - `migkit/factbook.py` - Every fact a choice may read, in one place (backlog P0-SMART, the owner's note B of 2026-09-30: "every factor"). Classes: Fact.
 - `migkit/failpoint.py` - Failure on purpose, at the places a move keeps what it has done.
 - `migkit/failure_budget.py` - Allocate recovery effort by progress and deadline value (Row 645: RCH37.failure-budget). Classes: CareBadge, RecoveryStage, TerminationReason, FailureBudgetError, DiagnosisFailureError, LeaseLockHeldError.
@@ -135,6 +137,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/imports.py` - A hop from another tool's task (backlog R21: switching costs nothing). Classes: Imported.
 - `migkit/incumbent_switch.py` - Include transition and rollback costs when replanning (Row 643: RCH35.incumbent-switch). Classes: CareBadge, CheckpointGranularity, SwitchVerdict, IncumbentSwitchError, ActiveLeaseConflictError, UnvalidatedIncumbentError.
 - `migkit/indexes.py` - Getting the indexes out of the way of a bulk load, and putting them back. Classes: NotRebuilt, IndexWindow, NotPutBack, ForeignKeyWindow, DeferredIndexLifecycle.
+- `migkit/information_budget.py` - Choose what to measure by its decision value (Row 587: SMART-N4.information-budget). Classes: CareBadge, InformationBudgetError, UnsafeEndpointHostError, BudgetExhaustedError, VerificationLeaseError, ProbeLockMode.
 - `migkit/init.py` - (no docstring)
 - `migkit/integrations.py` - migkit inside the team's tools: a task for Airflow and Dagster, a step for GitHub Actions and Argo Workflows, each a thin wrapper over migki
 - `migkit/interlock.py` - The interlock on the target (backlog R23, 3): before a step writes to a target - a copy, a stream, a repair, a cutover, users, a converted s
@@ -152,6 +155,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/leftovers.py` - What a mover added to the source and never took away. Classes: Named.
 - `migkit/legs.py` - The fewest legs the rows can take, and where migkit should stand (backlog R22, item 4). Classes: Footprint.
 - `migkit/lineage_evidence.py` - (no docstring) Classes: CallSite, UnknownDynamicLineage, SyntaxReference, RuntimeTrace, VersionedCatalogue, AssessmentCoverage.
+- `migkit/live_replan.py` - Replan remaining work with priced state transitions (Row 588: SMART-N5.live-replan). Classes: CareBadge, ReplanStrategy, DAGPhase, DAGNodeStatus, LiveReplanError, UnsafeEndpointError.
 - `migkit/loadtext.py` - The source renders the target's load format in SQL (backlog R20.14).
 - `migkit/lob_policy.py` - Choose LOB policy without truncation (Row 610: RCH02.lob-policy). Classes: CareBadge, LobPathMode, LobSizeProbeMode, LobKind, LobPolicyError, LobTruncationError.
 - `migkit/lob_transaction.py` - (no docstring) Classes: LobTransactionError, NotNullConstraintViolation, StaleTransactionIdentityError, ConcurrentLobMutationError, LobPathRefusedError, ExecutionPath.

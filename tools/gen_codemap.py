@@ -599,7 +599,8 @@ _BY_NAME = {
                  " verify_method failure_budget storage_protocol anti_corruption end_to_end_bar"
                  " provider_path lob_policy transaction_dag apply_contract"
                  " repair_fence online_confirmation keyless_proof"
-                 " execution_contract complete_path proof_planning",
+                 " execution_contract complete_path proof_planning"
+                 " fact_validity context_learning information_budget live_replan",
     "cli": "cli guide ui estate",
 }
 #: a subpackage, whole

@@ -11817,27 +11817,35 @@ Status: REVIEW 2026-10-17 (tests/test_execution_contract_intent_compilation.py 8
 
 ### SMART-N2.fact-validity — Make facts and decisions valid for a bounded context
 
-**OPEN — P2; proposal; size M; index row 585.**
+**REVIEW 2026-10-17 (fact_validity.py decide rungs for contextual facts, selective dependency invalidation, critical input re-read, and probe deduplication; tests/test_fact_validity_bounded_context.py) — P2; proposal; size M; index row 585.**
 
 Extend Facts/factbook with provenance, observation time, server/config/schema epoch, confidence and validity scope. Build a dependency map to invalidate only decisions whose inputs changed after failover, DDL, permission, packet, quota or network changes. Re-read critical inputs before irreversible steps, deduplicate concurrent probes, and redact values. Current lazy readers are cached; this proposes contextual invalidation, not another fact registry. Proof: stale facts cannot count as current proof; unrelated work is not restarted; probe time/source load are bounded.
 
+Status: REVIEW 2026-10-17 (tests/test_fact_validity_bounded_context.py 12/12 green).
+
 ### SMART-N3.context-learning — Transfer measurements without false confidence
 
-**OPEN — P2; proposal; size L; index row 586.**
+**REVIEW 2026-10-17 (context_learning.py decide rungs for hierarchical pooling, out-of-distribution detection, step-change drift recalibration, and calibrated conformal intervals; tests/test_context_learning_transfer.py) — P2; proposal; size L; index row 586.**
 
 Current Knowledge cost fits use rung|pair; failure outcomes additionally carry version/service. Extend with context-relevant version/service/hardware/topology/type mix, hierarchical pooling, out-of-distribution detection, time decay and robust residual handling. Avoid rigid buckets and premature neural-model replacement. Keep prior/measurement lineage; calibrate predictive intervals against held-out real workloads. Proof: p50/p90 empirical coverage, forecast error/regret and drift recovery after hardware/version/network changes; evidence from a different context never becomes falsely precise local measurement.
 
+Status: REVIEW 2026-10-17 (tests/test_context_learning_transfer.py 12/12 green).
+
 ### SMART-N4.information-budget — Choose what to measure by its decision value
 
-**OPEN — P2; proposal; size M; index row 587.**
+**REVIEW 2026-10-17 (information_budget.py decide rungs for value of information, scanplan read fusion, budget stopping rules, and conservative baseline enforcement; tests/test_information_budget_voI.py) — P2; proposal; size M; index row 587.**
 
 Extend rank_priority and safe Trials. Estimate which uncertain fact could change feasibility or the winning plan, then compare expected reduction of decision loss with probe time, source CPU/I/O/locks, money and deadline slack. Combine compatible reads through scanplan and stop probing when uncertainty cannot change a choice materially. Preserve conservative baseline and bounded exploration; unknown is never assumed support. Proof: bounded cold-start source impact, fewer unhelpful probes, lower verified completion time and no quality downgrade.
 
+Status: REVIEW 2026-10-17 (tests/test_information_budget_voI.py 10/10 green).
+
 ### SMART-N5.live-replan — Replan remaining work with priced state transitions
 
-**OPEN — P2; proposal; size L; index row 588.**
+**REVIEW 2026-10-17 (live_replan.py decide rungs for priced transition replanning, oscillation damping, DAG rescheduling, and O(1) typed checkpoint resume; tests/test_live_replan_priced_transitions.py) — P2; proposal; size L; index row 588.**
 
 Current Trials re-climbs after surprise and autonomous.replan responds to throttle/isolate. Extend to safe checkpoint replanning of the remaining phase/table/range DAG on changing throughput, CDC arrivals, load, capacity or quota. Include setup/cleanup, cache warming, snapshot age, reconnect, undo/replay and validation costs. Switch only if conservative remaining-work savings exceed transition cost and hysteresis; preserve committed checkpoints. Proof: oscillating load does not thrash, old work is not replayed blindly, and sustained changes produce measured end-to-end improvement.
+
+Status: REVIEW 2026-10-17 (tests/test_live_replan_priced_transitions.py 12/12 green).
 
 ### SMART-N6.complete-path — Optimize verified completion across the full path
 
