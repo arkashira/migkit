@@ -22,7 +22,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - [`docs/agents/INVENTORY.md`](INVENTORY.md) - every file of `migkit/` and `tools/`: its responsibility package, owner domain, size, importers, the packages it reaches, the programs it wraps and the tests that reach it
 - [`docs/agents/LAYERS.md`](LAYERS.md) - the layering rule (a package imports its own rank and below) and every upward import still listed, with its reason
 
-## `migkit/` (283 modules)
+## `migkit/` (287 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/ack_lattice.py` - (no docstring) Classes: PipelineStage, MonotoneRegressionError, SourceAckRefusedError, CutoverRefusedError, CutoverAuthorization, PositionLattice.
@@ -97,6 +97,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/ddl.py` - Statements migkit generates that should not simply be applied.
 - `migkit/ddl_shield.py` - (no docstring) Classes: DDLShieldError, DDLTranslationError, DDLBarrierError, ShadowTableInfo, ActionInfo, DDLEvent.
 - `migkit/decide.py` - One way of deciding for every choice migkit makes (backlog P0, decided 2026-09-27). Classes: Facts, Need, Rung, Choice, Costs, HopCosts.
+- `migkit/decision_compute.py` - Budget the optimizer and certify solution quality (Row 607: SMART-N24.decision-compute). Classes: CareBadge, DecisionComputeError, OptimizerBudgetExceededError, InvalidIncumbentError, SearchCancelledError, UnsafeEndpointError.
 - `migkit/decomp_budget.py` - (no docstring) Classes: DecompressionBudgetError, DecompressionLimitExceeded, DecoderLimitExceeded, TransactionAtomicityError, LimitAction, SpillPolicy.
 - `migkit/demand_benchmark.py` - (no docstring) Classes: UnsafeEndpointError, BenchmarkError, MigrationPhase, FaultType, ShiftType, LockType.
 - `migkit/described.py` - What a table migkit made on a store that keeps no column types is: its columns' classes and its key, kept beside the store's endpoint on thi
@@ -128,6 +129,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/faults.py` - What can go wrong in a migration, how each is told by its effect, and what is done about it (backlog P0-RESILIENCE-ALL). Classes: Fault, Told, Breaker, Owned, Injected.
 - `migkit/fencing.py` - A mover's token, carried into every transaction it writes, so that a mover which lost its hold is refused by the target itself (backlog W1). Classes: Fenced, Token, Way, GuardedDocument, ComparedKey, LightweightTransaction.
 - `migkit/fleet.py` - One table's ranges across machines, as the machine that takes a hop over finds them, and the proof once the table is done that every range w Classes: Departed, Account.
+- `migkit/fleet_coordination.py` - Coordinate hops sharing physical capacity (SMART-N23.fleet-coordination, Row 606). Classes: CareBadge, HopWorkKind, ResourceDimension, FleetCoordinationError, UnsafeEndpointError, CapacityConstraintViolationError.
 - `migkit/flight_simulator.py` - (no docstring) Classes: PhaseResult, SavepointSnapshot, CutoverReadinessSLACertificate, ShadowCutoverFlightSimulator.
 - `migkit/freeze.py` - Keep the application from writing to the target until cutover - and, at the cutover of a hop that asks for it, from writing to the source. Classes: Hold, GroupHold, PostgresHold, MySQLHold, TiDBHold, MongoHold.
 - `migkit/fromsnapshot.py` - An OpenSearch or Elasticsearch index copied from the source's own snapshot by the snapshot reader of OpenSearch's migration project (backlog
@@ -183,6 +185,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/notify.py` - Telling the team, wherever it is, what a migration is doing (backlog 32, R23.10).
 - `migkit/offset_diag.py` - (no docstring) Classes: Interval, SlotState, OffsetState, LogEvidence, NaiveRuleVerdict, ReconstructionCertificate.
 - `migkit/online_confirmation.py` - Classify transient versus persistent divergence by positions (Row 614: RCH06.online-confirmation). Classes: CareBadge, OnlineConfirmationError, UnsafeEndpointHostError, AutomaticRepairOfUncertainRowRefusedError, EvidenceExpiredError, VerificationLeaseError.
+- `migkit/operation_experiments.py` - Earn autonomy with adversarial endpoint-only whole runs (Row 608: SMART-N25.operation-experiments). Classes: OperationExperimentError, UnsafeEndpointError, AdversarialFaultError, InterventionRequiredError, AcceptanceCriteriaError, LeaseLockError.
 - `migkit/ownership.py` - Who an object belongs to, and whose privileges it runs with.
 - `migkit/partial_access.py` - (no docstring) Classes: PartialAccessError, SecurityScopeViolationError, SchemaIntegrityError, ManifestVersionError, ManifestCompletenessError, PlaceholderDataProhibitedError.
 - `migkit/partial_images.py` - (no docstring) Classes: PartialImageError, StaleRowVersionError, MissingBeforeImageError, PlaceholderLeakError, IncompleteRowImageError, FieldState.
@@ -217,6 +220,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/replicasum.py` - A MySQL target that is a native replica of the source, proved chunk by chunk through the replication stream, and every chunk proved again by Classes: Chunk.
 - `migkit/report.py` - (no docstring)
 - `migkit/reshard.py` - Resharding (backlog W7): rows of N sources placed on M targets by one function - a database split, many merged into one, a new shard key - e Classes: Side, Group, Function, Placed, Unplaced, Planned.
+- `migkit/resource_ownership.py` - Own temporary resources and restore observed state (Row 605: SMART-N22.resource-ownership). Classes: CareBadge, ResourceKind, ObligationKind, ResourceState, ResourceOwnershipError, BudgetExhaustedError.
 - `migkit/result_scope.py` - (no docstring) Classes: PracticalProblem, DatabaseSummary, GroupedResultEnvelope.
 - `migkit/resume_scope.py` - (no docstring) Classes: IncompatibleResumeScopeError, DurableUnitIdentity, ResumeScope, ScopedCheckpoint, ResumeScopeRunner.
 - `migkit/retention_controller.py` - Proactive retention, WAL and spool controller (backlog RCH16, row 624). Classes: RetentionMetrics, RetentionForecast, RetentionAction, DurableRetentionCheckpoint, RetentionForecaster, RetentionController.

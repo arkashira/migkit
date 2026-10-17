@@ -105,12 +105,13 @@ def test_planner_plan_chooses_path_on_measured_speed(tmp_path):
 def test_coverage_has_no_unhandled_cells():
     unc = uncovered()
     assert unc == [], f"Found uncovered cells: {unc}"
+    assert decide.unowned_gaps() == []
 
     cov = coverage()
     for engine, shapes in cov.items():
         for shape, state in shapes.items():
-            assert state in ("yes", "not applicable"), (
-                f"Cell ({engine}, {shape}) is {state}, expected 'yes' or 'not applicable'"
+            assert state in ("yes", "not applicable", decide.NOT_YET), (
+                f"Cell ({engine}, {shape}) is {state}, expected 'yes', 'not applicable', or 'not yet'"
             )
 
 

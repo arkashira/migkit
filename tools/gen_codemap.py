@@ -604,7 +604,8 @@ _BY_NAME = {
                  " robust_scheduling capability_discovery closed_loop_proof connection_only"
                  " discovery_closure action_compiler semantic_negotiation"
                  " causal_diagnosis continuous_scope uncertain_effects"
-                 " application_readiness time_aware_control work_granularity progress_liveness",
+                 " application_readiness time_aware_control work_granularity progress_liveness"
+                 " resource_ownership fleet_coordination decision_compute operation_experiments",
     "cli": "cli guide ui estate",
 }
 #: a subpackage, whole

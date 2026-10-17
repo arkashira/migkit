@@ -11797,7 +11797,7 @@ Observed: decide.climb snapshots Facts.asked before rung.prove (line 1289). A pr
 
 ### REV-T1.shape-declarations — Close or honestly declare 27 engine-shape holes
 
-**OPEN — P2; test debt; size M; index row 582.** Historical 750b38a5 reproduction; revalidate against current code before fixing/closing.
+**DONE 2026-10-17.** (Declared qdrant/neo4j as NOT_APPLICABLE with domain reasons, 7 SQL dialects netezza/saphana/informix/progress/vertica/exasol/databricks declared as NOT_YET linked to P0-DECISION-ALL.gaps; test_ranked_movers_and_rungs.py and test_the_decision_engine.py green).
 
 Observed: test_ranked_movers_and_rungs::test_coverage_has_no_unhandled_cells fails on 27 undeclared cells: keyless/no unique index/wide key for qdrant, neo4j, netezza, saphana, informix, progress, vertica, exasol, databricks. Link to existing implementation plus real-engine proof, or an owned not-yet/not-applicable entry with a reason; do not mark yes from a method name alone. Proof: guard green and engine-lane evidence for yes. Link existing P0-DECISION-ALL.gaps rather than duplicate implementation work.
 
@@ -11963,25 +11963,25 @@ Extend catch_up_sum, retries, blockers and autonomous outcomes. Track progress c
 
 ### SMART-N22.resource-ownership — Own temporary resources and restore observed state
 
-**OPEN — P1; proposal; size L; index row 605.**
+**REVIEW 2026-10-17 (resource_ownership.py decide rungs for 10 temporary resource kinds, 5-dimensional budgeting, deterministic cleanup, and observed settings restoration; tests/test_resource_ownership_lifecycle.py) — P1; proposal; size L; index row 605.**
 
 Extend leftovers, process records, tuning and existing SUPER/AUTO lifecycle items. Assign durable owners and cleanup/restore obligations to temporary tables/files, spools, readers, slots, subscriptions, credential leases, tunnels, settings and index windows. Budget disk/WAL/descriptors/memory/connections. Acceptance: interruption at every acquisition/restore point resumes or cleans up deterministically; shared resources remain untouched, original settings restored, sole copies of change/undo data never prematurely removed.
 
 ### SMART-N23.fleet-coordination — Coordinate hops sharing physical capacity
 
-**OPEN — P2; proposal; size L; index row 606.**
+**REVIEW 2026-10-17 (fleet_coordination.py decide rungs for physical capacity topology disambiguation, max-min fair admission, compatible unit work-stealing, and coordinator failover; tests/test_fleet_coordination_capacity.py) — P2; proposal; size L; index row 606.**
 
 Extend topology/jointplan and leases. Identify logical endpoints sharing hosts, storage, network paths, quotas and replicas so each hop cannot independently spend the same capacity. Fair admission and feedback prioritize critical catch-up/proof; steal only compatible movable units. Acceptance: concurrent migrations and application load stay inside global constraints without starvation/double ownership; coordinator failure reconciles leases before takeover.
 
 ### SMART-N24.decision-compute — Budget the optimizer and certify solution quality
 
-**OPEN — P2; proposal; size M; index row 607.**
+**REVIEW 2026-10-17 (decision_compute.py decide rungs for budgeted optimizer allocation, space pruning, cancellation-safe incumbent protection, and certificate-backed quality scoring; tests/test_decision_compute_budget.py) — P2; proposal; size M; index row 607.**
 
 Extend local search, space pruning and exhaustive small-space oracles. Spend planning/probing time according to potential completion-time benefit: cheap baseline for tiny jobs, bounded search normally, deeper exact/beam search only where worth its cost. Keep a validated incumbent and support cancellation. Acceptance: bounded planner CPU/memory/time on huge estates; interrupting search cannot return an invalid candidate; optimal is reported only with a certificate, otherwise a valid bound/gap or unknown.
 
 ### SMART-N25.operation-experiments — Earn autonomy with adversarial endpoint-only whole runs
 
-**OPEN — P1; proposal; size L; index row 608.**
+**REVIEW 2026-10-17 (operation_experiments.py decide rungs for real-engine adversarial fault matrix, autonomous recovery, bounded interventions, and zero unexplained loss/duplication; tests/test_operation_experiments_whole_runs.py) — P1; proposal; size L; index row 608.**
 
 Extend P0-MINIMAL-INPUT.acceptance, autonomous comparison/rehearsal and SMART-N10. Reproducible installed-command real-engine scenarios combine target conflicts, missing grants, no PK, LOB/RLS, DDL, continuous writes, quotas/packet limits, auth renewal, crashes, partitions, failover and rollback; include simultaneous faults and restart. Acceptance: no unexplained loss/duplication, required proof coverage, bounded source impact, measured verified completion and counted manual technical interventions. Zero interventions is a tested result within a pre-authorized feasible contract, never a universal claim.
 

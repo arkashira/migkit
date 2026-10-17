@@ -2348,7 +2348,7 @@ WAYS = {
                                   " and offset, never by a key"),
         "qdrant": (NOT_APPLICABLE, "every vector point carries an id"),
         "neo4j": (NOT_APPLICABLE, "every node and relationship carries an id"),
-        **{n: (NOT_YET, "DIALECTS.seven") for n in
+        **{n: (NOT_YET, "P0-DECISION-ALL.gaps") for n in
            ("netezza", "saphana", "informix", "progress", "vertica", "exasol", "databricks")},
     },
     "wide key": {
@@ -2398,7 +2398,7 @@ WAYS = {
                                   " resumed by"),
         "qdrant": (NOT_APPLICABLE, _BY_KEY_ORDER.format("point id scan")),
         "neo4j": (NOT_APPLICABLE, _BY_KEY_ORDER.format("elementId scan")),
-        **{n: (NOT_YET, "DIALECTS.seven") for n in
+        **{n: (NOT_YET, "P0-DECISION-ALL.gaps") for n in
            ("netezza", "saphana", "informix", "progress", "vertica", "exasol", "databricks")},
     },
     "too large": {
@@ -2615,7 +2615,7 @@ WAYS = {
         **{n: ("yes", f"freeze.{c}") for n, c in _HELD_AS
            + (("lindorm", "LindormHold"),)},
         **{n: (NOT_APPLICABLE, _CLOUD_POLICIES) for n in _BY_POLICY},
-        "*": (NOT_YET, "F2.freeze.rest"),
+        "*": (NOT_YET, "P0-DECISION-ALL.gaps"),
     },
     "slow link": {
         **_NONE,
@@ -2693,7 +2693,7 @@ WAYS = {
                                     " so a source's writes are stopped by"
                                     " its operator (freeze: operator) and"
                                     " proved by migkit"),
-        "*": (NOT_YET, "F2.freeze.rest"),
+        "*": (NOT_YET, "P0-DECISION-ALL.gaps"),
     },
 }
 # the copier reads a table whose only index is not unique as one with no

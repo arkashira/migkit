@@ -120,7 +120,8 @@ SLOW = {PLAIN: 0.5e6, BINARY: 0.5e6}
 FAST = {PLAIN: 100e6, BINARY: 100e6}
 
 
-def _my(tmp_path, monkeypatch, local_infile=True, installed=EVERY, **hop):
+def _my(tmp_path, monkeypatch, local_infile=True, installed=EVERY,
+        packet=64 * MB, row_sizes=(), **hop):
     """A MySQL engine whose ladder's facts are the real ones, the servers'
     and this machine's answers given."""
     from migkit.engines import mysql
@@ -135,6 +136,23 @@ def _my(tmp_path, monkeypatch, local_infile=True, installed=EVERY, **hop):
     monkeypatch.setattr(eng, "_pass_columns_of", lambda db: COLUMNS)
     monkeypatch.setattr(eng, "_pass_unfit", lambda db, t: "")
     monkeypatch.setattr(eng, "table_sizes", lambda db, quick=False: FACTS)
+
+    def _q(side, sql, *args):
+        if "max_allowed_packet" in sql:
+            if packet is None:
+                raise RuntimeError("max_allowed_packet unreadable")
+            return [[packet]]
+        raise RuntimeError(f"unmocked query: {sql}")
+
+    def _sizes(db, fits_under, deadline):
+        if row_sizes is None:
+            raise RuntimeError("row sizes unreadable")
+        if isinstance(row_sizes, dict):
+            return [(t, k, n) for t, (k, n) in row_sizes.items()]
+        return list(row_sizes)
+
+    monkeypatch.setattr(eng, "_q", _q)
+    monkeypatch.setattr(eng, "_row_sizes", _sizes)
     return eng
 
 
@@ -365,6 +383,65 @@ def test_a_masked_table_goes_by_a_way_that_masks_it(tmp_path, monkeypatch):
     assert eng.through_pair("appdb", "narrow")
 
 
+def test_an_oversized_table_goes_by_the_copiers_rows_rung(
+        tmp_path, monkeypatch):
+    """Where a table's widest row exceeds the target packet's safe limit,
+    the climb requires the pieces-capable rows rung even if another way
+    costs less, and says why."""
+    eng = _my(tmp_path, monkeypatch, packet=64 * MB,
+              row_sizes={"narrow": ("measured", 40 * MB)})
+    _costs(monkeypatch, FAST, SLOW, SLOW, SLOW)
+    in_pieces, choice = eng.writes_in_pieces("appdb", "narrow")
+    assert in_pieces is True
+    assert "may double once escaped" in choice.reason
+    got = _choose(eng)
+    assert got["narrow"].rung == ROWS
+    assert "written in pieces" in got["narrow"].reason
+
+
+def test_an_unreadable_packet_probe_falls_back_conservatively_to_rows(
+        tmp_path, monkeypatch):
+    """When the target's max_allowed_packet cannot be read, safety requires
+    the table copier's rows rung rather than assuming rows will fit."""
+    eng = _my(tmp_path, monkeypatch, packet=None, row_sizes={})
+    _costs(monkeypatch, FAST, SLOW, SLOW, SLOW)
+    in_pieces, choice = eng.writes_in_pieces("appdb", "narrow")
+    assert in_pieces is True
+    assert "max_allowed_packet could not be read" in choice.reason
+    got = _choose(eng)
+    assert got["narrow"].rung == ROWS
+    assert "written in pieces" in got["narrow"].reason
+
+
+def test_an_unreadable_row_sizes_probe_falls_back_conservatively_to_rows(
+        tmp_path, monkeypatch):
+    """When row-size scan cannot complete within time, the table copier's
+    rows rung is required conservatively."""
+    eng = _my(tmp_path, monkeypatch, packet=64 * MB, row_sizes=None)
+    _costs(monkeypatch, FAST, SLOW, SLOW, SLOW)
+    in_pieces, choice = eng.writes_in_pieces("appdb", "narrow")
+    assert in_pieces is True
+    assert "widest row was not read to the end" in choice.reason
+    got = _choose(eng)
+    assert got["narrow"].rung == ROWS
+    assert "written in pieces" in got["narrow"].reason
+
+
+def test_bounded_row_sizes_within_packet_allow_cheapest_rung(
+        tmp_path, monkeypatch):
+    """Tables whose row sizes are bounded or measured within safe limits
+    are not constrained to pieces, and pick the cheapest rung."""
+    eng = _my(tmp_path, monkeypatch, packet=64 * MB,
+              row_sizes={"narrow": ("bounded", 1024),
+                         "wide": ("measured", 2048)})
+    _costs(monkeypatch, FAST, SLOW, SLOW, SLOW)
+    in_pieces, choice = eng.writes_in_pieces("appdb", "narrow")
+    assert in_pieces is False
+    got = _choose(eng)
+    assert got["narrow"].rung == DL
+    assert got["wide"].rung == DL
+
+
 # ---- one decision: the plan, the copy and the record read it ----------------
 
 def test_the_plan_says_the_time_and_keeps_the_way_off_the_console(
@@ -425,6 +502,31 @@ def test_the_copier_after_the_move_takes_the_moves_choice(tmp_path,
     time.sleep(0.01)
     (hop.report_dir("appdb") / "copy-position.json").write_text("{}")
     fresh = tableway.choose(eng, "appdb", "mydumper", list(FACTS), FACTS)
+    assert fresh["narrow"].rung == DL
+
+
+def test_a_restart_preserves_kept_choice_across_packet_probes(
+        tmp_path, monkeypatch):
+    """A move in progress preserves its kept choice across restarts and
+    probes, then refreshes after completion."""
+    eng = _my(tmp_path, monkeypatch, packet=64 * MB,
+              row_sizes={"narrow": ("measured", 40 * MB)})
+    _costs(monkeypatch, FAST, SLOW, SLOW, SLOW)
+    hop = eng.hop
+    (hop.report_dir("appdb") / "move-began.json").write_text(
+        json.dumps({"epoch": time.time() - 1}))
+    choice = _choose(eng)
+    assert choice["narrow"].rung == ROWS
+    tableway.keep(hop, "appdb", choice)
+    # in progress: kept choice is preserved though row sizes now fit
+    eng_safe = _my(tmp_path, monkeypatch, packet=64 * MB,
+                   row_sizes={"narrow": ("bounded", 1024)})
+    kept = tableway.choose(eng_safe, "appdb", "mydumper", list(FACTS), FACTS)
+    assert kept["narrow"].rung == ROWS
+    # once finished, refreshed decision adopts the safe rung
+    time.sleep(0.01)
+    (hop.report_dir("appdb") / "copy-position.json").write_text("{}")
+    fresh = tableway.choose(eng_safe, "appdb", "mydumper", list(FACTS), FACTS)
     assert fresh["narrow"].rung == DL
 
 
