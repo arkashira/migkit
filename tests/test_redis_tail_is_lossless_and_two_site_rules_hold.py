@@ -339,10 +339,12 @@ def _stream_to(src):
 
 def _until(stream, want):
     got = []
+    stream.ack(stream.offset)
     for argv in stream.commands():
         got.append(argv)
         if stream.offset >= want:
             return got
+        stream.ack(stream.offset)
 
 
 @needs_server
@@ -397,7 +399,7 @@ def test_a_followed_space_lands_every_change_and_counts_it(clean, tmp_path):
     stop.set()
     c.set("wake", 1)
     run.join(20)
-    d = dst.client()
+    d = dst.client(decode_responses=False)
     assert not d.exists("gone") and not d.exists("kept")
     assert d.get("renamed") == b"1" and 0 < d.ttl("renamed") <= 500
     assert d.type("retype") == b"set" and d.get("new") == b"1"
@@ -419,6 +421,6 @@ def test_the_sweep_reads_again_what_was_written_since_and_removes(clean,
     c.set("fresh", 2)
     c.delete("drop")
     tally = eng._sweep_once("0", since, lambda s: None)
-    assert dst.client().get("fresh") == b"2"
+    assert dst.client(decode_responses=False).get("fresh") == b"2"
     assert not dst.client().exists("drop")
     assert tally["added"] == 1 and tally["removed"] == 1

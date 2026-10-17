@@ -50,8 +50,9 @@ class Local:
 
     def client(self, **kw):
         import redis
-        return redis.Redis(host="127.0.0.1", port=self.port,
-                           decode_responses=True, **kw)
+        params = {"host": "127.0.0.1", "port": self.port, "decode_responses": True}
+        params.update(kw)
+        return redis.Redis(**params)
 
     def stop(self):
         self.proc.terminate()

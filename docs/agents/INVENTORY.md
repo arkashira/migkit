@@ -18,7 +18,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 | conversion | 6 | 62 | 42660 | a value or an object as another engine takes it: canonical text, transforms, types, stored code |
 | reporting | 7 | 11 | 8378 | what the operator reads: the verdict, the result shape, the log, the metrics, the notices |
 | decision | 8 | 32 | 33781 | choosing: the rungs, the cost model, the joint plan, what each engine can do |
-| engines | 9 | 79 | 127855 | the contract every engine fills and each engine's own adapter |
+| engines | 9 | 79 | 127862 | the contract every engine fills and each engine's own adapter |
 | integrations | 9 | 23 | 24368 | the programs, libraries and provider APIs migkit wraps, and the other tools it meets |
 | workflows | 10 | 42 | 53230 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
 | cli | 11 | 4 | 10377 | the command line and the guide that asks for two addresses |
@@ -285,7 +285,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 | `migkit/engines/provedsql.py` | - | 128 | 2: engines.distmysql, engines.gaussdb | conversion 4, decision 3 | - | 2: engine_ladders_hold_and_refuse, the_cloud_native_services_as_sides |
 | `migkit/engines/pubsub.py` | - | 148 | 1: engines | engines 2, integrations 1 | - | 1: changes_delivered_to_pubsub |
 | `migkit/engines/qdrant.py` | - | 897 | 1: engines | configuration 1, conversion 1, decision 10, engines 3 | - | 6: engine_ladders_hold_and_refuse, qdrant_and_neo4j_close_their_loose_ends, qdrant_and_neo4j_go_deeper (+3) |
-| `migkit/engines/redis.py` | - | 4209 | 4: engines, engines.geminidb, movers, redisshake | configuration 5, conversion 1, decision 7, engines 11, execution 6, persistence 2, reporting 1, safety 2, workflows 10 | - | 37: redis_local.py, a_connection_is_verified_where_it_can_be, a_fork_change_is_held_first_redis_valkey (+34) |
+| `migkit/engines/redis.py` | - | 4216 | 4: engines, engines.geminidb, movers, redisshake | configuration 5, conversion 1, decision 7, engines 11, execution 6, persistence 2, reporting 1, safety 2, workflows 10 | - | 37: redis_local.py, a_connection_is_verified_where_it_can_be, a_fork_change_is_held_first_redis_valkey (+34) |
 | `migkit/engines/saas.py` | - | 1471 | 4: addresses, engines, engines.saas_salesforce, tooluse | conversion 6, decision 1, engines 3, execution 1, integrations 3, persistence 1 | airbyte-connectors, dlt, singer-tap | 2: saas_sources_as_programs, salesforce_changes_through_its_events |
 | `migkit/engines/saas_salesforce.py` | - | 688 | 2: engines.saas, tooluse | conversion 2, decision 2, engines 3, integrations 1 | salesforce-api | 2: salesforce_changes_through_its_events, the_ways_chosen_as_they_run_hold_and_refuse |
 | `migkit/engines/sapodp.py` | - | 1217 | 4: cli, engines, ready, tooluse | conversion 2, decision 2, engines 4, integrations 1, persistence 1 | pyodata | 3: an_sap_systems_database_and_subscriptions, sap_application_data_through_odp, the_ways_chosen_as_they_run_hold_and_refuse |

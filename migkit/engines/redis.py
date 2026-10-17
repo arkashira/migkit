@@ -3283,6 +3283,8 @@ _RENAMES = frozenset((b"rename", b"renamenx"))
 def key_event(op, before, now):
     """What one change was, from the stream's word for it (`op`) and the
     key's type on the target before and on the source after."""
+    if op in ("rename", "ttl") and now != "none":
+        return "renamed" if op == "rename" else "ttl"
     if before == "none" and now == "none":
         return "written"
     if before == "none":
@@ -3325,6 +3327,10 @@ class ReplicaStream:
         self.offset = 0
         self.read = 0
         self.argv = []
+
+    @property
+    def sent(self):
+        return getattr(self.sock, "sent", b"")
 
     def _fill(self):
         try:
@@ -3395,6 +3401,7 @@ class ReplicaStream:
         _, rid, at = got.split()
         self.offset = int(at)
         self._snapshot(sink or (lambda chunk: None))
+        self.ack(self.offset)
         return {"kind": "full", "replid": rid, "offset": self.offset}
 
     def _snapshot(self, sink):
