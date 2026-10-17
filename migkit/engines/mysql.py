@@ -4926,13 +4926,17 @@ class MySQLEngine(Engine):
                     [k for k in dst if k not in src],
                     [k for k in src if k in dst and src[k] != dst[k]])
 
-        if ranges == [""] and counts and max(counts) > self.hop.slice:
-            # a large table checked whole: its walk is chosen - its
-            # differing groups, or all of it
-            self.__dict__.setdefault("_drilled_rows", {})[(db, t)] = \
-                max(counts)
+        n_rows = max(counts) if counts else None
+        if not n_rows:
+            try:
+                n_rows = self._q("src", f"select count(*) from {self._scope('src', db, t)}")[0][0]
+                counts = (n_rows, n_rows)
+            except Exception:
+                n_rows = None
+        if n_rows and n_rows > self.hop.slice:
+            self.__dict__.setdefault("_drilled_rows", {})[(db, t)] = n_rows
             found = self._narrowed_walk(db, t, t, pks, walk, same, whole,
-                                        max(counts))
+                                        n_rows)
         else:
             found = whole()
             self.__dict__.setdefault("_drilled_rows", {})[(db, t)] = max(

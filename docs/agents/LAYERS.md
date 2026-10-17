@@ -711,7 +711,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### an engine calls `replicasum` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/mysql.py:6179` engines -> workflows (`replicasum`)
+- `migkit/engines/mysql.py:6183` engines -> workflows (`replicasum`)
 
 ### an engine calls `rules` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
@@ -721,7 +721,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 - `migkit/engines/base.py:2541` engines -> workflows (`second_reader`)
 - `migkit/engines/hetero.py:3399` engines -> workflows (`second_reader`)
-- `migkit/engines/mysql.py:11371` engines -> workflows (`second_reader`)
+- `migkit/engines/mysql.py:11375` engines -> workflows (`second_reader`)
 - `migkit/engines/postgres.py:7384` engines -> workflows (`second_reader`)
 
 ### an engine calls `streamout` for a step it cannot do itself; the engine split gives that step a contract below the engines
@@ -784,7 +784,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/engines/kafka.py:2152` engines -> workflows (`users`)
 - `migkit/engines/mongodb.py:3703` engines -> workflows (`users`)
 - `migkit/engines/mssql.py:2162` engines -> workflows (`users`)
-- `migkit/engines/mysql.py:7537` engines -> workflows (`users`)
+- `migkit/engines/mysql.py:7541` engines -> workflows (`users`)
 - `migkit/engines/postgres.py:9881` engines -> workflows (`users`)
 - `migkit/engines/redis.py:291` engines -> workflows (`users`)
 

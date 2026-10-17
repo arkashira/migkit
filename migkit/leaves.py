@@ -2147,19 +2147,19 @@ def drill(pair, db, src_t, dst_t, sc, dc, scope, rows, digests=None,
         is taken (`decide.attempt`); what it found - differences or none -
         is the answer. The leaves read back are the last way, and a
         failure of theirs goes to the caller, which walks the rows."""
-        way = choice.rung.name
-        if way == "leaf reads":
+        localizer = choice.rung.name
+        if localizer == "leaf reads":
             return by_leaves()
         t0 = time.monotonic()
         try:
-            if way == "sketch":
+            if localizer == "sketch":
                 found, why = by_sketch(
                     a, b, plan(rows, "hash" if a.key else "row",
                                salt=salt, way=way),
                     facts["expected"])
-            elif way == "groups":
+            elif localizer == "groups":
                 found, why = by_groups(pair, db, a, b, digests, rows,
-                                       facts["group column"])
+                                       facts["group column"], hash_way=way)
             else:
                 found, why = by_bisection(pair, db, a, b, digests)
         except Exception as e:  # noqa: BLE001 - a way that could not run
@@ -2168,9 +2168,9 @@ def drill(pair, db, src_t, dst_t, sc, dc, scope, rows, digests=None,
             found, why = None, (str(e).strip().splitlines()[-1][:120]
                                 if str(e) else type(e).__name__)
         if found is None:
-            facts[f"{way} failed"] = why
+            facts[f"{localizer} failed"] = why
             raise decide.Blocked(why)
-        costs.saw(f"localize/{way}", max(rows, 1), time.monotonic() - t0)
+        costs.saw(f"localize/{localizer}", max(rows, 1), time.monotonic() - t0)
         return found
     if live:
         found = by_leaves()
@@ -2420,7 +2420,7 @@ def second_reading(pair, db, a, b, how, found=None, rows=0):
     return ""
 
 
-def by_groups(pair, db, a, b, digests, rows, group):
+def by_groups(pair, db, a, b, digests, rows, group, hash_way="md5"):
     """(Localized, None), or (None, why): the second reader's aggregates
     per group of `group` (the source's statistics chose it), failures
     only; the rows of the groups that differ read back on both sides as
@@ -2444,7 +2444,7 @@ def by_groups(pair, db, a, b, digests, rows, group):
               got.inside(b.eng, b.where))
     # one leaf holding every row the predicate selects, hashed as the
     # table's digest hashes it (canon's text, no salt)
-    plain = Spec("hash")
+    plain = Spec("hash", hash=hash_way)
     fa, fb = both(leaf_rows, sa, sb, plain, [0])
     out = Localized(how="groups", said=got.said())
     out.leaves = len(got.values) + int(got.nulls)
