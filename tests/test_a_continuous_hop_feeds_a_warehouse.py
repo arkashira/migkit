@@ -261,6 +261,7 @@ def test_the_integration_is_made_once_and_waited_for(monkeypatch):
 def test_a_failed_integration_stops_with_its_errors(monkeypatch):
     monkeypatch.setenv("MIGKIT_CLOUD_POLL", "0")
     a = cloudapi.Aws({"product": "rds", "id": "db"})
-    monkeypatch.setattr(a, "_rds", lambda: _Rds(["creating", "failed"]))
+    rds = _Rds(["creating", "failed"])
+    monkeypatch.setattr(a, "_rds", lambda: rds)
     with pytest.raises(SystemExit, match="boom"):
         a.run_zero_etl("arn:s", "arn:t", "feed", lambda *_: None)

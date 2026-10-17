@@ -396,11 +396,11 @@ Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 4290 
 
 ## Backlog (576 items, `docs/backlog-index.md`)
 
-DONE 455 - PARTLY 79 - OPEN 21 - BLOCKED 12 - NOT PURSUED 9
+DONE 458 - PARTLY 79 - OPEN 18 - BLOCKED 12 - NOT PURSUED 9
 
 | area | DONE | PARTLY | IN PROGRESS | OPEN | BLOCKED | NOT PURSUED |
 |---|---|---|---|---|---|---|
-| change follow | 59 | 7 | 0 | 4 | 1 | 0 |
+| change follow | 61 | 7 | 0 | 2 | 1 | 0 |
 | conversion | 31 | 2 | 0 | 0 | 0 | 0 |
 | correctness | 4 | 0 | 0 | 0 | 0 | 0 |
 | correctness/operations | 1 | 1 | 0 | 0 | 0 | 0 |
@@ -410,7 +410,7 @@ DONE 455 - PARTLY 79 - OPEN 21 - BLOCKED 12 - NOT PURSUED 9
 | engines | 48 | 12 | 0 | 2 | 3 | 1 |
 | maintainability | 10 | 2 | 0 | 2 | 0 | 0 |
 | move | 53 | 14 | 0 | 2 | 0 | 2 |
-| operations/scale | 55 | 13 | 0 | 6 | 5 | 3 |
+| operations/scale | 56 | 13 | 0 | 5 | 5 | 3 |
 | operations/verify | 0 | 1 | 0 | 0 | 0 | 0 |
 | security | 12 | 6 | 0 | 1 | 1 | 1 |
 | tools used whole | 42 | 5 | 0 | 0 | 0 | 0 |
@@ -418,5 +418,5 @@ DONE 455 - PARTLY 79 - OPEN 21 - BLOCKED 12 - NOT PURSUED 9
 | types | 13 | 1 | 0 | 0 | 0 | 0 |
 | verify | 57 | 5 | 0 | 4 | 1 | 1 |
 
-Not done (112): P0-DE.1, P0-DE.2, P0-DE.4, BAR-1, BAR-3, 0f-DVT, 0f-REST, 0a.measure, 0b.window, 6.mariadb, 6.fkwin, 7.free, A2/D10, C1.managed, P3.dryrun, 26.versions, MSSQL-x86, AUD.release, P0-DEPTH.calibrate, P0-DEPTH.json, P0-DEPTH.rank, P0-AUDIT, AUD-E.pin, AUD-G2, AUD-T2, P0-PARITY.small, P0-PARITY.lv.new, DEC1001.media, DEC1001.gui, P0-SCENARIOS.managed, P0-SCENARIOS.arch, P0-SCENARIOS.charset, P0-SCENARIOS.engine, S1.e, S4, F3, F7.beat, F7.edges, F7.sec, CV.P9, ER1.acct, ER4, ER5, ER6, W5, LT.R1, LT.R8, LT.C1, LT.C5, LT.P1, LT.P2, LT.P3, W1, W2, W4.b, W8, W9, 28.rates, R5.actions, R5.anchor, 45.run, R3.topo, R17b.hmac, R17b.prog, R8.more, R8.mv, R12.minio, R13-DB2, R13-ASE, R13-GENERIC, R16b, R16c, R17d, R18.6/R20.2, R18.7, R19.1, R19.3, R19.9/R20.3, R20.5, R20.6, R20.7, R20.10, R20.11, R21.8, R21.9, R21.M, DTS.sample, REL, REL.gate, R25.3, P0-PARITY.scope, P0-PARITY.verify, P0-PARITY.tail, P0-PARITY.all, P0-MINIMAL-INPUT.ownership, P0-MINIMAL-INPUT.acceptance, P0-AUTO-RESOURCES.proof, P0-SAFETY-INTEGRITY, P0-RESILIENCE-ALL, P0-AUTONOMOUS-MIGRATION, P0-PRODUCT-TELEMETRY, P0-AUTOTUNE-ALL, P1-SOURCE-HIERARCHY.layout, P1-SOURCE-HIERARCHY.engines, P1-SOURCE-HIERARCHY.navigation, P1-SOURCE-HIERARCHY.proof, P0-VALIDATE.unattended.proof, P0-ETA-ALL, P0-CONNECTION-PROGRESS, P0-VERIFY-EXECUTION, SAML.real-idp, TEST.closed-bundle-arm
+Not done (109): P0-DE.1, P0-DE.2, P0-DE.4, BAR-1, BAR-3, 0f-DVT, 0f-REST, 0a.measure, 0b.window, 6.mariadb, 6.fkwin, 7.free, A2/D10, C1.managed, P3.dryrun, 26.versions, MSSQL-x86, AUD.release, P0-DEPTH.calibrate, P0-DEPTH.json, P0-DEPTH.rank, P0-AUDIT, AUD-E.pin, AUD-G2, AUD-T2, P0-PARITY.small, P0-PARITY.lv.new, DEC1001.media, DEC1001.gui, P0-SCENARIOS.managed, P0-SCENARIOS.arch, P0-SCENARIOS.charset, P0-SCENARIOS.engine, S1.e, F3, F7.beat, F7.edges, F7.sec, CV.P9, ER1.acct, ER4, ER5, ER6, W5, LT.R1, LT.R8, LT.C1, LT.P1, LT.P2, W1, W2, W4.b, W8, W9, 28.rates, R5.actions, R5.anchor, 45.run, R3.topo, R17b.hmac, R17b.prog, R8.more, R8.mv, R12.minio, R13-DB2, R13-ASE, R13-GENERIC, R16b, R16c, R17d, R18.6/R20.2, R18.7, R19.1, R19.3, R19.9/R20.3, R20.5, R20.6, R20.7, R20.10, R20.11, R21.8, R21.9, R21.M, DTS.sample, REL, REL.gate, R25.3, P0-PARITY.scope, P0-PARITY.verify, P0-PARITY.tail, P0-PARITY.all, P0-MINIMAL-INPUT.ownership, P0-MINIMAL-INPUT.acceptance, P0-AUTO-RESOURCES.proof, P0-SAFETY-INTEGRITY, P0-RESILIENCE-ALL, P0-AUTONOMOUS-MIGRATION, P0-PRODUCT-TELEMETRY, P0-AUTOTUNE-ALL, P1-SOURCE-HIERARCHY.layout, P1-SOURCE-HIERARCHY.engines, P1-SOURCE-HIERARCHY.navigation, P1-SOURCE-HIERARCHY.proof, P0-VALIDATE.unattended.proof, P0-ETA-ALL, P0-CONNECTION-PROGRESS, P0-VERIFY-EXECUTION, SAML.real-idp, TEST.closed-bundle-arm
 
