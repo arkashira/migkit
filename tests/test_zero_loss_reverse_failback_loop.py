@@ -320,6 +320,7 @@ def test_reverse_failback_controller_pooler_pause_failure():
         source=Endpoint(host="10.0.0.1", port=5432),
         target=Endpoint(host="10.0.0.2", port=5432),
     )
+    pre_warm_reverse_loop(hop, baseline_lsn="0/1000")
     coord = MockTestCoordinator(host="10.0.0.2", port=5432)
     coord.fail_on = "pause"
 
@@ -359,6 +360,7 @@ def test_reverse_failback_controller_pooler_repoint_failure():
         source=Endpoint(host="10.0.0.1", port=5432),
         target=Endpoint(host="10.0.0.2", port=5432),
     )
+    pre_warm_reverse_loop(hop, baseline_lsn="0/1000")
     coord = MockTestCoordinator(host="10.0.0.2", port=5432)
     coord.fail_on = "repoint"
 
@@ -381,7 +383,7 @@ def test_cutover_settings_allows_reverse_failback():
     assert conf["budget"] == 20.0
 
 
-def test_cli_failback_command_success(monkeypatch):
+def test_cli_failback_command_success(monkeypatch, tmp_path):
     clear_reverse_loops()
     test_hop = Hop(
         name="demo_hop",
@@ -389,11 +391,49 @@ def test_cli_failback_command_success(monkeypatch):
         source=Endpoint(host="10.0.0.1", port=5432),
         target=Endpoint(host="10.0.0.2", port=5432),
     )
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(test_hop, "report_dir", lambda: report_dir)
     monkeypatch.setattr(cli, "get_hop", lambda name: test_hop)
     pre_warm_reverse_loop(test_hop, baseline_lsn="0/1000")
+
+    # Clear memory to simulate a fresh separate process
+    clear_reverse_loops()
+    assert get_reverse_loop("demo_hop") is None
 
     runner = CliRunner()
     result = runner.invoke(cli.main, ["failback", "demo_hop"])
     assert result.exit_code == 0
     assert "failback completed" in result.output
     assert "zero data loss verified: True" in result.output
+
+
+def test_failback_rejects_when_no_loop_or_state_recorded():
+    clear_reverse_loops()
+    test_hop = Hop(
+        name="nonexistent_hop",
+        engine="postgres",
+        source=Endpoint(host="10.0.0.1", port=5432),
+        target=Endpoint(host="10.0.0.2", port=5432),
+    )
+    res = ReverseFailbackController.trigger_failback(test_hop)
+    assert res.ok is False
+    assert "no active reverse failback loop found" in res.error.lower()
+
+
+def test_reverse_failback_pre_warm_queries_real_target_lsn():
+    class FakeTargetEngine:
+        def current_lsn(self):
+            return "16/ABCD1234"
+
+    hop = Hop(
+        name="hop_lsn_query",
+        engine="postgres",
+        source=Endpoint(host="10.0.0.1", port=5432),
+        target=Endpoint(host="10.0.0.2", port=5432),
+    )
+    loop = ReverseFailbackLoop(hop, target_eng=FakeTargetEngine())
+    loop.pre_warm()
+    assert loop.target_start_lsn == "16/ABCD1234"
+    assert loop.current_target_lsn == "16/ABCD1234"
+

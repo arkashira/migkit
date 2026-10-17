@@ -1651,12 +1651,31 @@ def _phased(hop, eng, dbs, leg, conf, say, approvers, drain=None,
         rec["phases"]["flip"]["ended"] = time.time()
         rec["state"] = "flipped"
         _save(hop, rec)
-        _sheet_ended(hop, dbs, "flip", rec["phases"]["flip"])
-        try:
-            from . import reverse
-            reverse.pre_warm_reverse_loop(hop, cutover_time=rec["phases"]["flip"]["ended"])
-        except Exception:
-            pass
+        if conf.get("reverse_failback"):
+            try:
+                from . import reverse
+                rf_cfg = conf.get("reverse_failback") if isinstance(conf.get("reverse_failback"), dict) else {}
+                max_ret = float(rf_cfg.get("max_retention_hours") or 48.0)
+                reverse.pre_warm_reverse_loop(
+                    hop,
+                    cutover_time=rec["phases"]["flip"]["ended"],
+                    max_retention_hours=max_ret,
+                    target_eng=getattr(eng, "dst_engine", eng),
+                    source_eng=getattr(eng, "src_engine", None),
+                )
+            except Exception as e:
+                raise _Undo(f"failed to pre-warm reverse failback loop: {e}")
+        else:
+            try:
+                from . import reverse
+                reverse.pre_warm_reverse_loop(
+                    hop,
+                    cutover_time=rec["phases"]["flip"]["ended"],
+                    target_eng=getattr(eng, "dst_engine", eng),
+                    source_eng=getattr(eng, "src_engine", None),
+                )
+            except Exception:
+                pass
     except _Undo as e:
         return _undone(hop, eng, rec, leg, conf, say, e.why)
     except KeyboardInterrupt:

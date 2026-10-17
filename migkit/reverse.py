@@ -1,4 +1,5 @@
 import dataclasses
+from pathlib import Path
 import threading
 import time
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
@@ -45,6 +46,19 @@ def format_lsn(val: int) -> str:
     high = (val >> 32) & 0xFFFFFFFF
     low = val & 0xFFFFFFFF
     return f"{high:X}/{low:X}"
+
+
+def _reverse_state_path(hop: Any) -> Path:
+    if hasattr(hop, "report_dir"):
+        rd = hop.report_dir() if callable(hop.report_dir) else hop.report_dir
+        if rd is not None:
+            return Path(rd) / "reverse-failback.json"
+    if hasattr(hop, "run_dir"):
+        rd = hop.run_dir() if callable(hop.run_dir) else hop.run_dir
+        if rd is not None:
+            return Path(rd) / "reverse-failback.json"
+    name = getattr(hop, "name", "default")
+    return Path(".migkit") / "hops" / str(name) / "reverse-failback.json"
 
 
 class OriginMarker:
@@ -187,7 +201,17 @@ class ReverseFailbackLoop:
             except Exception:
                 pass
         self.cutover_time = cutover_time if cutover_time is not None else time.time()
-        self.max_retention_hours = float(max_retention_hours)
+        if max_retention_hours is None or max_retention_hours == 48.0:
+            c_conf = (getattr(hop, "options", None) or {}).get("cutover", {})
+            if isinstance(c_conf, dict):
+                rf_cfg = c_conf.get("reverse_failback")
+                if isinstance(rf_cfg, dict) and "max_retention_hours" in rf_cfg:
+                    max_retention_hours = float(rf_cfg["max_retention_hours"])
+                elif "max_retention_hours" in c_conf:
+                    max_retention_hours = float(c_conf["max_retention_hours"])
+                elif "retention_hours" in c_conf:
+                    max_retention_hours = float(c_conf["retention_hours"])
+        self.max_retention_hours = float(max_retention_hours if max_retention_hours is not None else 48.0)
         self.target_eng = target_eng
         self.source_eng = source_eng
         self.options = dict(options or {})
@@ -202,16 +226,86 @@ class ReverseFailbackLoop:
         self.captured_events: List[CDCEvent] = []
         self.applied_events: List[CDCEvent] = []
         self.filtered_echo_count: int = 0
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
+
+    def to_dict(self) -> Dict[str, Any]:
+        with self.lock:
+            return {
+                "hop_name": getattr(self.hop, "name", str(self.hop)),
+                "cutover_time": self.cutover_time,
+                "max_retention_hours": self.max_retention_hours,
+                "running": self.running,
+                "pre_warmed": self.pre_warmed,
+                "state": self.state,
+                "target_start_lsn": str(self.target_start_lsn),
+                "current_target_lsn": str(self.current_target_lsn),
+                "applied_source_lsn": str(self.applied_source_lsn),
+                "captured_count": len(self.captured_events),
+                "applied_count": len(self.applied_events),
+                "filtered_echo_count": self.filtered_echo_count,
+            }
+
+    def save_state(self) -> None:
+        try:
+            from . import durable
+            path = _reverse_state_path(self.hop)
+            durable.write_json(path, self.to_dict(), indent=1)
+        except Exception:
+            pass
+
+    @classmethod
+    def load_state(cls, hop: Any, target_eng: Any = None, source_eng: Any = None) -> Optional["ReverseFailbackLoop"]:
+        try:
+            from . import durable
+            path = _reverse_state_path(hop)
+            data = durable.read_state(path, "journal")
+            if not isinstance(data, dict) or not data:
+                return None
+            loop = cls(
+                hop=hop,
+                cutover_time=data.get("cutover_time"),
+                max_retention_hours=data.get("max_retention_hours", 48.0),
+                target_eng=target_eng,
+                source_eng=source_eng,
+            )
+            loop.running = bool(data.get("running", False))
+            loop.pre_warmed = bool(data.get("pre_warmed", False))
+            loop.state = str(data.get("state", "idle"))
+            loop.target_start_lsn = data.get("target_start_lsn", "0/0")
+            loop.current_target_lsn = data.get("current_target_lsn", "0/0")
+            loop.applied_source_lsn = data.get("applied_source_lsn", "0/0")
+            loop.filtered_echo_count = int(data.get("filtered_echo_count", 0))
+            return loop
+        except Exception:
+            return None
 
     def pre_warm(self, target_baseline_lsn: Optional[Union[str, int]] = None) -> "ReverseFailbackLoop":
         with self.lock:
-            baseline = target_baseline_lsn if target_baseline_lsn is not None else "0/1000"
+            baseline = target_baseline_lsn
+            if baseline is None and self.target_eng is not None:
+                for fn in ("current_lsn", "src_lsn", "current_position", "wal_lsn", "get_position"):
+                    if hasattr(self.target_eng, fn):
+                        try:
+                            val = getattr(self.target_eng, fn)()
+                            if val:
+                                baseline = val
+                                break
+                        except Exception:
+                            pass
+            if baseline is None and self.target_eng is not None:
+                if hasattr(self.target_eng, "query_scalar"):
+                    try:
+                        baseline = self.target_eng.query_scalar("SELECT pg_current_wal_lsn()::text")
+                    except Exception:
+                        pass
+            if baseline is None:
+                baseline = "0/0"
             self.target_start_lsn = baseline
             self.current_target_lsn = baseline
             self.applied_source_lsn = baseline
             self.pre_warmed = True
             self.state = "pre_warmed"
+            self.save_state()
         return self
 
     def start(self) -> "ReverseFailbackLoop":
@@ -220,12 +314,14 @@ class ReverseFailbackLoop:
                 self.pre_warm()
             self.running = True
             self.state = "running"
+            self.save_state()
         return self
 
     def stop(self) -> "ReverseFailbackLoop":
         with self.lock:
             self.running = False
             self.state = "stopped"
+            self.save_state()
         return self
 
     def ingest_event(self, event_or_dict: Union[CDCEvent, Dict[str, Any]]) -> bool:
@@ -356,16 +452,32 @@ class ReverseFailbackController:
 
         loop = get_reverse_loop(hop_name)
         if loop is None:
-            loop = ReverseFailbackLoop(
-                hop=hop,
-                cutover_time=t0,
-                target_eng=target_eng,
-                source_eng=source_eng,
-                options=options,
-            )
-            loop.pre_warm()
-            loop.start()
-            register_reverse_loop(hop_name, loop)
+            loop = ReverseFailbackLoop.load_state(hop, target_eng=target_eng, source_eng=source_eng)
+            if loop is not None:
+                register_reverse_loop(hop_name, loop)
+
+        if loop is None:
+            if options and options.get("auto_create"):
+                loop = ReverseFailbackLoop(
+                    hop=hop,
+                    cutover_time=t0,
+                    target_eng=target_eng,
+                    source_eng=source_eng,
+                    options=options,
+                )
+                loop.pre_warm()
+                loop.start()
+                register_reverse_loop(hop_name, loop)
+            else:
+                return FailbackResult(
+                    ok=False,
+                    duration_seconds=round(time.time() - t0, 4),
+                    remaining_window_hours=0.0,
+                    error=(
+                        f"No active reverse failback loop found for hop '{hop_name}' "
+                        "(neither in memory nor recorded on disk). Run cutover or pre-warm first."
+                    ),
+                )
 
         if not loop.is_within_retention_window() and not force:
             elapsed_h = (time.time() - loop.cutover_time) / 3600.0
@@ -479,7 +591,9 @@ class ReverseFailbackController:
             t_repoint = time.time()
             src = getattr(hop, "source", None)
             src_host = getattr(src, "host", "127.0.0.1")
-            src_port = int(getattr(src, "port", 5432) or 5432)
+            fam = getattr(getattr(source_eng, "engine_family", None) or getattr(hop, "engine", "postgres"), "value", getattr(hop, "engine", "postgres"))
+            default_port = 3306 if "mysql" in str(fam).lower() else 5432
+            src_port = int(getattr(src, "port", None) or default_port)
             r_ok, r_why = coordinator.repoint(
                 target_host=src_host,
                 target_port=src_port,
