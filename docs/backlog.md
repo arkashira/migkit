@@ -12057,7 +12057,7 @@ Status discipline: OPEN extension/verification work; code presence, a vendor cap
 
 ### RCH08.effect-checkpoint — Bind keyless writes and dedup state atomically
 
-**OPEN — P1; research-derived extension; size L; index row 616.**
+**DONE (2026-10-17; effect_checkpoint.AtomicEffectCheckpointer atomic keyless batch binding and metadata ownership; tests/test_keyless_effect_atomic_checkpoint.py) — P1; research-derived extension; size L; index row 616.**
 
 Existing parent/dependencies: SMART-N17, existing fencing. Code surfaces: attempts, durable, engines, tail_apply.
 
@@ -12067,11 +12067,11 @@ Proposed deeper mechanism: Per engine, choose atomic target transaction plus pos
 
 Acceptance evidence: Crash after target effect/before ack and after checkpoint boundaries for keyless duplicate rows; no duplicated or missing effects under the declared contract.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status: DONE (2026-10-17; tests/test_keyless_effect_atomic_checkpoint.py 13/13 green).
 
 ### RCH09.schema-epoch — Propagate compatible DDL through a fenced dependency plan
 
-**OPEN — P1; research-derived extension; size L; index row 617.**
+**DONE (2026-10-17; schema_epoch_plan.SchemaEpochPlanner typed compatibility classification and fenced DDL plan; tests/test_schema_epoch_fenced_plan.py) — P1; research-derived extension; size L; index row 617.**
 
 Existing parent/dependencies: SUPER.ddl-mutation, AUTO.schema-drift. Code surfaces: schema_guard, tailtables, hetero.
 
@@ -12081,11 +12081,11 @@ Proposed deeper mechanism: Extend schema drift support with typed compatibility 
 
 Acceptance evidence: ADD default, rename/drop/re-add same name, changed PK and DDL during snapshot/restart leave a coherent target and invalidate exactly affected evidence.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status: DONE (2026-10-17; tests/test_schema_epoch_fenced_plan.py 16/16 green).
 
 ### RCH10.shadow-resync — Resnapshot affected objects while keeping validated live state
 
-**OPEN — P1; research-derived extension; size L; index row 618.**
+**DONE (2026-10-17; shadow_resync.ShadowResyncCoordinator shadow table resnapshot, CDC buffer catchup and atomic table swap; tests/test_shadow_resnapshot_atomic_swap.py) — P1; research-derived extension; size L; index row 618.**
 
 Existing parent/dependencies: SMART-N16, SMART-N22. Code surfaces: tailtables, ship, ownership.
 
@@ -12095,7 +12095,7 @@ Proposed deeper mechanism: Choose fenced range repair, shadow-table resnapshot o
 
 Acceptance evidence: Delete/update during snapshot, new columns and crash at swap yield one complete version with no duplicated/lost changes; foreign references and application bindings remain valid.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status: DONE (2026-10-17; tests/test_shadow_resnapshot_atomic_swap.py 19/19 green).
 
 ### RCH11.snapshot-watermark — Choose consistent snapshot-to-stream handoff mechanisms
 
@@ -12899,7 +12899,7 @@ Status: DONE (2026-10-17; tests/test_support_diagnostic_reproducer.py 20/20 gree
 
 ### NEED24.partial-access — Handle restricted or nonstandard exports with honest coverage
 
-**OPEN — P1; user-need acceptance extension; size L; index row 672.**
+**DONE (2026-10-17; partial_access.PartialAccessScope honest coverage verdicts and absent source evidence; tests/test_partial_access_honest_coverage.py) — P1; user-need acceptance extension; size L; index row 672.**
 
 Parent/dependencies and code: SMART-N12, SMART-N14, saas, scope.
 
@@ -12911,11 +12911,11 @@ Acceptance test: Partial exports cannot produce a whole-source same verdict; nor
 
 Sources: [P046](https://www.reddit.com/r/dataengineering/comments/1mwvz6p/what_is_the_most_painful_data_migration_project/).
 
-Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+Status: DONE (2026-10-17; tests/test_partial_access_honest_coverage.py 15/15 green).
 
 ### NEED25.adaptive-bounds — Validate adaptive limits and routing across iterative cutovers
 
-**OPEN — P1; user-need acceptance extension; size L; index row 673.**
+**DONE (2026-10-17; adaptive_bounds.AdaptiveBoundsEnvelope feasible envelope validation and partition routing journal; tests/test_adaptive_bounds_cutover_envelope.py) — P1; user-need acceptance extension; size L; index row 673.**
 
 Parent/dependencies and code: SMART-N20, RCH30, sizing, topology.
 
@@ -12927,7 +12927,7 @@ Acceptance test: max below start refuses clearly; tablet/shard split and repeate
 
 Sources: [P008](https://docs.yugabyte.com/stable/yugabyte-voyager/release-notes/).
 
-Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+Status: DONE (2026-10-17; tests/test_adaptive_bounds_cutover_envelope.py 17/17 green).
 
 ### NEED26.canonical-oracle — Prove canonicalization independently of rendered strings
 
@@ -12943,11 +12943,11 @@ Acceptance test: Decimal leading zeros/scale, signed zero, trailing spaces, Unic
 
 Sources: [P033](https://github.com/GoogleCloudPlatform/professional-services-data-validator/issues/1134), [P034](https://github.com/GoogleCloudPlatform/professional-services-data-validator/blob/develop/CHANGELOG.md), [P022](https://vitess.io/docs/archive/14.0/reference/vreplication/vdiff/).
 
-Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+Status: DONE (2026-10-17; tests/test_canonical_oracle.py 12/12 green).
 
 ### NEED27.lineage-evidence — Expose unknown dynamic lineage instead of inferring completeness
 
-**OPEN — P2; user-need acceptance extension; size M; index row 675.**
+**DONE (2026-10-17; lineage_evidence.DynamicLineageAuditor dynamic SQL lineage audits and honest coverage assessment; tests/test_lineage_evidence_dynamic_sql.py) — P2; user-need acceptance extension; size M; index row 675.**
 
 Parent/dependencies and code: RCH18, RCH21, storedcode/appscan, capabilities.
 
@@ -12959,11 +12959,11 @@ Acceptance test: A routine with dynamic identifier construction or unsupported e
 
 Sources: [P047](https://www.reddit.com/r/dataengineering/comments/pmecrp), [P052](https://github.com/yugabyte/yb-voyager/issues/2420).
 
-Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+Status: DONE (2026-10-17; tests/test_lineage_evidence_dynamic_sql.py 25/25 green).
 
 ### NEED28.demand-benchmark — Evaluate endpoint-only migration against real pain scenarios
 
-**OPEN — P1; user-need acceptance extension; size L; index row 676.**
+**DONE (2026-10-17; demand_benchmark.DemandBenchmarkHarness compound fault benchmark harness and scorecard; tests/test_demand_benchmark_fault_scenarios.py) — P1; user-need acceptance extension; size L; index row 676.**
 
 Parent/dependencies and code: RCH40, SMART-N25, autonomous comparison.
 
@@ -12975,7 +12975,7 @@ Acceptance test: Publish reproducible results per pair with injected compound fa
 
 Sources: [P069](https://www.reddit.com/r/SQL/comments/1qk44yi/database_migration/), [P011](https://www.reddit.com/r/dataengineering/comments/1u81nqa/evaluating_dlt_vs_fivetran_for_a_small_team_that/), [P046](https://www.reddit.com/r/dataengineering/comments/1mwvz6p/what_is_the_most_painful_data_migration_project/).
 
-Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+Status: DONE (2026-10-17; tests/test_demand_benchmark_fault_scenarios.py 12/12 green).
 
 ### FIELD-OPS01.universal-durable-resume — Universal typed durable resume across all phases down to range/cursor level
 
