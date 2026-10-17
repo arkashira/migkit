@@ -1425,7 +1425,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * TiDB keeps no binlog: its changes are read from the Kafka topic TiCDC publishes them to. Say where in the source's options - changes: {servers: host:9092, topic: <topic>, format: canal-json} - with a changefeed made with enable-tidb-extension=true
 
-* format: debezium - TiCDC's Debezium output carries no watermarks: use canal-json, simple, open-protocol or avro
+* format: unsupported - this stream format carries no watermarks: use canal-json, simple, open-protocol or avro
 
 * format: <...> - TiCDC's changes are read as canal-json, simple, open-protocol or avro
 

@@ -2225,12 +2225,29 @@ def _held_since(then, now):
 
 
 def _said_row(r):
-    st = str(r.get("status", ""))
-    color = {"ok": "green", "diff": "yellow", "error": "red",
-             "warn": "yellow"}.get(st, "white")
-    console.print(f"[{color}]{_esc(str(r.get('check', ''))):8s}"
-                  f" {_esc(r.get('scope', ''))}: {_esc(st.upper())}"
-                  f"[/{color}] {_esc(r.get('detail', ''))}")
+    from .result_scope import classify_care
+    care = classify_care(r)
+    st = str(r.get("status", "")).upper()
+    chk = str(r.get("check", ""))
+    scope = str(r.get("scope", ""))
+    det = str(r.get("detail", ""))
+
+    tier = care.get("tier", "passed")
+    if tier == "action_required":
+        badge = "[bold red]✖ ACTION[/bold red]"
+        st_styled = f"[bold red]{_esc(st)}[/bold red]"
+    elif tier == "attention":
+        badge = "[bold yellow]▲ REVIEW[/bold yellow]"
+        st_styled = f"[bold yellow]{_esc(st)}[/bold yellow]"
+    elif tier == "benign":
+        badge = "[dim cyan]☕ BENIGN[/dim cyan]"
+        st_styled = f"[dim cyan]{_esc(st)}[/dim cyan]"
+    else:
+        badge = "[green]✔ OK    [/green]"
+        st_styled = f"[green]{_esc(st)}[/green]"
+
+    ignorable_tag = " [dim](safe to ignore)[/dim]" if care.get("care_level") == "dont_care" and tier == "benign" else ""
+    console.print(f"{badge} {_esc(chk):8s} {_esc(scope)}: {st_styled} {_esc(det)}{ignorable_tag}")
 
 
 def run_checks(hop, eng, dbs, checks, table="", consistent=False,
@@ -2759,6 +2776,10 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
                       " reads more slowly on the target - the data is not"
                       " in question; `performance: gate` in the hop's"
                       " options makes this stop the check[/yellow]")
+    from . import result_scope
+    envelope = result_scope.build_grouped_summary(results, hop, coverage=coverage or None)
+    console.print("")
+    console.print(result_scope.format_console(envelope))
     colour = _verdict.VERDICTS[decided.status].colour
     console.print(f"\nverdict: [{colour}]{decided.status}[/{colour}]"
                   + (" (identical to the previous run)" if was_same else "")

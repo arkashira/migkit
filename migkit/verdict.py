@@ -707,10 +707,10 @@ def partition_differences(table, src, dst, hop=None):
     for n in sorted(set(only_src) - {s for s, _ in pairs}):
         rows = int(only_src[n].get("rows") or 0)
         lines.append((0, f"{table} partition {n}: missing on target"
-                         + (f", the source's holds {_rows(rows)}. Resolve the"
-                            " partition definition with the database owner,"
-                            f" then review the schema plan ({plan}) and check"
-                            f" the affected rows again ({recheck})" if rows
+                         + (f", the source's holds {_rows(rows)}"
+                            + (f". Resolve the partition definition with the database owner,"
+                               f" then review the schema plan ({plan}) and check"
+                               f" the affected rows again ({recheck})" if hop else "") if rows
                             else " (empty on the source)")))
     for n in sorted(only_dst):
         rows = int(only_dst[n].get("rows") or 0)
@@ -1086,6 +1086,8 @@ def contract_said(table, value):
                       for op in left))
 def _classify_finding(r):
     from . import leftovers
+    from .result_scope import classify_care
+    care = classify_care(r)
     scope = str(r.get("scope", "")).strip()
     parts = scope.replace("/", ".").split()
     target_ident = parts[-1] if parts else ""
@@ -1101,6 +1103,11 @@ def _classify_finding(r):
         "status": r.get("status", ""),
         "defect_class": "replication_artifact" if is_artifact else "application_defect",
         "is_replication_artifact": is_artifact,
+        "tier": care["tier"],
+        "tier_badge": care["tier_badge"],
+        "care_level": care["care_level"],
+        "care_reason": care["care_reason"],
+        "action_required": care["action_required"],
         **({"artifact_origin": origin} if origin else {}),
         **({"window": r["window"]} if r.get("window") else {}),
         "detail": r.get("detail", ""),
@@ -1155,6 +1162,8 @@ def summarize(hop, records, engine=None, load=None, coverage=None):
     scope = hop_scope(hop)
     from . import servicecheck
     theirs = servicecheck.of(hop, records)
+    from .result_scope import triage_summary
+    triage = triage_summary(records, hop)
     return {
         **({"coverage": coverage} if coverage else {}),
         **({"scope": scope} if scope else {}),
@@ -1166,6 +1175,8 @@ def summarize(hop, records, engine=None, load=None, coverage=None):
         "tool": "migkit",
         "tool_version": __version__,
         "hop": hop.name,
+        "action_required": triage["has_action_required"],
+        "operator_summary": triage,
         # the run that took it, for its evidence (`export`)
         "session": session.current(),
         "engine": engine or hop.engine,

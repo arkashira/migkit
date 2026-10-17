@@ -514,7 +514,7 @@ class TiDBEngine(MySQLEngine):
             # where the hop names none
             fmt = spec.get("format", "ticdc")
             if fmt == "debezium":
-                raise SystemExit("format: debezium - TiCDC's Debezium output"
+                raise SystemExit("format: unsupported - this stream format"
                                  " carries no watermarks: use canal-json, simple,"
                                  " open-protocol or avro")
             env = changetopic.envelope(fmt)

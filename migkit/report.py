@@ -352,7 +352,18 @@ def render(hop, results, generated=None, decided=None, taken=None):
     findings = [r for r, sev in zip(results, decided.severity)
                 if sev not in ("same", "not compared") or r.get("stale")]
     cards = []
+    from .result_scope import classify_care
     for r in findings:
+        care = classify_care(r, hop)
+        tier = care.get("tier", "action_required")
+        tier_badge = care.get("tier_badge", "ACTION REQUIRED")
+        badge_style = {
+            "action_required": "background:#fdeeee;color:#d03b3b;border:1px solid #d03b3b;",
+            "attention": "background:#fff8e6;color:#e07b00;border:1px solid #fab219;",
+            "benign": "background:#e8f4fd;color:#0b72b9;border:1px solid #a4d2f6;",
+        }.get(tier, "background:#f1f0ec;color:#52514e;")
+        tier_pill = (f' <span class="fix" style="margin:0 0 0 6px;padding:2px 6px;font-size:11px;{badge_style}">'
+                     f'{html.escape(tier_badge)}</span>')
         st = str(r.get("status", ""))
         sev = "error" if st not in ("diff", "warn", "skip") else ""
         fix = r.get("fix_hint", "")
@@ -360,13 +371,17 @@ def render(hop, results, generated=None, decided=None, taken=None):
         origin = r.get("artifact_origin")
         origin_badge = (f' <span class="fix" style="margin:0;padding:2px 6px;font-size:11px;">'
                         f'{html.escape(origin)} artifact</span>') if origin else ""
+        why_safe_html = (f'<div style="font-size:12px;color:#0b72b9;margin-top:6px;">'
+                         f'<strong>Safe to ignore:</strong> {html.escape(care["care_reason"])}</div>'
+                         if tier == "benign" and care.get("care_reason") else "")
         cards.append(
             f'<div class="finding {sev}"><div class="head">'
             # rows the hop keeps by the changes it does not carry
             f'{_chip(st, "KEPT" if r.get("kept_by_hop") else None)}'
             f'<span>{html.escape(str(r.get("check", "")))} &middot; '
-            f'{html.escape(str(r.get("scope", "")))}</span>{origin_badge}</div>'
+            f'{html.escape(str(r.get("scope", "")))}</span>{tier_pill}{origin_badge}</div>'
             f'<div class="what">{html.escape(str(r.get("detail", "")))}</div>'
+            f'{why_safe_html}'
             f'{fix_html}{_excerpt(str(r.get("detail", "")), r.get("report", ""))}</div>')
     if not cards:
         cards = ['<div class="sub">none</div>']
