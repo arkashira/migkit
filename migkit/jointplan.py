@@ -187,6 +187,7 @@ class Plan:
     binding: str = ""
     bound: float = 0.0
     money: float = 0.0
+    billed_bytes: float = 0.0
     order: tuple = ()
     how: str = ""
     greedy: float = None
@@ -221,6 +222,7 @@ class Plan:
                 "workers": self.workers, "tables_at_once": self.tables,
                 "binding": self.binding,
                 "lower_bound": self.bound, "money": self.money,
+                "billed_bytes": getattr(self, "billed_bytes", 0.0),
                 "greedy_makespan": self.greedy, "how": self.how,
                 "meets_limits": self.meets, "why": self.why,
                 "order": list(self.order),
@@ -479,6 +481,10 @@ def money(jobs, choice):
     return sum(choice[j.name].bills * j.bytes for j in jobs)
 
 
+def billed_bytes(jobs, choice):
+    return sum(j.bytes for j in jobs if getattr(choice[j.name], "bills", 0.0) > 0)
+
+
 # --- the per-choice greedy: what migkit did before --------------------------
 
 def alone(job, way, limits):
@@ -504,6 +510,8 @@ def greedy(jobs, limits):
               for j in jobs}
     order = [j.name for j in sorted(jobs, key=lambda j: -j.bytes)]
     got = simulate(jobs, choice, limits, order, check_after_all=True)
+    got.money = money(jobs, choice)
+    got.billed_bytes = billed_bytes(jobs, choice)
     got.how = "each choice alone"
     return got, choice
 
@@ -536,8 +544,27 @@ def _search(jobs, choice, limits):
                 if saved > 0:
                     choice[j.name] = o
                     over -= saved
+    if limits.billed_bytes is not None:
+        over_b = billed_bytes(jobs, choice) - limits.billed_bytes
+        if over_b > 0:
+            moves = []
+            for j in jobs:
+                w = choice[j.name]
+                if getattr(w, "bills", 0.0) > 0:
+                    for o in j.ways:
+                        if getattr(o, "bills", 0.0) <= 0:
+                            saved_b = j.bytes
+                            lost = max(alone(j, o, limits) - alone(j, w, limits),
+                                       1e-9)
+                            moves.append((saved_b / lost, j, o))
+            for _, j, o in sorted(moves, key=lambda m: -m[0]):
+                if over_b <= 0:
+                    break
+                choice[j.name] = o
+                over_b -= j.bytes
     fluid = _Fluid(jobs, choice, limits)
     spent = money(jobs, choice)
+    spent_bytes = billed_bytes(jobs, choice)
     best = fluid.value()
     by_size = sorted((j for j in jobs if len(j.ways) > 1),
                      key=lambda j: -j.bytes)
@@ -549,19 +576,25 @@ def _search(jobs, choice, limits):
                 if o is here:
                     continue
                 more = (o.bills - here.bills) * j.bytes
+                more_b = (j.bytes if getattr(o, "bills", 0.0) > 0 else 0) - (
+                    j.bytes if getattr(here, "bills", 0.0) > 0 else 0)
                 if limits.money is not None \
                         and spent + more > limits.money + 1e-9:
+                    continue
+                if limits.billed_bytes is not None \
+                        and spent_bytes + more_b > limits.billed_bytes + 1e-9:
                     continue
                 got = fluid.value_if(j, here, o)
                 if got < best * (1 - 1e-9) and (move is None
                                                  or got < move[0]):
-                    move = (got, j, o, more)
+                    move = (got, j, o, more, more_b)
         if move is None:
             break
-        best, j, o, more = move
+        best, j, o, more, more_b = move
         fluid.switch(j, choice[j.name], o)
         choice[j.name] = o
         spent += more
+        spent_bytes += more_b
     return choice
 
 
@@ -672,11 +705,13 @@ def joint(jobs, limits, search=True):
     base, first = greedy(jobs, limits)
     over_money = (limits.money is not None
                   and money(jobs, first) > limits.money + 1e-9)
+    over_bytes = (limits.billed_bytes is not None
+                  and billed_bytes(jobs, first) > limits.billed_bytes + 1e-9)
     # the mix the search found, and each table's fastest alone where that
     # keeps to the money: a lower bound is not yet a sooner end, so both
     # are simulated under every order
     mixes = [_search(jobs, first, limits)] if search else []
-    if not over_money or not mixes:
+    if not (over_money or over_bytes) or not mixes:
         mixes.append(dict(first))
     most = int(limits.workers or 1)
     best, choice = None, None
@@ -695,7 +730,7 @@ def joint(jobs, limits, search=True):
             best, choice = here, mix
     best.how = "jointly"
     after_all = False
-    if base.makespan <= best.makespan and not over_money:
+    if base.makespan <= best.makespan and not (over_money or over_bytes):
         best, choice, after_all = base, first, True
         best.how = "each choice alone - no joint plan ended sooner"
     # the fewest workers whose end is within reach of the most allowed
@@ -710,6 +745,7 @@ def joint(jobs, limits, search=True):
     best.greedy = base.makespan
     best.bound, best.binding = bound(jobs, choice, limits, best.workers)
     best.money = money(jobs, choice)
+    best.billed_bytes = billed_bytes(jobs, choice)
     # every way at its p90 at once, and never under the plan's own floor:
     # probes of seconds do not see what a server does over an hour
     from .planner import P90_LEAST
@@ -728,7 +764,7 @@ def joint(jobs, limits, search=True):
 
 def _meets(plan, limits):
     """(whether the plan keeps within the hop's limits, why not)."""
-    from .wording import _duration
+    from .wording import _duration, human_bytes
     if limits.deadline is not None and plan.makespan > limits.deadline:
         return False, (f"the move needs ~{_duration(plan.makespan)} and the"
                        f" deadline gives {_duration(limits.deadline)}:"
@@ -736,6 +772,9 @@ def _meets(plan, limits):
     if limits.money is not None and plan.money > limits.money + 1e-9:
         return False, (f"every way here bills more than the {limits.money:g}"
                        " the hop allows")
+    if limits.billed_bytes is not None and getattr(plan, "billed_bytes", 0.0) > limits.billed_bytes + 1e-9:
+        return False, (f"every way here bills {human_bytes(plan.billed_bytes)} and the"
+                       f" hop allows {human_bytes(limits.billed_bytes)}")
     return True, ""
 
 

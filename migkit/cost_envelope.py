@@ -411,15 +411,17 @@ def compare_targeted_refresh_to_full_reload(
 class CostEnvelopeGovernor:
     def __init__(
         self,
-        budget_limit: float,
+        budget_limit: Optional[float] = None,
         action: BudgetExceededAction = BudgetExceededAction.ABORT,
         forecast: Optional[CostEnvelopeForecast] = None,
         registry: Optional[RateRegistry] = None,
         throttle_worker_ceiling: int = 1,
         throttle_factor: float = 0.25,
         throttle_delay_seconds: float = 0.5,
+        byte_limit: Optional[float] = None,
     ):
-        self.budget_limit = float(budget_limit)
+        self.budget_limit = float(budget_limit) if budget_limit is not None else None
+        self.byte_limit = float(byte_limit) if byte_limit is not None else None
         self.action = action if isinstance(action, BudgetExceededAction) else BudgetExceededAction(action)
         self.forecast = forecast
         self.registry = registry or RateRegistry()
@@ -428,6 +430,7 @@ class CostEnvelopeGovernor:
         self.throttle_delay_seconds = float(throttle_delay_seconds)
 
         self._actual_spend: float = 0.0
+        self._actual_bytes: float = 0.0
         self._spend_by_dimension: Dict[str, float] = {}
         self._usage_by_dimension: Dict[str, float] = {}
         self._is_throttled: bool = False
@@ -436,11 +439,25 @@ class CostEnvelopeGovernor:
     def actual_spend(self) -> float:
         return self._actual_spend
 
-    def remaining_budget(self) -> float:
+    def actual_bytes(self) -> float:
+        return self._actual_bytes
+
+    def remaining_budget(self) -> Optional[float]:
+        if self.budget_limit is None:
+            return None
         return max(0.0, self.budget_limit - self._actual_spend)
 
+    def remaining_bytes(self) -> Optional[float]:
+        if self.byte_limit is None:
+            return None
+        return max(0.0, self.byte_limit - self._actual_bytes)
+
     def is_budget_exceeded(self) -> bool:
-        return self._actual_spend > self.budget_limit
+        if self.budget_limit is not None and self._actual_spend > self.budget_limit:
+            return True
+        if self.byte_limit is not None and self._actual_bytes > self.byte_limit:
+            return True
+        return False
 
     def is_throttled(self) -> bool:
         return self._is_throttled
@@ -471,7 +488,7 @@ class CostEnvelopeGovernor:
             "cumulative_spend": self._actual_spend,
         })
 
-        if self._actual_spend > self.budget_limit:
+        if self.budget_limit is not None and self._actual_spend > self.budget_limit:
             excess = self._actual_spend - self.budget_limit
             if self.action == BudgetExceededAction.ABORT:
                 raise BudgetExceededError(
@@ -479,6 +496,29 @@ class CostEnvelopeGovernor:
                     f"actual spend {self._actual_spend:.2f}",
                     budget_limit=self.budget_limit,
                     actual_spend=self._actual_spend,
+                    excess=excess,
+                    action=self.action,
+                )
+            elif self.action == BudgetExceededAction.THROTTLE:
+                self._is_throttled = True
+
+    def record_bytes(
+        self,
+        bytes_count: float,
+        dimension: Union[CostDimension, str] = CostDimension.EGRESS_BYTES,
+        timestamp: Optional[float] = None,
+    ):
+        dim = dimension.value if isinstance(dimension, CostDimension) else dimension
+        qty = float(bytes_count)
+        self._actual_bytes += qty
+        self.record_usage(dim, qty, timestamp=timestamp)
+        if self.byte_limit is not None and self._actual_bytes > self.byte_limit:
+            excess = self._actual_bytes - self.byte_limit
+            if self.action == BudgetExceededAction.ABORT:
+                raise BudgetExceededError(
+                    f"Byte limit {self.byte_limit:g} exceeded by {excess:g}: actual bytes {self._actual_bytes:g}",
+                    budget_limit=self.byte_limit,
+                    actual_spend=self._actual_bytes,
                     excess=excess,
                     action=self.action,
                 )

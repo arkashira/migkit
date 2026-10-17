@@ -11767,7 +11767,7 @@ Read docs/research/migration-mechanisms-and-roadmap-2026-10-17.md and docs/resea
 
 ### REV-D1.limit-gate — Enforce hard limits at the execution boundary
 
-**DONE 2026-10-17.** (Enforced `jp.admitted and jp.meets` in `cli._joint_for_move`; verified with `test_a_plan_not_meeting_limits_stops_the_move_before_writing` in `tests/test_a_move_keeps_what_it_must.py`).
+**DONE 2026-10-17.** (Enforced `jp.admitted and jp.meets` in `cli._joint_for_move`; wired `CostEnvelopeGovernor` into `cli._copy_tables_in` to enforce runtime money/bytes hard limits with ACTION badge; verified with `tests/test_cost_envelope_enforcement.py`).
 
 Observed: jointplan._meets sets meets=False for deadline/money violations, but cli._joint_for_move (review baseline line 3966) rejects only not jp.admitted. Reproduced with a Plan(meets=False, admitted=True): the function returns it for execution. Fix: admission must require the contract's limits as well as correctness; a missing model or failed probe must not silently waive hard limits. Distinguish forecast infeasibility from enforceable runtime ceilings. Proof: unit regression plus installed-command sandbox tests that an over-budget/deadline move writes nothing, while an admissible within-limit move completes. Runtime money/byte counters must stop at safe boundaries before overspending, including fallback/retries.
 
@@ -11785,7 +11785,7 @@ Observed: space.best.runners contains combinations whose prove already failed; j
 
 ### REV-D4.billed-bytes — Preserve byte budgets independently of prices
 
-**DONE 2026-10-17.** (Preserved `billed_bytes` independently of prices on `Limits` and `limits_of`; verified with `tests/test_a_move_is_planned_as_one.py` 15/15 green).
+**DONE 2026-10-17.** (Preserved `billed_bytes` independently of prices on `Limits` and `limits_of`; enforced `limits.billed_bytes` in jointplan `_meets` and `_search` pruning over-bytes choices; wired `byte_limit` into `CostEnvelopeGovernor`; verified with `tests/test_a_move_is_planned_as_one.py` 16/16 and `tests/test_cost_envelope_enforcement.py` 13/13 green).
 
 Observed: jointplan.limits_of converts limits.bytes_billed to money only with a truthy transfer_price_per_gb (line 932). bytes_billed=1GB alone yields money=None and no independent byte field in Limits. Fix: track billed bytes as a distinct resource, with pricing only for monetary budgets. Count actual billable paths, compression and retry overhead. Proof: absent, zero and nonzero prices never erase the cap; multi-hop budgets cannot be double-spent; rollback/retry accounting is explicit.
 

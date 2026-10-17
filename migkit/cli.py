@@ -4289,11 +4289,50 @@ def _catalogue_names(eng, d, tables):
 def _copy_tables_in(hop, eng, d, tables, chunk, ck, workers):
     import concurrent.futures as cf
 
+    from .cost_envelope import (
+        BudgetExceededAction,
+        BudgetExceededError,
+        CostEnvelopeGovernor,
+    )
+    from .jointplan import limits_of
     from .throttle import Throttle
 
     def log(m):
         console.print(f"  {m}")
     tables = _in_flight_first(eng, tables, log)
+
+    lim = limits_of(hop)
+    governor = None
+    if lim.money is not None or lim.billed_bytes is not None:
+        governor = CostEnvelopeGovernor(
+            budget_limit=lim.money,
+            byte_limit=lim.billed_bytes,
+            action=BudgetExceededAction.ABORT,
+        )
+
+    try:
+        facts = eng.table_facts("src", d)
+    except Exception:
+        facts = {}
+
+    price = (getattr(hop, "options", None) or {}).get("transfer_price_per_gb")
+
+    def _account_table_cost(sch, t):
+        if governor is None:
+            return
+        tbl_name = f"{sch}.{t}" if sch else t
+        t_fact = facts.get(tbl_name) or facts.get(t) or {}
+        b = int(t_fact.get("bytes") or 0)
+        if b > 0:
+            try:
+                governor.record_bytes(b)
+                if governor.budget_limit is not None and price:
+                    governor.record_spend("egress_bytes", b / (2 ** 30) * float(price), quantity=b)
+            except BudgetExceededError as exc:
+                raise SystemExit(_words.copy_not_started(
+                    d, f"ACTION: move halted at hard limit ceiling: {exc}",
+                    getattr(hop, "name", "") or ""))
+
     if workers < 2:
         from . import failpoint, jointplan
         # one table at a time: in the joint plan's order where it planned
@@ -4309,6 +4348,7 @@ def _copy_tables_in(hop, eng, d, tables, chunk, ck, workers):
                 _copy_table(eng, d, sch, t, chunk, ck, log)
             failpoint.hit("table.done")
             _changelog(hop, {"op": "move", "db": d, "table": f"{sch}.{t}"})
+            _account_table_cost(sch, t)
         return
 
     def health():
@@ -4329,6 +4369,7 @@ def _copy_tables_in(hop, eng, d, tables, chunk, ck, workers):
                 _copy_table(eng, d, sch, t, chunk, ck, log)
             failpoint.hit("table.done")
             _changelog(hop, {"op": "move", "db": d, "table": f"{sch}.{t}"})
+            _account_table_cost(sch, t)
         finally:
             gate.done()
     failed = None

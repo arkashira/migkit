@@ -486,7 +486,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a rung or plan reads `drift` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
-- `migkit/jointplan.py:1228` decision -> workflows (`drift`)
+- `migkit/jointplan.py:1267` decision -> workflows (`drift`)
 
 ### a rung or plan reads `jobs` for what the workflow can do; ends when the workflow publishes its abilities below decision
 

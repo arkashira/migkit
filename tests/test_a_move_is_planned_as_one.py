@@ -161,6 +161,30 @@ def test_money_is_a_hard_limit():
     assert not got.meets and "bills more" in got.why
 
 
+def test_billed_bytes_is_a_hard_limit_independent_of_money():
+    free = jp.Way("pass", "server to server", 20 * MB, {"source": 1}, 0.2)
+    billed = jp.Way("pipe", "through migkit", 80 * MB, {"link:src": 1},
+                    0.0, bills=0.09 / 2 ** 30)
+    jobs = _jobs([1000] * 4, ways=(free, billed), index=0)
+    caps = {"source": 200 * MB, "target": 150 * MB,
+            "link:src": 1000 * MB, "link:dst": 100 * MB}
+    # 4 jobs of 1000 MB each = 4000 MB. Set limit to 1500 MB with money=None
+    lim = _limits(workers=16, billed_bytes=1500 * MB, caps=caps)
+    assert lim.money is None
+    assert lim.billed_bytes == 1500 * MB
+    _, first = jp.greedy(jobs, lim)
+    assert jp.billed_bytes(jobs, first) > lim.billed_bytes
+    plan = jp.joint(jobs, lim)
+    assert plan.billed_bytes <= lim.billed_bytes + 1e-9
+    assert plan.meets
+    assert list(plan.ways().values()).count("pipe") == 1
+    # an impossible byte ceiling
+    lim0 = _limits(workers=16, billed_bytes=500 * MB, caps=caps)
+    only = _jobs([1000], ways=(billed,), index=0)
+    got = jp.joint(only, lim0)
+    assert not got.meets and "bills" in got.why
+
+
 def test_the_source_share_caps_its_reads():
     jobs = _jobs([2000] * 4)
     free = jp.joint(jobs, _limits(workers=16))

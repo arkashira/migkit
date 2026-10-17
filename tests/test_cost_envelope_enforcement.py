@@ -476,3 +476,120 @@ def test_governor_price_unknown_strict_enforcement():
 
     assert exc_info.value.dimension == CostDimension.EGRESS_BYTES
     assert isinstance(exc_info.value.unknown, CostUnknown)
+
+
+def test_governor_byte_limit_independent_of_price():
+    empty_registry = RateRegistry()
+    governor = CostEnvelopeGovernor(
+        byte_limit=100 * 1024**2,  # 100 MB byte budget with no price / money limit
+        action=BudgetExceededAction.ABORT,
+        registry=empty_registry,
+    )
+    assert governor.remaining_bytes() == 100 * 1024**2
+    assert governor.remaining_budget() is None
+
+    # Record 60 MB: within budget
+    governor.record_bytes(60 * 1024**2)
+    assert governor.actual_bytes() == 60 * 1024**2
+    assert governor.remaining_bytes() == 40 * 1024**2
+    assert not governor.is_budget_exceeded()
+
+    # Record 50 MB: exceeds 100 MB ceiling (total 110 MB)
+    with pytest.raises(BudgetExceededError) as exc_info:
+        governor.record_bytes(50 * 1024**2)
+
+    assert "Byte limit" in str(exc_info.value)
+    assert exc_info.value.excess == 10 * 1024**2
+    assert governor.is_budget_exceeded()
+
+
+def test_cli_copy_tables_in_enforces_byte_limit_ceiling(tmp_path):
+    from migkit import cli
+
+    class FakeHop:
+        name = "test-hop"
+        options = {
+            "limits": {
+                "bytes_billed": 100 * 1024**2,
+            }
+        }
+        def report_dir(self, db=None):
+            return tmp_path
+
+    class FakeEngine:
+        def __init__(self, hop):
+            self.hop = hop
+            self.src_engine = self
+        def table_facts(self, side, db):
+            return {
+                "public.t1": {"bytes": 60 * 1024**2, "rows": 1000},
+                "public.t2": {"bytes": 50 * 1024**2, "rows": 1000},
+            }
+        def move_table(self, d, sch, t, chunk, ck, log):
+            pass
+        def through_pair(self, d, name):
+            return False
+        def move_key(self, d, sch, t):
+            return f"{d}.{sch}.{t}"
+        def session_health(self):
+            return ()
+
+    hop = FakeHop()
+    eng = FakeEngine(hop)
+    tables = [("public", "t1"), ("public", "t2")]
+
+    # 1 worker test
+    with pytest.raises(SystemExit) as exc_info:
+        cli._copy_tables_in(hop, eng, "testdb", tables, chunk=1000, ck={}, workers=1)
+    assert "ACTION: move halted at hard limit ceiling" in str(exc_info.value)
+    assert "Byte limit" in str(exc_info.value)
+
+    # 2 workers test
+    with pytest.raises(SystemExit) as exc_info2:
+        cli._copy_tables_in(hop, eng, "testdb", tables, chunk=1000, ck={}, workers=2)
+    assert "ACTION: move halted at hard limit ceiling" in str(exc_info2.value)
+    assert "Byte limit" in str(exc_info2.value)
+
+
+def test_cli_copy_tables_in_enforces_money_limit_ceiling(tmp_path):
+    from migkit import cli
+
+    class FakeHop:
+        name = "test-hop"
+        options = {
+            "limits": {
+                "money": 5.0,  # $5 max budget
+            },
+            "transfer_price_per_gb": 0.10,  # $0.10 per GB
+        }
+        def report_dir(self, db=None):
+            return tmp_path
+
+    class FakeEngine:
+        def __init__(self, hop):
+            self.hop = hop
+            self.src_engine = self
+        def table_facts(self, side, db):
+            return {
+                "public.t1": {"bytes": 40 * 1024**3, "rows": 1000},  # $4.00
+                "public.t2": {"bytes": 20 * 1024**3, "rows": 1000},  # $2.00 -> total $6.00 > $5.00
+            }
+        def move_table(self, d, sch, t, chunk, ck, log):
+            pass
+        def through_pair(self, d, name):
+            return False
+        def move_key(self, d, sch, t):
+            return f"{d}.{sch}.{t}"
+        def session_health(self):
+            return ()
+
+    hop = FakeHop()
+    eng = FakeEngine(hop)
+    tables = [("public", "t1"), ("public", "t2")]
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli._copy_tables_in(hop, eng, "testdb", tables, chunk=1000, ck={}, workers=1)
+    assert "ACTION: move halted at hard limit ceiling" in str(exc_info.value)
+    assert "Budget limit" in str(exc_info.value)
+
+
