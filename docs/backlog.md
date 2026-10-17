@@ -12771,7 +12771,7 @@ Status: OPEN acceptance/design extension; external issue reports are not a diagn
 
 ### NEED16.control-upgrade — Upgrade migkit state without forcing data resync
 
-**OPEN — P1; user-need acceptance extension; size L; index row 664.**
+**DONE (2026-10-17; control_upgrade.StateMigrator atomic staging/swap and durable resume preservation; tests/test_control_plane_upgrade_resume.py) — P1; user-need acceptance extension; size L; index row 664.**
 
 Parent/dependencies and code: SMART-N22, durable, config, packaging.
 
@@ -12783,11 +12783,11 @@ Acceptance test: Upgrade/kill/downgrade tests preserve hop definitions, pending 
 
 Sources: [P060](https://github.com/airbytehq/airbyte/issues/80770), [P064](https://airbyte.com/blog/introducing-airbyte-destinations-v2-typing-deduping).
 
-Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+Status: DONE (2026-10-17; tests/test_control_plane_upgrade_resume.py 16/16 green).
 
 ### NEED17.lock-capability — Probe coordination primitives on compatible-looking services
 
-**OPEN — P1; user-need acceptance extension; size L; index row 665.**
+**DONE (2026-10-17; lock_capability.LockCapabilityProber behavioral probe and fenced coordination lease; tests/test_lock_capability_probes.py) — P1; user-need acceptance extension; size L; index row 665.**
 
 Parent/dependencies and code: SMART-N9, RCH15, fencing, capabilities.
 
@@ -12799,11 +12799,11 @@ Acceptance test: A PG-wire endpoint without advisory locks cannot accidentally r
 
 Sources: [P063](https://github.com/flyway/flyway/issues/4022), [P023](https://github.com/cockroachdb/cockroach/issues/84505).
 
-Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+Status: DONE (2026-10-17; tests/test_lock_capability_probes.py 7/7 green).
 
 ### NEED18.cost-envelope — Forecast and enforce complete migration operating cost
 
-**OPEN — P2; user-need acceptance extension; size M; index row 666.**
+**DONE (2026-10-17; cost_envelope.CostEnvelopeGovernor complete operating cost forecast and budget limits; tests/test_cost_envelope_enforcement.py) — P2; user-need acceptance extension; size M; index row 666.**
 
 Parent/dependencies and code: REV-D4, SMART-N6, machine, jointplan.
 
@@ -12815,11 +12815,11 @@ Acceptance test: A targeted-refresh plan can be compared to full reload under th
 
 Sources: [P011](https://www.reddit.com/r/dataengineering/comments/1u81nqa/evaluating_dlt_vs_fivetran_for_a_small_team_that/), [P012](https://www.reddit.com/r/dataengineering/comments/1ii4ry5), [P013](https://www.reddit.com/r/dataengineering/comments/1jwrfit/thinking_of_migrating_from_fivetran_to_hevo_would/), [P014](https://www.reddit.com/r/dataengineering/comments/1uk2cl7/portable_vs_fivetran_anyone_make_the_swap/).
 
-Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+Status: DONE (2026-10-17; tests/test_cost_envelope_enforcement.py 10/10 green).
 
 ### NEED19.private-proof — Verify masked/restricted data without exposing source values
 
-**OPEN — P1; user-need acceptance extension; size L; index row 667.**
+**DONE (2026-10-17; private_proof.BlindedVerifier cryptographic blinding and salted multiset hash proofs; tests/test_private_proof_masked_data.py) — P1; user-need acceptance extension; size L; index row 667.**
 
 Parent/dependencies and code: RCH17, RCH19, transforms, evidence.
 
@@ -12831,11 +12831,11 @@ Acceptance test: Secrets/PII stay out of logs, counterexamples, remote model req
 
 Sources: [P046](https://www.reddit.com/r/dataengineering/comments/1mwvz6p/what_is_the_most_painful_data_migration_project/), [P053](https://aws.amazon.com/blogs/database/mask-pii-data-using-aws-dms-and-amazon-macie-during-migration/).
 
-Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+Status: DONE (2026-10-17; tests/test_private_proof_masked_data.py 13/13 green).
 
 ### NEED20.exit-portability — Keep output mappings and checkpoints portable
 
-**OPEN — P2; user-need acceptance extension; size M; index row 668.**
+**DONE (2026-10-17; exit_portability.PortableManifestExporter neutral schema export and O(1) resume skipping; tests/test_exit_portability_checkpoints.py) — P2; user-need acceptance extension; size M; index row 668.**
 
 Parent/dependencies and code: SMART-N11, SMART-N22, config, manifests.
 
@@ -12847,7 +12847,7 @@ Acceptance test: A clean migkit installation can inspect/export the project and 
 
 Sources: [P017](https://www.reddit.com/r/dataengineering/comments/11xbpjy), [P064](https://airbyte.com/blog/introducing-airbyte-destinations-v2-typing-deduping).
 
-Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+Status: DONE (2026-10-17; tests/test_exit_portability_checkpoints.py 13/13 green).
 
 ### NEED21.app-rollback — Coordinate application versions with reversible schema evolution
 
@@ -12863,11 +12863,11 @@ Acceptance test: Rollback after new-version writes either preserves them through
 
 Sources: [P015](https://github.com/werf/werf/discussions/5749), [P062](https://docs.liquibase.com/community/reference-guide-5-0/init-update-and-rollback-commands/what-are-rollback-commands).
 
-Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+Status: DONE (2026-10-17; tests/test_app_rollback_coordination.py 13/13 green).
 
 ### NEED22.rollback-set — Define targeted rollback by effect identity and dependencies
 
-**OPEN — P1; user-need acceptance extension; size L; index row 670.**
+**DONE (2026-10-17; rollback_set.RollbackSetResolver effect DAG dependency resolution and surgical rollback sets; tests/test_targeted_rollback_set.py) — P1; user-need acceptance extension; size L; index row 670.**
 
 Parent/dependencies and code: RCH17, repairlog, attempts.
 
@@ -12879,11 +12879,11 @@ Acceptance test: Changes before/at/after a tag, unrelated later work and concurr
 
 Sources: [P054](https://github.com/liquibase/liquibase/issues/6728), [P056](https://docs.liquibase.com/secure/user-guide-5-1/what-are-targeted-rollbacks).
 
-Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+Status: DONE (2026-10-17; tests/test_targeted_rollback_set.py 14/14 green).
 
 ### NEED23.support-reproducer — Generate bounded secret-safe diagnostic reproductions
 
-**OPEN — P2; user-need acceptance extension; size M; index row 671.**
+**DONE (2026-10-17; support_reproducer.SupportReproducer offline repro harness and synthetic sanitized bundles; tests/test_support_diagnostic_reproducer.py) — P2; user-need acceptance extension; size M; index row 671.**
 
 Parent/dependencies and code: RCH34, RCH39, diagnostics, evidence.
 
@@ -12895,7 +12895,7 @@ Acceptance test: A support bundle reproduces selected failure classes offline an
 
 Sources: [P036](https://github.com/dimitri/pgloader/issues/371), [P028](https://discuss.google.dev/t/dms-mysql-migration-fails-with-waitid-no-child-processes-recurring-across-different-configs/390779).
 
-Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+Status: DONE (2026-10-17; tests/test_support_diagnostic_reproducer.py 20/20 green).
 
 ### NEED24.partial-access — Handle restricted or nonstandard exports with honest coverage
 

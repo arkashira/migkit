@@ -22,7 +22,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - [`docs/agents/INVENTORY.md`](INVENTORY.md) - every file of `migkit/` and `tools/`: its responsibility package, owner domain, size, importers, the packages it reaches, the programs it wraps and the tests that reach it
 - [`docs/agents/LAYERS.md`](LAYERS.md) - the layering rule (a package imports its own rank and below) and every upward import still listed, with its reason
 
-## `migkit/` (211 modules)
+## `migkit/` (218 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/ack_lattice.py` - (no docstring) Classes: PipelineStage, MonotoneRegressionError, SourceAckRefusedError, CutoverRefusedError, CutoverAuthorization, PositionLattice.
@@ -67,7 +67,9 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/commercial.py` - The types only the commercial engines have (backlog W6; the type-fidelity research, docs/research/type-fidelity-2026-09-28.md, sections 6, 8 Classes: Variant.
 - `migkit/config.py` - (no docstring) Classes: Endpoint, SideEndpoint, IamEndpoint, KeychainEndpoint, Hop.
 - `migkit/consolidate.py` - Many databases or tenants into one (backlog P0-SCENARIOS): each source's rows carried into one target under a column the hop names, filled w Classes: Source, TablePlan, SliceVerdict.
+- `migkit/control_upgrade.py` - (no docstring) Classes: StateSchemaVersion, InvariantViolationError, UpgradeRollbackError, HopDefinition, AdapterCheckpoint, DurableControlState.
 - `migkit/copybook.py` - COBOL copybooks, and the records they describe, read and written exactly. Classes: CopybookError, Unreadable, Figurative, Item, Picture, Leaf.
+- `migkit/cost_envelope.py` - (no docstring) Classes: CostEnvelopeError, BudgetExceededAction, RateSource, CostDimension, PlanType, CostUnknown.
 - `migkit/costmodel.py` - What a way costs, as a function of the work, with how sure that is (backlog P0-SMART, items 1, 2, 6 and learning across hops). Classes: Estimate, Fit, Knowledge, CostModel.
 - `migkit/crossmove.py` - Cross-engine table copies where rows never pass through Python (backlog R20.13 and R20.14), as ways of the table copier chosen per table. Classes: TableWay.
 - `migkit/cutover.py` - The cutover as one timed path that undoes itself. Classes: Leg.
@@ -91,6 +93,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/envkeys.py` - Every environment variable migkit reads, in one place, and one way of reading each kind (audit 2026-10-01, K13). Classes: Var, Bad.
 - `migkit/estate.py` - The estate, not the hop (backlog W2): every database a machine or an account can reach, what moving each would take by migkit's own measurem Classes: Found.
 - `migkit/evidence.py` - The files migkit writes that hold the application's values, kept encrypted where the hop asks (backlog R17b): Classes: EvidencePath.
+- `migkit/exit_portability.py` - (no docstring) Classes: PortabilityValidationError, NeutralType, NeutralSchema, CollisionStrategy, PortableManifestExporter, PortableStateImporter.
 - `migkit/export.py` - The evidence of a migration, exported: what migkit did on a hop and what it measured, in the forms audit and change processes take - HTML an
 - `migkit/factbook.py` - Every fact a choice may read, in one place (backlog P0-SMART, the owner's note B of 2026-09-30: "every factor"). Classes: Fact.
 - `migkit/failpoint.py` - Failure on purpose, at the places a move keeps what it has done.
@@ -129,6 +132,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/legs.py` - The fewest legs the rows can take, and where migkit should stand (backlog R22, item 4). Classes: Footprint.
 - `migkit/loadtext.py` - The source renders the target's load format in SQL (backlog R20.14).
 - `migkit/lob_transaction.py` - (no docstring) Classes: LobTransactionError, NotNullConstraintViolation, StaleTransactionIdentityError, ConcurrentLobMutationError, LobPathRefusedError, ExecutionPath.
+- `migkit/lock_capability.py` - (no docstring) Classes: LockCapabilityError, MissingCoordinationPrimitiveError, LeaseAcquisitionError, LeaseLostError, FencedOutError, CoordinationStrategy.
 - `migkit/locks.py` - What the repair DDL will lock, said before anyone applies it. Classes: LockContentionError, LockBudgetExceeded, ScopeViolationError, LockBehavior, LockBudget, LockWaitPrediction.
 - `migkit/logddl.py` - A DDL statement as a change log carries it, read for the tables it touches and what it does to each (`canon.ddl`).
 - `migkit/machine.py` - The machine to run on, and the class the target needs (backlog R22, item 6). Classes: Machine, Stages, Advice, Spent.
@@ -148,6 +152,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/physical.py` - Physical where the source allows it, logical everywhere else (backlog R19 lever 1): the target seeded from a copy of the source's pages, the Classes: Unread, Facts, PgFacts, MyFacts.
 - `migkit/pieces.py` - Large values: one way for every engine to size, read, write and hash them (backlog P0-PARITY; R10 and R22 did it for PostgreSQL, MySQL and O Classes: Limit, Sizing, Hashed, hashing, Way, Sql.
 - `migkit/planner.py` - Which way each table goes, decided from facts about it, and why. Classes: Decision, Phase, Ewma, CatchUp, Overlap, TopologyRun.
+- `migkit/private_proof.py` - (no docstring) Classes: PrivateProofError, DebtSeverity, DebtCategory, VerificationStatus, SaltEpoch, SaltRotationManager.
 - `migkit/process_memory.py` - (no docstring) Classes: ProcessMemoryError, MemoryBudgetExceededError, ReconciliationRequiredError, UnverifiedResumeRefusedError, MemoryCategory, FailureClassification.
 - `migkit/progress_cause.py` - (no docstring) Classes: CausalPhase, EtaStatus, Checkpoint, RequiredUserAction, ProgressDiagnosis, RestoreDiagnostic.
 - `migkit/proxy.py` - Pooler and proxy coordinators and seamless cutover traffic shifting. Classes: ProxyShiftResult, BaseProxyCoordinator, PgBouncerCoordinator, ProxySQLCoordinator, EnvoyXdsCoordinator.
@@ -172,6 +177,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/revert.py` - The way back, handed over at the same moment as the way forward.
 - `migkit/ring_buffer.py` - (no docstring) Classes: ChunkCompressor, RecordBatch, DiskSegment, StoreAndForwardRingBuffer.
 - `migkit/rollback.py` - (no docstring) Classes: ExpandContractPhase, RollbackStrategy, AppVersionSpec, SchemaEvolutionStep, RecoveryArtifact, CurrentWriteState.
+- `migkit/rollback_set.py` - (no docstring) Classes: CyclicDependencyError, EffectNotFoundError, RollbackResolutionError, PostconditionStatus, CompensatingActionType, ForwardSafetyStatus.
 - `migkit/rowfilter.py` - A hop's row filter, read one way and said in every engine's own words (backlog P0-SCOPE.7).
 - `migkit/rowtext.py` - How a row becomes one string before it is hashed.
 - `migkit/rules.py` - Business-rule checks: the operator's own questions, asked of both sides.
@@ -199,6 +205,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/state.py` - Pluggable state backend, terraform-style. Classes: LocalStore, S3Store, Taken, S3RunState, Mirror, TailMirror.
 - `migkit/streamout.py` - Changes delivered as messages into a stream, in the shapes consumers expect (backlog 35): what a message is, whatever carries it - a Kafka t
 - `migkit/subset.py` - Copies for testing (backlog R23, 5): the rows chosen and every row they refer to, masked where the hop says, into a staging or developer dat Classes: Rule, Plan.
+- `migkit/support_reproducer.py` - (no docstring) Classes: PrivacyScanReport, PrivacyScanner, SyntheticFixture, SyntheticFixtureGenerator, DiagnosticBundle, SupportReproducer.
 - `migkit/tableengine.py` - A change of storage engine, made in the schema step and held to (backlog P0-SCENARIOS): MyISAM, Aria, MEMORY, ARCHIVE, CSV and MariaDB's own Classes: Traits, Change, Plan, Decided.
 - `migkit/tableway.py` - How each table gets to the target: one ladder an engine, one cost model a database, one climb a table. Classes: Way, Pick, Failed.
 - `migkit/tailctl.py` - A running change tail as the rest of migkit sees it, and the one loop every tail runs. Classes: Running, Pace.

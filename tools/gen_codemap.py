@@ -550,29 +550,29 @@ OUTSIDE = (("tools", "the generators, the full suite and the checks run"
 #: top-level modules of migkit/ by package; a module is in one package
 _BY_NAME = {
     "configuration": "hopkeys envkeys config addresses engineat clouds"
-                     " variants managed init",
+                     " variants managed init exit_portability",
     "scope": "rowfilter case result_scope resume_scope",
     "persistence": "state checkpoint durable repairlog revert audit digests"
                    " evidence session runlog kept anchor setaside claims"
-                   " shared snapshot_state",
+                   " shared snapshot_state control_upgrade",
     "safety": "redact egress tls approvals interlock fencing ownership"
-              " masking freeze leftovers lease",
+              " masking freeze leftovers lease lock_capability",
     "execution": "runner schedule throttle stall attempts ranges util"
                  " failpoint tunnel locks keepalive ack_lattice cancel_recovery"
                  " decomp_budget process_memory",
     "conversion": "canon canon_oracle rowtext render transforms nanotime intervals geo"
                   " vectors bsontype charsets commercial zones copybook"
                   " pieces ddl ddl_shield merkle schema schema_drift loadtext schemaformats described tally grants"
-                  " identity_semantics partial_images",
+                  " identity_semantics partial_images private_proof",
     "reporting": "verdict report wording diagnostics export"
                  " troubleshooting telemetry traces notify servicecheck query_guard"
-                 " progress_cause",
+                 " progress_cause support_reproducer",
     "decision": "decide costmodel jointplan factbook guarantees scanplan"
                 " tuning tune capabilities planner tableway repairways userways"
                 " scenarios legs sizing changedepth lacks sourcechange"
                 " bulkways ready cloud_readiness dba handwork rehearsal"
                 " faults model"
-                " machine topology waysaid workload advisors keyless offset_diag",
+                " machine topology waysaid workload advisors keyless offset_diag cost_envelope",
     "engines": "catalog pgslot binlog_marks binlog_payload logddl standby"
                " tailwhere quiet_source",
     "integrations": "tools tooluse toolversion cloudapi cloudseed"
@@ -587,7 +587,7 @@ _BY_NAME = {
                  " drainmark applyway replicasum rules leaves unchanged"
                  " streamout changetopic fleet second_reader proxy ring_buffer"
                  " ratchet rollback handoff_overlap"
-                 " backfill_race lob_transaction"
+                 " backfill_race lob_transaction rollback_set"
                  " dag_scheduler reverse autopilot",
     "cli": "cli guide ui estate",
 }
