@@ -596,7 +596,7 @@ _BY_NAME = {
                  " target_tuning_contract history_contract stream_metadata document_model"
                  " cache_semantics shard_ddl placement_advice"
                  " connector_capability agent_control release_intelligence incumbent_switch"
-                 " verify_method failure_budget storage_protocol anti_corruption",
+                 " verify_method failure_budget storage_protocol anti_corruption end_to_end_bar",
     "cli": "cli guide ui estate",
 }
 #: a subpackage, whole

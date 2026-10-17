@@ -22,7 +22,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - [`docs/agents/INVENTORY.md`](INVENTORY.md) - every file of `migkit/` and `tools/`: its responsibility package, owner domain, size, importers, the packages it reaches, the programs it wraps and the tests that reach it
 - [`docs/agents/LAYERS.md`](LAYERS.md) - the layering rule (a package imports its own rank and below) and every upward import still listed, with its reason
 
-## `migkit/` (254 modules)
+## `migkit/` (255 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/ack_lattice.py` - (no docstring) Classes: PipelineStage, MonotoneRegressionError, SourceAckRefusedError, CutoverRefusedError, CutoverAuthorization, PositionLattice.
@@ -101,6 +101,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/editions.py` - An edition change: the same engine, sold or built as another edition (backlog P0-SCENARIOS - "SQL Server Web edition to Datacenter (Enterpri Classes: Edition, Feature, Use.
 - `migkit/effect_checkpoint.py` - (no docstring) Classes: EngineSemantics, EffectCheckpointError, CheckpointReconstructionError, OwnershipViolationError, RetentionExpiredError, AtomicTransactionError.
 - `migkit/egress.py` - What leaves the machine, and the one gate it goes through (audit 2026-10-01, SEC12, SEC20, W8).
+- `migkit/end_to_end_bar.py` - Gate superiority claims on reproducible complete migrations (backlog RCH40, row 648). Classes: Contract, Run, Verdict, Coverage.
 - `migkit/engineat.py` - Which engine answers at an address that names none (backlog P0-MINIMAL-INPUT). Classes: Knock.
 - `migkit/envkeys.py` - Every environment variable migkit reads, in one place, and one way of reading each kind (audit 2026-10-01, K13). Classes: Var, Bad.
 - `migkit/estate.py` - The estate, not the hop (backlog W2): every database a machine or an account can reach, what moving each would take by migkit's own measurem Classes: Found.

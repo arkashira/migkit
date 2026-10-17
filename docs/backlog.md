@@ -12505,7 +12505,7 @@ Status discipline: Implemented and verified by the module and test named in the 
 
 ### RCH40.end-to-end-bar — Gate superiority claims on reproducible complete migrations
 
-**OPEN — P1; research-derived extension; size L; index row 648.**
+**PARTLY 2026-10-17 — P1; research-derived extension; size L; index row 648.**
 
 Existing parent/dependencies: P0-VALIDATE.unattended.proof, SMART-N25. Code surfaces: autonomous comparison, rehearsal, capabilities.
 
@@ -12515,7 +12515,7 @@ Proposed deeper mechanism: Extend existing endpoint-only acceptance with provide
 
 Acceptance evidence: At least PG-PG, MySQL-MySQL, PG-MySQL and MySQL-PG whole paths plus compound failure/restart; broader pair claims remain owned gaps until tested. No all-products/all-engines/fastest claims from a feature count.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status discipline: The claim gate is implemented in `migkit/end_to_end_bar.py` and tested; the real whole-path runs named in the acceptance evidence are still owed.
 
 ### NEED01.resume-scope — Persist filter and mapping identity across every restart
 

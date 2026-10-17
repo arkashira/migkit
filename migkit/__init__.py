@@ -21,6 +21,7 @@ __all__ = (
     "document_model",
     "dynamic_sql_tracer",
     "effect_checkpoint",
+    "end_to_end_bar",
     "etl_bi_waves",
     "exit_portability",
     "failure_budget",

@@ -10,7 +10,7 @@ None.
 
 | package | rank | files | lines | responsibility |
 |---|---|---|---|---|
-| configuration | 1 | 11 | 10478 | what a hop says: its keys, the environment, the endpoints and the addresses it is built from |
+| configuration | 1 | 11 | 10479 | what a hop says: its keys, the environment, the endpoints and the addresses it is built from |
 | scope | 2 | 5 | 3101 | which objects and rows a hop carries |
 | persistence | 3 | 18 | 8997 | state that outlives a process: checkpoints, the audit record, the run's own files, the undo |
 | safety | 4 | 12 | 12198 | who may write, what must not leak, what keeps a mover from writing twice |
@@ -20,7 +20,7 @@ None.
 | decision | 8 | 36 | 36710 | choosing: the rungs, the cost model, the joint plan, what each engine can do |
 | engines | 9 | 80 | 128671 | the contract every engine fills and each engine's own adapter |
 | integrations | 9 | 23 | 24368 | the programs, libraries and provider APIs migkit wraps, and the other tools it meets |
-| workflows | 10 | 78 | 99605 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
+| workflows | 10 | 79 | 99798 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
 | cli | 11 | 4 | 10423 | the command line and the guide that asks for two addresses |
 | web | 11 | 30 | 6451 | the web view and its API |
 | tools | - | 13 | 7186 | the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them |
@@ -30,7 +30,7 @@ None.
 
 | file | owner | lines | imported by | reaches | wraps | tests |
 |---|---|---|---|---|---|---|
-| `migkit/__init__.py` | - | 76 | 51: avrostream, barriers, binlog_marks, capabilities, cli (+46) | - | - | 819: conftest.py, holdkit.py, large_values_rig.py (+816) |
+| `migkit/__init__.py` | - | 77 | 52: avrostream, barriers, binlog_marks, capabilities, cli (+47) | - | - | 820: conftest.py, holdkit.py, large_values_rig.py (+817) |
 | `migkit/addresses.py` | - | 529 | 10: config, diagnostics, engineat, guide, hopkeys (+5) | configuration 2, engines 4 | - | 5: a_hop_file_is_checked_whole_at_load, a_hop_from_two_addresses, copybook_files_as_a_side_of_a_pair (+2) |
 | `migkit/clouds.py` | - | 337 | 13: case, cli, cloudseed, engines.kafka, engines.mysql (+8) | configuration 3 | - | 11: a_hop_from_two_addresses, a_managed_mysql_says_how_long_its_log_is_kept, a_managed_side_is_read_and_held_by_what_its_admin_may_do (+8) |
 | `migkit/config.py` | scope: Hop.excluded, Hop.carries, Hop.target_table_in | 2478 | 61: approvals, backupseed, carriers, changetopic, cli (+56) | configuration 14, conversion 1, engines 1, execution 13, integrations 4, persistence 3, reporting 1, safety 4 | - | 840: bigquery_fake.py, cosmos_fake.py, dynamodb_on_moto.py (+837) |
@@ -361,7 +361,7 @@ None.
 | `migkit/toolversion.py` | - | 268 | 5: engines.base, movers, runner, tools, unchanged | execution 4, integrations 1 | - | 6: handwork_pg, one_runner_for_every_program, the_install_is_pinned (+3) |
 | `migkit/workflow_exporter.py` | - | 176 | 1: integrations | configuration 1 | - | 1: the_folded_ha_and_workflow_ways |
 
-## workflows (78 files)
+## workflows (79 files)
 
 | file | owner | lines | imported by | reaches | wraps | tests |
 |---|---|---|---|---|---|---|
@@ -389,6 +389,7 @@ None.
 | `migkit/drift.py` | - | 385 | 10: cli, cutover, engines.hetero, engines.mssql, engines.mysql (+5) | engines 5, persistence 1, safety 1 | - | 9: a_check_says_what_changed_since_the_move, a_move_keeps_what_it_must, an_online_rewrites_working_tables_are_left_alone (+6) |
 | `migkit/dynamic_sql_tracer.py` | - | 1475 | 0 | - | - | 1: dynamic_sql_trace_app_dependencies |
 | `migkit/editions.py` | - | 1077 | 3: backupseed, case, upgrade | decision 4, engines 1, reporting 1, workflows 3 | - | 2: an_edition_change_on_sql_server, the_case_between_two_servers_is_held_first |
+| `migkit/end_to_end_bar.py` | - | 193 | 0 | configuration 2 | - | 1: end_to_end_bar_superiority_claims |
 | `migkit/etl_bi_waves.py` | - | 1177 | 0 | - | - | 1: etl_bi_wave_planner |
 | `migkit/failure_budget.py` | - | 1369 | 0 | decision 2, persistence 1 | - | 1: failure_budget_recovery_allocation |
 | `migkit/fleet.py` | - | 423 | 5: attempts, claims, ha, lease, ranges | execution 1, persistence 2, safety 1, workflows 1 | - | 4: a_standby_mover_takes_over_and_fences, every_sandbox_target_holds_the_fencing_number_its_own_way, takeover_is_used_and_topology_reads_the_hop (+1) |
