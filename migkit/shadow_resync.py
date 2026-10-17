@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import copy
 import hashlib
 import json
@@ -11,10 +13,16 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 
-from . import durable
+from . import decide, durable
+from .decide import Need, Rung
 
 
 class ShadowResyncError(Exception):
+    pass
+
+
+class JournalReadError(ShadowResyncError):
+    """Raised when swap journal exists on disk but cannot be read or parsed."""
     pass
 
 
@@ -53,6 +61,153 @@ class ResyncStrategy(str, Enum):
     FENCED_RANGE_REPAIR = "fenced_range_repair"
     SHADOW_TABLE_RESNAPSHOT = "shadow_table_resnapshot"
     WHOLE_RELOAD = "whole_reload"
+
+
+def resync_strategy_rungs() -> Tuple[Rung, ...]:
+    """Strategy selection rungs for shadow resync (Row 618)."""
+    return (
+        Rung(
+            "shadow_table_resnapshot",
+            "zero-downtime shadow table resnapshot with CDC buffer catchup and atomic table swap",
+            needs=(
+                Need(
+                    "atomic swap capability",
+                    lambda f: bool(f.get("supports_atomic_swap")),
+                    "target engine does not support atomic table swap",
+                ),
+                Need(
+                    "sufficient disk headroom",
+                    lambda f: bool(f.get("has_headroom")),
+                    "insufficient disk headroom for shadow table creation",
+                ),
+                Need(
+                    "unfenced divergence or schema drift",
+                    lambda f: bool(f.get("schema_drifted") or not f.get("has_divergent_ranges") or not f.get("within_range_threshold")),
+                    "divergence is bounded within range repair threshold and schema has not drifted",
+                ),
+            ),
+            because="zero-downtime shadow table resnapshot with CDC buffer catchup and atomic swap",
+        ),
+        Rung(
+            "fenced_range_repair",
+            "in-place fenced repair for bounded divergence ranges",
+            needs=(
+                Need(
+                    "divergent ranges identified",
+                    lambda f: bool(f.get("has_divergent_ranges")),
+                    "no divergent ranges available for selective repair",
+                ),
+                Need(
+                    "bounded row divergence",
+                    lambda f: bool(f.get("within_range_threshold")),
+                    "divergent rows exceed range repair threshold",
+                ),
+                Need(
+                    "no schema drift",
+                    lambda f: not bool(f.get("schema_drifted")),
+                    "schema has drifted; requires full table resnapshot",
+                ),
+            ),
+            because="fenced range repair selectively replaces divergent key ranges without rebuilding entire table",
+        ),
+        Rung(
+            "whole_table_reload",
+            "whole table copy and reload",
+            because="fallback whole reload when atomic swap or range repair are not admissible",
+        ),
+    )
+
+
+def shadow_resync_threshold_rungs() -> Tuple[Rung, ...]:
+    """Dynamic threshold and headroom envelope rungs (Row 618)."""
+    return (
+        Rung(
+            "configured_resync_thresholds",
+            "explicit thresholds configured via hop options or parameters",
+            needs=(
+                Need(
+                    "custom threshold options configured",
+                    lambda f: bool(f.get("has_custom_thresholds")),
+                    "no custom shadow resync thresholds configured",
+                ),
+            ),
+            because="operator specified custom divergence bounds, headroom multipliers, or retention TTL",
+        ),
+        Rung(
+            "adaptive_workload_thresholds",
+            "adaptive divergence and headroom thresholds scaled to table volume and host capacity",
+            needs=(
+                Need(
+                    "table volume metrics known",
+                    lambda f: bool(int(f.get("total_rows", 0)) > 0 and int(f.get("estimated_table_bytes", 0)) > 0),
+                    "table row count or storage size unknown",
+                ),
+            ),
+            because="dynamically scales range repair limit and buffer headroom to table volume",
+        ),
+        Rung(
+            "default_resync_thresholds",
+            "standard production baseline thresholds",
+            because="production baseline thresholds (50 rows / 5%, 2.0x headroom, 100MB min free, 3600s TTL)",
+        ),
+    )
+
+
+def decide_resync_thresholds(
+    metrics: ObjectMetrics,
+    available_disk_bytes: int,
+    hop: Any = None,
+    options: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    from . import decide
+    opts = {}
+    if hop is not None and hasattr(hop, "options") and isinstance(hop.options, dict):
+        opts.update(hop.options)
+    if options and isinstance(options, dict):
+        opts.update(options)
+
+    has_custom = bool(
+        "resync_range_max_rows" in opts
+        or "resync_range_ratio" in opts
+        or "shadow_headroom_factor" in opts
+        or "shadow_min_free_bytes" in opts
+        or "shadow_buffer_headroom_bytes" in opts
+        or "shadow_retention_ttl_seconds" in opts
+    )
+    facts = {
+        "has_custom_thresholds": has_custom,
+        "total_rows": metrics.total_rows,
+        "estimated_table_bytes": metrics.estimated_table_bytes,
+        "available_disk_bytes": available_disk_bytes,
+    }
+    choice = decide.climb("shadow resync thresholds", shadow_resync_threshold_rungs(), facts)
+    if choice.path == "configured_resync_thresholds":
+        max_rows = opts.get("resync_range_max_rows", max(50, int(opts.get("resync_range_ratio", 0.05) * max(1, metrics.total_rows))))
+        factor = float(opts.get("shadow_headroom_factor", 2.0))
+        min_free = int(opts.get("shadow_min_free_bytes", 100 * 1024 * 1024))
+        buf_bytes = int(opts.get("shadow_buffer_headroom_bytes", 10 * 1024 * 1024))
+        ttl = float(opts.get("shadow_retention_ttl_seconds", 3600.0))
+    elif choice.path == "adaptive_workload_thresholds":
+        max_rows = min(10000, max(50, int(0.02 * metrics.total_rows)))
+        factor = 1.5 if metrics.estimated_table_bytes > 10 * 1024 * 1024 * 1024 else 2.0
+        min_free = max(50 * 1024 * 1024, min(available_disk_bytes // 10, 500 * 1024 * 1024))
+        buf_bytes = min(64 * 1024 * 1024, max(5 * 1024 * 1024, int(0.01 * metrics.estimated_table_bytes)))
+        ttl = 3600.0
+    else:
+        max_rows = max(50, int(0.05 * max(1, metrics.total_rows)))
+        factor = 2.0
+        min_free = 100 * 1024 * 1024
+        buf_bytes = 10 * 1024 * 1024
+        ttl = 3600.0
+
+    return {
+        "max_range_rows": max_rows,
+        "range_max_rows": max_rows,
+        "range_ratio": 0.05,
+        "headroom_config": HeadroomConfig(headroom_factor=factor, min_free_bytes=min_free, buffer_headroom_bytes=buf_bytes),
+        "retention_policy": RollbackRetentionPolicy(retention_ttl_seconds=ttl),
+    }
+
 
 
 class ResyncPhase(str, Enum):
@@ -237,11 +392,58 @@ class SwapJournal:
             return None
         try:
             return durable.read_state(self.path, kind="journal")
-        except Exception:
-            return None
+        except (durable.Torn, Exception) as e:
+            raise JournalReadError(f"Failed to read swap journal at {self.path}: {e}") from e
 
 
-class InMemoryTableEngine:
+class ShadowTableEngine:
+    """Abstract base class for shadow table engines."""
+    disk_free_bytes: int
+
+    def create_table(self, name: str, columns: List[str], primary_key: str = "id", rows: Optional[List[Dict[str, Any]]] = None) -> None:
+        raise NotImplementedError
+
+    def table_exists(self, name: str) -> bool:
+        raise NotImplementedError
+
+    def drop_table(self, name: str) -> None:
+        raise NotImplementedError
+
+    def get_columns(self, name: str) -> List[str]:
+        raise NotImplementedError
+
+    def get_rows(self, name: str) -> List[Dict[str, Any]]:
+        raise NotImplementedError
+
+    def set_rows(self, name: str, rows: List[Dict[str, Any]]) -> None:
+        raise NotImplementedError
+
+    def rename_table(self, old_name: str, new_name: str) -> None:
+        raise NotImplementedError
+
+    def execute_atomic_swap(self, live_table: str, shadow_table: str, old_table: str, journal: Optional[SwapJournal] = None, simulate_crash_stage: Optional[str] = None) -> None:
+        raise NotImplementedError
+
+    def repair_fenced_ranges(self, table_name: str, ranges: Sequence[Tuple[Any, Any]], rows: Sequence[Dict[str, Any]]) -> None:
+        raise NotImplementedError
+
+    def add_foreign_key(self, table: str, fk_name: str, column: str, ref_table: str, ref_column: str) -> None:
+        pass
+
+    def get_foreign_keys(self, table: str) -> List[Dict[str, Any]]:
+        return []
+
+    def has_foreign_key(self, table: str, fk_name: str) -> bool:
+        return False
+
+    def add_binding(self, table: str, binding_name: str) -> None:
+        pass
+
+    def get_bindings(self, table: str) -> Set[str]:
+        return set()
+
+
+class InMemoryTableEngine(ShadowTableEngine):
     def __init__(self, disk_free_bytes: int = 1024 * 1024 * 1024):
         self.disk_free_bytes = disk_free_bytes
         self._tables: Dict[str, Dict[str, Any]] = {}
@@ -384,6 +586,218 @@ class InMemoryTableEngine:
             self._tables[table_name]["rows"][r[pk]] = copy.deepcopy(r)
 
 
+class DBAPIShadowTableEngine(ShadowTableEngine):
+    """Real DB-API 2.0 cursor execution engine for PostgreSQL, MySQL, and SQLite."""
+
+    def __init__(self, connection: Any, dialect: str = "sqlite", disk_free_bytes: int = 1024 * 1024 * 1024):
+        self.connection = connection
+        self.dialect = str(dialect).lower()
+        self.disk_free_bytes = disk_free_bytes
+        self._foreign_keys: Dict[str, List[Dict[str, Any]]] = {}
+        self._bindings: Dict[str, Set[str]] = {}
+
+    def _q(self, ident: str) -> str:
+        s = str(ident)
+        if self.dialect in ("mysql", "mariadb"):
+            return "`" + s.replace("`", "``") + "`"
+        return '"' + s.replace('"', '""') + '"'
+
+    def table_exists(self, name: str) -> bool:
+        cur = self.connection.cursor()
+        try:
+            cur.execute(f"SELECT 1 FROM {self._q(name)} WHERE 1 = 0")
+            return True
+        except Exception:
+            if hasattr(self.connection, "rollback"):
+                try:
+                    self.connection.rollback()
+                except Exception:
+                    pass
+            return False
+        finally:
+            if hasattr(cur, "close"):
+                cur.close()
+
+    def create_table(self, name: str, columns: List[str], primary_key: str = "id", rows: Optional[List[Dict[str, Any]]] = None) -> None:
+        col_defs = []
+        for c in columns:
+            if c == primary_key:
+                col_defs.append(f"{self._q(c)} INTEGER PRIMARY KEY" if self.dialect == "sqlite" else f"{self._q(c)} INT PRIMARY KEY")
+            else:
+                col_defs.append(f"{self._q(c)} TEXT")
+        sql = f"CREATE TABLE {self._q(name)} ({', '.join(col_defs)})"
+        cur = self.connection.cursor()
+        try:
+            cur.execute(sql)
+            if hasattr(self.connection, "commit"):
+                self.connection.commit()
+            if rows:
+                self.set_rows(name, rows)
+        finally:
+            if hasattr(cur, "close"):
+                cur.close()
+
+    def drop_table(self, name: str) -> None:
+        cur = self.connection.cursor()
+        try:
+            cur.execute(f"DROP TABLE IF EXISTS {self._q(name)}")
+            if hasattr(self.connection, "commit"):
+                self.connection.commit()
+        finally:
+            if hasattr(cur, "close"):
+                cur.close()
+
+    def get_columns(self, name: str) -> List[str]:
+        if not self.table_exists(name):
+            return []
+        cur = self.connection.cursor()
+        try:
+            cur.execute(f"SELECT * FROM {self._q(name)} WHERE 1 = 0")
+            if cur.description:
+                return [d[0] for d in cur.description]
+            return []
+        finally:
+            if hasattr(cur, "close"):
+                cur.close()
+
+    def get_rows(self, name: str) -> List[Dict[str, Any]]:
+        if not self.table_exists(name):
+            return []
+        cur = self.connection.cursor()
+        try:
+            cur.execute(f"SELECT * FROM {self._q(name)}")
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+        finally:
+            if hasattr(cur, "close"):
+                cur.close()
+
+    def set_rows(self, name: str, rows: List[Dict[str, Any]]) -> None:
+        cur = self.connection.cursor()
+        try:
+            cur.execute(f"DELETE FROM {self._q(name)}")
+            if rows:
+                cols = list(rows[0].keys())
+                col_str = ", ".join(self._q(c) for c in cols)
+                val_str = ", ".join(["?"] * len(cols)) if self.dialect == "sqlite" else ", ".join(["%s"] * len(cols))
+                sql = f"INSERT INTO {self._q(name)} ({col_str}) VALUES ({val_str})"
+                params = [[r.get(c) for c in cols] for r in rows]
+                cur.executemany(sql, params)
+            if hasattr(self.connection, "commit"):
+                self.connection.commit()
+        finally:
+            if hasattr(cur, "close"):
+                cur.close()
+
+    def rename_table(self, old_name: str, new_name: str) -> None:
+        cur = self.connection.cursor()
+        try:
+            if self.dialect in ("mysql", "mariadb"):
+                cur.execute(f"RENAME TABLE {self._q(old_name)} TO {self._q(new_name)}")
+            else:
+                cur.execute(f"ALTER TABLE {self._q(old_name)} RENAME TO {self._q(new_name)}")
+            if hasattr(self.connection, "commit"):
+                self.connection.commit()
+        finally:
+            if hasattr(cur, "close"):
+                cur.close()
+
+    def execute_atomic_swap(
+        self,
+        live_table: str,
+        shadow_table: str,
+        old_table: str,
+        journal: Optional[SwapJournal] = None,
+        simulate_crash_stage: Optional[str] = None,
+    ) -> None:
+        if simulate_crash_stage == "BEFORE_SWAP":
+            if journal:
+                jstate = journal.read() or {}
+                jstate["stage"] = SwapJournal.STAGE_BEFORE_SWAP
+                journal.write(jstate)
+            raise AtomicSwapCrashError("BEFORE_SWAP")
+
+        if journal:
+            jstate = journal.read() or {}
+            jstate["stage"] = SwapJournal.STAGE_AFTER_RENAME_LIVE
+            journal.write(jstate)
+
+        cur = self.connection.cursor()
+        try:
+            if self.dialect in ("mysql", "mariadb"):
+                if simulate_crash_stage == "AFTER_RENAME_LIVE":
+                    cur.execute(f"RENAME TABLE {self._q(live_table)} TO {self._q(old_table)}")
+                    if hasattr(self.connection, "commit"):
+                        self.connection.commit()
+                    raise AtomicSwapCrashError("AFTER_RENAME_LIVE")
+                cur.execute(f"RENAME TABLE {self._q(live_table)} TO {self._q(old_table)}, {self._q(shadow_table)} TO {self._q(live_table)}")
+                if hasattr(self.connection, "commit"):
+                    self.connection.commit()
+            else:
+                cur.execute(f"ALTER TABLE {self._q(live_table)} RENAME TO {self._q(old_table)}")
+                if simulate_crash_stage == "AFTER_RENAME_LIVE":
+                    if hasattr(self.connection, "commit"):
+                        self.connection.commit()
+                    raise AtomicSwapCrashError("AFTER_RENAME_LIVE")
+                cur.execute(f"ALTER TABLE {self._q(shadow_table)} RENAME TO {self._q(live_table)}")
+                if hasattr(self.connection, "commit"):
+                    self.connection.commit()
+
+            if simulate_crash_stage == "AFTER_RENAME_SHADOW":
+                if journal:
+                    jstate = journal.read() or {}
+                    jstate["stage"] = SwapJournal.STAGE_AFTER_RENAME_SHADOW
+                    journal.write(jstate)
+                raise AtomicSwapCrashError("AFTER_RENAME_SHADOW")
+
+            if journal:
+                jstate = journal.read() or {}
+                jstate["stage"] = SwapJournal.STAGE_COMPLETED
+                journal.write(jstate)
+        finally:
+            if hasattr(cur, "close"):
+                cur.close()
+
+    def repair_fenced_ranges(
+        self,
+        table_name: str,
+        ranges: Sequence[Tuple[Any, Any]],
+        rows: Sequence[Dict[str, Any]],
+    ) -> None:
+        if not rows or not self.table_exists(table_name):
+            return
+        cur = self.connection.cursor()
+        try:
+            for lo, hi in ranges:
+                q = "?" if self.dialect == "sqlite" else "%s"
+                cur.execute(f"DELETE FROM {self._q(table_name)} WHERE id >= {q} AND id <= {q}", (lo, hi))
+            cols = list(rows[0].keys())
+            col_str = ", ".join(self._q(c) for c in cols)
+            val_str = ", ".join(["?"] * len(cols)) if self.dialect == "sqlite" else ", ".join(["%s"] * len(cols))
+            sql = f"INSERT INTO {self._q(table_name)} ({col_str}) VALUES ({val_str})"
+            cur.executemany(sql, [[r.get(c) for c in cols] for r in rows])
+            if hasattr(self.connection, "commit"):
+                self.connection.commit()
+        finally:
+            if hasattr(cur, "close"):
+                cur.close()
+
+    def add_foreign_key(self, table: str, fk_name: str, column: str, ref_table: str, ref_column: str) -> None:
+        self._foreign_keys.setdefault(table, []).append({"name": fk_name, "column": column, "ref_table": ref_table, "ref_column": ref_column})
+
+    def get_foreign_keys(self, table: str) -> List[Dict[str, Any]]:
+        return list(self._foreign_keys.get(table, []))
+
+    def has_foreign_key(self, table: str, fk_name: str) -> bool:
+        return any(fk["name"] == fk_name for fk in self._foreign_keys.get(table, []))
+
+    def add_binding(self, table: str, binding_name: str) -> None:
+        self._bindings.setdefault(table, set()).add(binding_name)
+
+    def get_bindings(self, table: str) -> Set[str]:
+        return set(self._bindings.get(table, set()))
+
+
 class ShadowResyncCoordinator:
     def __init__(
         self,
@@ -410,30 +824,27 @@ class ShadowResyncCoordinator:
         if metrics.force_strategy:
             return metrics.force_strategy
 
-        if not metrics.supports_atomic_swap:
-            if (
-                metrics.divergent_ranges
-                and metrics.divergent_rows <= max(50, int(0.05 * max(1, metrics.total_rows)))
-                and not metrics.schema_drifted
-            ):
-                return ResyncStrategy.FENCED_RANGE_REPAIR
-            return ResyncStrategy.WHOLE_RELOAD
+        thresholds = decide_resync_thresholds(metrics, available_disk_bytes)
+        max_rows = thresholds.get("range_max_rows", 50)
+        ratio = thresholds.get("range_ratio", 0.05)
+        limit = max(max_rows, int(ratio * max(1, metrics.total_rows)))
+        within_range = bool(metrics.divergent_rows <= limit)
+        has_headroom, _, _ = self.check_headroom(metrics, available_disk_bytes)
 
-        if metrics.schema_drifted:
+        facts = {
+            "supports_atomic_swap": bool(metrics.supports_atomic_swap),
+            "has_headroom": bool(has_headroom or not self.allow_whole_reload_fallback),
+            "schema_drifted": bool(metrics.schema_drifted),
+            "within_range_threshold": within_range,
+            "has_divergent_ranges": bool(metrics.divergent_ranges),
+        }
+        choice = decide.climb("resync strategy selection", resync_strategy_rungs(), facts)
+        if choice.path == "shadow_table_resnapshot":
             return ResyncStrategy.SHADOW_TABLE_RESNAPSHOT
-
-        if (
-            metrics.divergent_ranges
-            and metrics.divergent_rows <= max(50, int(0.05 * max(1, metrics.total_rows)))
-        ):
+        elif choice.path == "fenced_range_repair":
             return ResyncStrategy.FENCED_RANGE_REPAIR
-
-        if self.allow_whole_reload_fallback:
-            has_headroom, _, _ = self.check_headroom(metrics, available_disk_bytes)
-            if not has_headroom:
-                return ResyncStrategy.WHOLE_RELOAD
-
-        return ResyncStrategy.SHADOW_TABLE_RESNAPSHOT
+        else:
+            return ResyncStrategy.WHOLE_RELOAD
 
     def check_headroom(
         self,

@@ -250,7 +250,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/servicecheck.py` - What another tool's own check said, held table by table against what migkit found (backlog P0-SCOPE.5). Classes: Claims.
 - `migkit/session.py` - One run of migkit: the command an operator started on a hop, and what is kept of it (backlog R23.1, R23.8, R23.10). Classes: Decisions.
 - `migkit/setaside.py` - What a load takes off a target to put back afterwards, kept on disk per process. Classes: SetAside.
-- `migkit/shadow_resync.py` - (no docstring) Classes: ShadowResyncError, InsufficientHeadroomError, ValidationFailedError, AtomicSwapCrashError, RollbackError, InvalidStrategyError.
+- `migkit/shadow_resync.py` - (no docstring) Classes: ShadowResyncError, JournalReadError, InsufficientHeadroomError, ValidationFailedError, AtomicSwapCrashError, RollbackError.
 - `migkit/shard_ddl.py` - (no docstring) Classes: CareBadge, DDLProgressMode, BarrierStatus, ShardDDLError, UnrepresentableShardDDLError, ShardDeadlockError.
 - `migkit/shared.py` - Where the machines of one hop agree: records each written only over the version that was read (backlog W1). Classes: Directory, Target.
 - `migkit/ship.py` - A seed shipped on media, where the link is too narrow to copy the data in time (the owner's scope, 2026-10-01: "data too large for the link" Classes: Unfit, BadPart, Different, Times, Full, Done.

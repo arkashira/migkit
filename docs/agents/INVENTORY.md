@@ -20,7 +20,7 @@ None.
 | decision | 8 | 36 | 36941 | choosing: the rungs, the cost model, the joint plan, what each engine can do |
 | engines | 9 | 80 | 128670 | the contract every engine fills and each engine's own adapter |
 | integrations | 9 | 23 | 24368 | the programs, libraries and provider APIs migkit wraps, and the other tools it meets |
-| workflows | 10 | 111 | 145903 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
+| workflows | 10 | 111 | 146337 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
 | cli | 11 | 4 | 10464 | the command line and the guide that asks for two addresses |
 | web | 11 | 30 | 6451 | the web view and its API |
 | tools | - | 13 | 7195 | the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them |
@@ -30,7 +30,7 @@ None.
 
 | file | owner | lines | imported by | reaches | wraps | tests |
 |---|---|---|---|---|---|---|
-| `migkit/__init__.py` | - | 109 | 53: avrostream, barriers, binlog_marks, capabilities, cli (+48) | - | - | 856: conftest.py, holdkit.py, large_values_rig.py (+853) |
+| `migkit/__init__.py` | - | 109 | 53: avrostream, barriers, binlog_marks, capabilities, cli (+48) | - | - | 857: conftest.py, holdkit.py, large_values_rig.py (+854) |
 | `migkit/addresses.py` | - | 529 | 10: config, diagnostics, engineat, guide, hopkeys (+5) | configuration 2, engines 4 | - | 5: a_hop_file_is_checked_whole_at_load, a_hop_from_two_addresses, copybook_files_as_a_side_of_a_pair (+2) |
 | `migkit/clouds.py` | - | 337 | 13: case, cli, cloudseed, engines.kafka, engines.mysql (+8) | configuration 3 | - | 11: a_hop_from_two_addresses, a_managed_mysql_says_how_long_its_log_is_kept, a_managed_side_is_read_and_held_by_what_its_admin_may_do (+8) |
 | `migkit/config.py` | scope: Hop.excluded, Hop.carries, Hop.target_table_in | 2478 | 61: approvals, backupseed, carriers, changetopic, cli (+56) | configuration 14, conversion 1, engines 1, execution 13, integrations 4, persistence 3, reporting 1, safety 4 | - | 840: bigquery_fake.py, cosmos_fake.py, dynamodb_on_moto.py (+837) |
@@ -220,7 +220,7 @@ None.
 | `migkit/cost_envelope.py` | - | 608 | 1: cli | - | - | 1: cost_envelope_enforcement |
 | `migkit/costmodel.py` | - | 781 | 10: decide, engines.generic, incumbent_switch, legs, marks (+5) | configuration 2, decision 2, engines 4, persistence 2, reporting 1, workflows 1 | - | 12: a_managed_services_own_operation_is_ranked_by_its_eligibility, a_mysql_copy_passes_rows_server_to_server, a_way_is_costed_by_what_the_unit_is (+9) |
 | `migkit/dba.py` | - | 1502 | 6: cli, guide, managed, physical, ready (+1) | configuration 3, decision 1, engines 8, integrations 1 | - | 11: a_managed_mysql_says_how_long_its_log_is_kept, a_managed_side_is_read_and_held_by_what_its_admin_may_do, a_source_change_is_offered_never_assumed (+8) |
-| `migkit/decide.py` | decision: every choice is a rung | 7774 | 178: action_compiler, advisors, agent_control, anchor, application_readiness (+173) | configuration 1, conversion 5, decision 34, engines 5, persistence 4 | - | 251: rung_branches.py, a_batch_that_is_not_a_page_is_the_decisions, a_clone_plugin_offer_on_mysql (+248) |
+| `migkit/decide.py` | decision: every choice is a rung | 7774 | 179: action_compiler, advisors, agent_control, anchor, application_readiness (+174) | configuration 1, conversion 5, decision 34, engines 5, persistence 4 | - | 252: rung_branches.py, a_batch_that_is_not_a_page_is_the_decisions, a_clone_plugin_offer_on_mysql (+249) |
 | `migkit/factbook.py` | - | 483 | 5: cli, decide, fact_validity, jointplan, waysaid | - | - | 1: every_fact_is_declared |
 | `migkit/faults.py` | - | 801 | 17: autonomous, causal_diagnosis, cli, engines.generic, engines.hetero (+12) | decision 2, execution 3, reporting 1 | - | 10: a_copier_reconciles_and_retunes, a_failed_bulk_copy_falls_back_to_the_range_copier_on_mysql, a_failure_is_told_by_what_it_did (+7) |
 | `migkit/guarantees.py` | - | 682 | 10: apply_contract, cli, decide, engines.base, execution_contract (+5) | - | - | 8: a_finished_tables_indexes_build_while_the_next_copies, a_move_keeps_what_it_must, every_way_is_weighed (+5) |
@@ -436,7 +436,7 @@ None.
 | `migkit/query_regression.py` | - | 1065 | 0 | - | - | 1: query_regression_performance_envelope |
 | `migkit/ratchet.py` | - | 386 | 3: cutover, engines.mysql, engines.postgres | configuration 2 | - | 1: pre_syncback_headroom_ratchet |
 | `migkit/release_intelligence.py` | - | 1978 | 0 | decision 1 | - | 1: release_intelligence_falsifiable |
-| `migkit/repair_fence.py` | - | 1391 | 0 | decision 1, persistence 1 | - | 1: repair_fence_cdc_coordination |
+| `migkit/repair_fence.py` | - | 1414 | 0 | decision 1, persistence 1, workflows 1 | - | 1: repair_fence_cdc_coordination |
 | `migkit/replicasum.py` | - | 606 | 2: engines.mysql, tooluse | decision 2, engines 1, execution 6, integrations 3, workflows 2 | pt-table-checksum | 3: a_native_replica_is_proved_two_ways, an_untimed_program_gets_one_bounded_trial, the_pieces_repair_and_replica_checksum_rungs_hold_and_refuse |
 | `migkit/reshard.py` | - | 2748 | 7: cli, consolidate, hopkeys, scenarios, shard_ddl (+2) | configuration 1, conversion 3, decision 9, engines 11, execution 1, persistence 4, safety 6, workflows 22 | - | 7: a_cluster_target_is_loaded_as_it_spreads_its_rows, a_split_and_a_consolidation_are_followed_and_cut_over_as_one, decided_scenarios (+4) |
 | `migkit/resource_ownership.py` | - | 971 | 0 | decision 1, persistence 1, safety 1 | - | 1: resource_ownership_lifecycle |
@@ -451,7 +451,7 @@ None.
 | `migkit/rules.py` | - | 129 | 1: engines.base | conversion 1, engines 1 | - | 1: business_rules |
 | `migkit/second_reader.py` | - | 816 | 7: cli, engines.base, engines.hetero, engines.mysql, engines.postgres (+2) | configuration 1, decision 2, engines 1, execution 3, safety 1 | datacompy, dvt | 10: a_run_writes_every_step_back_as_it_ends, every_verifier_feature_is_used_or_explained, second_reader (+7) |
 | `migkit/semantic_negotiation.py` | - | 1570 | 0 | decision 1, persistence 1, safety 1 | - | 1: semantic_negotiation_cross_engine |
-| `migkit/shadow_resync.py` | - | 782 | 0 | persistence 1 | - | 1: shadow_resnapshot_atomic_swap |
+| `migkit/shadow_resync.py` | - | 1193 | 1: repair_fence | decision 4, persistence 1 | - | 2: shadow_resnapshot_atomic_swap, shadow_resync_lifecycle |
 | `migkit/shard_ddl.py` | - | 1899 | 0 | conversion 6, decision 6, workflows 1 | - | 1: shard_ddl_convergence |
 | `migkit/snapshot_watermark.py` | - | 1131 | 0 | persistence 1, workflows 3 | - | 1: snapshot_watermark_stream_handoff |
 | `migkit/source_role.py` | - | 1503 | 0 | - | - | 1: replica_snapshot_valid_source_role |

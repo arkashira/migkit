@@ -1389,3 +1389,26 @@ class FencedRepairCoordinator:
             summary=f"recovery aborted: {choice.reason}",
         )
         return choice, epoch.phase, report
+
+
+def coordinate_repair_resync(
+    target_store: TargetTableStore,
+    engine: Any,
+    metrics: Any,
+    source_snapshot: Sequence[Dict[str, Any]],
+    cdc_events: Optional[Sequence[Any]] = None,
+    start_lsn: int = 0,
+    shadow_coordinator: Optional[Any] = None,
+) -> Any:
+    """Coordinate zero-downtime shadow table resync when repair fence requires whole reload (Row 618: RCH10)."""
+    from . import shadow_resync
+    if shadow_coordinator is None:
+        shadow_coordinator = shadow_resync.ShadowResyncCoordinator()
+    return shadow_coordinator.coordinate_resync(
+        engine=engine,
+        metrics=metrics,
+        source_snapshot=source_snapshot,
+        cdc_events=cdc_events,
+        start_lsn=start_lsn,
+    )
+
