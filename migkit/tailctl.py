@@ -880,6 +880,27 @@ def apply_unit(eng, db, at, changes, apply, log=None):
                 log(f"epoch plan {res_plan.plan_id}: epoch {res_plan.from_epoch}->{res_plan.to_epoch} {res_plan.status}")
         if epoch_ddl:
             changes = [c for c in changes if c not in epoch_ddl]
+    conflict_resolver = getattr(eng, "conflict_resolver", None)
+    if conflict_resolver is None and hasattr(eng, "hop"):
+        conflict_resolver = getattr(eng.hop, "conflict_resolver", None)
+    if conflict_resolver is not None:
+        if hasattr(conflict_resolver, "resolve_batch"):
+            changes = conflict_resolver.resolve_batch(changes, db=db, at=at, log=log)
+        elif hasattr(conflict_resolver, "resolve_write"):
+            from .conflict_semantics import ConflictResolver
+            _res = ConflictResolver(node_id=getattr(conflict_resolver, "node_id", "local"))
+            _res.policies = getattr(conflict_resolver, "policies", {})
+            _res.tombstones = getattr(conflict_resolver, "tombstones", _res.tombstones)
+            _res.audit_ledger = getattr(conflict_resolver, "audit_ledger", _res.audit_ledger)
+            _res._applied_tx_digests = getattr(conflict_resolver, "_applied_tx_digests", _res._applied_tx_digests)
+            _res.resolve_write = conflict_resolver.resolve_write
+            changes = _res.resolve_batch(changes, db=db, at=at, log=log)
+    retention_checker = getattr(eng, "retention_controller", None)
+    if retention_checker is None and hasattr(eng, "hop"):
+        retention_checker = getattr(eng.hop, "retention_controller", None)
+    if retention_checker is not None:
+        from .retention_controller import audit_spool_retention_fence
+        audit_spool_retention_fence(retention_checker, hop_name=getattr(eng, "name", "apply"))
     checkpointer = getattr(eng, "effect_checkpointer", None)
     if checkpointer is None and hasattr(eng, "hop"):
         checkpointer = getattr(eng.hop, "effect_checkpointer", None)

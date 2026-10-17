@@ -6,6 +6,11 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from migkit.decide import Need, Rung
+
+DEFAULT_CLOCK_SKEW_TOLERANCE_SECONDS: float = 0.5
+DEFAULT_TOMBSTONE_HORIZON_SECONDS: float = 86400.0
+
 
 class CareBadge(str, enum.Enum):
     ACTION = "ACTION"
@@ -39,6 +44,135 @@ class ConflictType(str, enum.Enum):
     TYPE_ALGEBRA_MISMATCH = "type_algebra_mismatch"
     ABSENT_BEFORE_IMAGE = "absent_before_image"
     HEURISTIC_PRECEDENCE_REJECTED = "heuristic_precedence_rejected"
+
+
+class ConflictSemanticsError(Exception):
+    """Base exception for replication conflict semantics."""
+    pass
+
+
+class UnresolvedConflictError(ConflictSemanticsError):
+    """Raised when an unresolvable data conflict is encountered on the apply path."""
+    def __init__(self, message: str, audit_record: Optional["ConflictAuditRecord"] = None):
+        super().__init__(message)
+        self.message = message
+        self.audit_record = audit_record
+
+
+def conflict_resolution_rungs() -> Tuple[Rung, ...]:
+    """Decide ladder for replication conflict resolution (Row 622, RCH14)."""
+    return (
+        Rung(
+            "cyclic_echo_resolution",
+            "suppress cyclic replication echo or previously applied transaction digest",
+            needs=(
+                Need(
+                    "cyclic echo or duplicate transaction detected",
+                    lambda f: bool(f.get("is_cyclic_echo")),
+                    "incoming write is not a cyclic replication echo",
+                ),
+            ),
+            because="incoming write originated on this node or matches an already applied transaction digest",
+        ),
+        Rung(
+            "tombstone_delete_resolution",
+            "delete row and record tombstone with measured retention horizon",
+            needs=(
+                Need(
+                    "delete operation requested",
+                    lambda f: bool(f.get("is_delete")),
+                    "operation is not a delete",
+                ),
+            ),
+            because="delete operation establishes tombstone record or idempotent delete",
+        ),
+        Rung(
+            "tombstone_reinsert_resolution",
+            "evaluate reinsert or stale update against active tombstone within measured horizon",
+            needs=(
+                Need(
+                    "prior tombstone exists for key",
+                    lambda f: bool(f.get("has_tombstone")),
+                    "no prior tombstone exists for key",
+                ),
+                Need(
+                    "tombstone within measured horizon",
+                    lambda f: bool(f.get("within_horizon")),
+                    "tombstone age exceeds measured retention horizon",
+                ),
+            ),
+            because="active tombstone within measured horizon permits valid reinsert or suppresses stale update",
+        ),
+        Rung(
+            "clean_insert_resolution",
+            "apply clean insert for non-existent key",
+            needs=(
+                Need(
+                    "clean insert into absent row",
+                    lambda f: bool(f.get("is_clean_insert")),
+                    "row already exists or operation is not an insert",
+                ),
+            ),
+            because="clean insert into non-existent key creates new row without prior state conflict",
+        ),
+        Rung(
+            "causal_vector_resolution",
+            "resolve write ordering via causal version vectors",
+            needs=(
+                Need(
+                    "version vector causality available",
+                    lambda f: bool(f.get("has_version_vectors")),
+                    "version vectors not provided for both local and incoming states",
+                ),
+                Need(
+                    "causal dominance established",
+                    lambda f: bool(f.get("causally_ordered")),
+                    "version vectors are concurrent without strict dominance",
+                ),
+            ),
+            because="version vectors establish strict happens-before causal ordering",
+        ),
+        Rung(
+            "serial_before_image_resolution",
+            "verify serial write progression against matching before-image",
+            needs=(
+                Need(
+                    "verifiable before-image present",
+                    lambda f: bool(f.get("has_before_image")),
+                    "before-image is missing or marked absent",
+                ),
+                Need(
+                    "before-image matches current local row",
+                    lambda f: bool(f.get("before_image_matches")),
+                    "before-image does not match current local row state",
+                ),
+            ),
+            because="serial progression verified; before-image matches current local row state exactly",
+        ),
+        Rung(
+            "commutative_column_merge_resolution",
+            "merge concurrent modifications via convergent CRDT algebra and bounded clock skew",
+            needs=(
+                Need(
+                    "commutative merge capable",
+                    lambda f: bool(f.get("can_commutative_merge")),
+                    "cannot merge concurrent writes due to noncommutative columns, type mismatch, or clock skew anomaly",
+                ),
+            ),
+            because="convergent CRDT algebra and bounded clock skew permit deterministic column-level merge",
+        ),
+        Rung(
+            "unresolved_conflict_audit",
+            "record unresolved conflict in audit ledger with ACTION care badge",
+            because="fallback preservation of conflicting noncommutative writes or expired tombstones in audit ledger",
+        ),
+    )
+
+
+def decide_conflict_resolution(facts: Dict[str, Any]) -> Any:
+    """Climb the conflict_resolution_rungs decide ladder with measured facts."""
+    from . import decide
+    return decide.climb("conflict resolution", conflict_resolution_rungs(), facts)
 
 
 @dataclass
@@ -536,7 +670,64 @@ class ConflictSemanticsEngine:
         reject_heuristic_server_precedence(origin_a, origin_b)
         hash_a = hashlib.sha256(f"{origin_a}:{json.dumps(val_a, sort_keys=True, default=str)}".encode()).digest()
         hash_b = hashlib.sha256(f"{origin_b}:{json.dumps(val_b, sort_keys=True, default=str)}".encode()).digest()
-        return hash_a > hash_b
+    def _evaluate_column_merge_capability(
+        self,
+        table: str,
+        local_row: Optional[Dict[str, Any]],
+        incoming_row: Optional[Dict[str, Any]],
+        before_image: Optional[BeforeImage],
+        policy: TableConflictPolicy,
+        incoming_hlc: Optional[HybridLogicalClock],
+        local_hlc: Optional[HybridLogicalClock],
+    ) -> Tuple[bool, Dict[str, Any]]:
+        details: Dict[str, Any] = {
+            "unresolved_columns": [],
+            "skew_anomalies": [],
+            "type_mismatches": [],
+            "non_commutative": [],
+            "absent_before_image": False,
+        }
+        if local_row is None or incoming_row is None:
+            return (False, details)
+        if before_image is None or before_image.is_absent:
+            if policy.require_before_image:
+                details["absent_before_image"] = True
+                details["unresolved_columns"] = list((incoming_row or {}).keys())
+                return (False, details)
+        before_cols = before_image.columns if (before_image and not before_image.is_absent) else {}
+        all_keys = set(local_row.keys()) | set(incoming_row.keys())
+        for col in all_keys:
+            val_local = local_row.get(col)
+            val_in = incoming_row.get(col)
+            if val_local == val_in:
+                continue
+            val_before = before_cols.get(col)
+            local_changed = (val_local != val_before) if before_cols else True
+            incoming_changed = (val_in != val_before) if before_cols else True
+            if not local_changed or not incoming_changed:
+                continue
+            col_policy = policy.get_column_policy(col)
+            if not col_policy.validate_applicability(val_in) or not col_policy.validate_applicability(val_local):
+                details["type_mismatches"].append(col)
+                details["unresolved_columns"].append(col)
+                continue
+            algebra = col_policy.algebra
+            if algebra == MergeAlgebraKind.COMMUTATIVE_LWW_REGISTER:
+                if not col_policy.verifiable_clock or incoming_hlc is None or local_hlc is None:
+                    details["unresolved_columns"].append(col)
+                    continue
+                cmp_val, skew_exceeded = incoming_hlc.compare(
+                    local_hlc, max_skew_seconds=policy.clock_skew_tolerance_seconds
+                )
+                if skew_exceeded:
+                    details["skew_anomalies"].append(col)
+                    details["unresolved_columns"].append(col)
+                    continue
+            elif algebra == MergeAlgebraKind.NON_COMMUTATIVE_STRICT:
+                details["non_commutative"].append(col)
+                details["unresolved_columns"].append(col)
+        can_merge = len(details["unresolved_columns"]) == 0
+        return (can_merge, details)
 
     def resolve_write(
         self,
@@ -566,27 +757,65 @@ class ConflictSemanticsEngine:
                 incoming_origin.origin_id, local_origin.origin_id
             )
 
-        if tx_digest:
-            if tx_digest in self._applied_tx_digests:
-                rec = ConflictAuditRecord(
-                    audit_id=audit_id,
-                    table=table,
-                    key=key,
-                    conflict_type=ConflictType.CYCLIC_ECHO.value,
-                    care_badge=CareBadge.BENIGN.value,
-                    resolved=True,
-                    local_state=local_row,
-                    incoming_state=incoming_row,
-                    before_image=before_image.to_dict() if before_image else None,
-                    resolved_state=local_row,
-                    resolution_reason="Cyclic replication echo suppressed via transaction digest.",
-                    timestamp=current_time,
-                    metadata={"tx_digest": tx_digest},
-                )
-                self.audit_ledger.record(rec)
-                return (local_row, rec)
+        tombstone = self.tombstones.get(table, key)
+        is_echo = bool(
+            (tx_digest and tx_digest in self._applied_tx_digests)
+            or (policy.cyclic_suppression and incoming_origin.origin_id == self.node_id)
+        )
+        is_del = (op == "DELETE")
+        has_tb = (local_row is None and tombstone is not None and not is_del)
+        tb_age = (current_time - tombstone.deleted_at) if (has_tb and tombstone is not None) else 0.0
+        tb_horizon = tombstone.horizon_seconds if (has_tb and tombstone is not None) else policy.tombstone_horizon_seconds
+        within_hz = (tb_age <= tb_horizon) if has_tb else False
 
-        if policy.cyclic_suppression and incoming_origin.origin_id == self.node_id:
+        is_clean_ins = (local_row is None and op == "INSERT" and tombstone is None)
+
+        has_vecs = (local_vector is not None and incoming_vector is not None)
+        local_dom = local_vector.dominates(incoming_vector) if has_vecs else False
+        in_dom = incoming_vector.dominates(local_vector) if has_vecs else False
+        causal_ord = has_vecs and (local_dom or in_dom)
+
+        has_bi = (before_image is not None and not before_image.is_absent)
+        bi_matches = has_bi and before_image.matches(local_row)
+
+        can_merge, merge_details = self._evaluate_column_merge_capability(
+            table=table,
+            local_row=local_row,
+            incoming_row=incoming_row,
+            before_image=before_image,
+            policy=policy,
+            incoming_hlc=incoming_hlc,
+            local_hlc=local_hlc,
+        )
+
+        facts = {
+            "table": table,
+            "operation": op,
+            "is_cyclic_echo": is_echo,
+            "is_delete": is_del,
+            "has_tombstone": has_tb,
+            "measured_tombstone_age": tb_age,
+            "tombstone_horizon": tb_horizon,
+            "within_horizon": within_hz,
+            "is_clean_insert": is_clean_ins,
+            "has_version_vectors": has_vecs,
+            "causally_ordered": causal_ord,
+            "has_before_image": has_bi,
+            "before_image_matches": bi_matches,
+            "require_before_image": policy.require_before_image,
+            "can_commutative_merge": can_merge,
+            "clock_skew_tolerance": policy.clock_skew_tolerance_seconds,
+        }
+
+        from . import decide
+        choice = decide.climb("conflict resolution", conflict_resolution_rungs(), facts)
+
+        if choice.rung.name == "cyclic_echo_resolution":
+            reason = (
+                "Cyclic replication echo suppressed via transaction digest."
+                if (tx_digest and tx_digest in self._applied_tx_digests)
+                else "Cyclic replication loop detected; incoming write originated on this node."
+            )
             rec = ConflictAuditRecord(
                 audit_id=audit_id,
                 table=table,
@@ -598,16 +827,14 @@ class ConflictSemanticsEngine:
                 incoming_state=incoming_row,
                 before_image=before_image.to_dict() if before_image else None,
                 resolved_state=local_row,
-                resolution_reason="Cyclic replication loop detected; incoming write originated on this node.",
+                resolution_reason=reason,
                 timestamp=current_time,
-                metadata={"origin_id": incoming_origin.origin_id},
+                metadata={"tx_digest": tx_digest} if tx_digest else {"origin_id": incoming_origin.origin_id},
             )
             self.audit_ledger.record(rec)
             return (local_row, rec)
 
-        tombstone = self.tombstones.get(table, key)
-
-        if op == "DELETE":
+        if choice.rung.name == "tombstone_delete_resolution":
             if local_row is None and tombstone is not None:
                 rec = ConflictAuditRecord(
                     audit_id=audit_id,
@@ -654,32 +881,14 @@ class ConflictSemanticsEngine:
             self.audit_ledger.record(rec)
             return (None, rec)
 
-        if local_row is None and tombstone is not None:
-            if tombstone.is_expired(current_time):
-                rec = ConflictAuditRecord(
-                    audit_id=audit_id,
-                    table=table,
-                    key=key,
-                    conflict_type=ConflictType.TOMBSTONE_EXPIRED.value,
-                    care_badge=CareBadge.ACTION.value,
-                    resolved=False,
-                    local_state=None,
-                    incoming_state=incoming_row,
-                    before_image=before_image.to_dict() if before_image else None,
-                    resolved_state=None,
-                    resolution_reason="Tombstone expired past horizon; cannot distinguish legal reinsert from stale zombie update.",
-                    timestamp=current_time,
-                    metadata={"deleted_at": tombstone.deleted_at, "horizon": tombstone.horizon_seconds},
+        if choice.rung.name == "tombstone_reinsert_resolution":
+            is_reinsert = (op == "INSERT") or (
+                tombstone is not None and tombstone.is_valid_reinsert(
+                    new_generation=incoming_generation,
+                    new_ts=incoming_hlc.physical_ts if incoming_hlc else current_time,
+                    new_vector=incoming_vector,
                 )
-                self.audit_ledger.record(rec)
-                return (None, rec)
-
-            is_reinsert = (op == "INSERT") or tombstone.is_valid_reinsert(
-                new_generation=incoming_generation,
-                new_ts=incoming_hlc.physical_ts if incoming_hlc else current_time,
-                new_vector=incoming_vector,
             )
-
             if is_reinsert:
                 self.tombstones.remove(table, key)
                 if tx_digest:
@@ -720,7 +929,7 @@ class ConflictSemanticsEngine:
                 self.audit_ledger.record(rec)
                 return (None, rec)
 
-        if local_row is None and op == "INSERT":
+        if choice.rung.name == "clean_insert_resolution":
             if tx_digest:
                 self._applied_tx_digests.add(tx_digest)
             rec = ConflictAuditRecord(
@@ -740,8 +949,8 @@ class ConflictSemanticsEngine:
             self.audit_ledger.record(rec)
             return (incoming_row, rec)
 
-        if local_vector is not None and incoming_vector is not None:
-            if local_vector.dominates(incoming_vector):
+        if choice.rung.name == "causal_vector_resolution":
+            if local_dom:
                 rec = ConflictAuditRecord(
                     audit_id=audit_id,
                     table=table,
@@ -759,8 +968,7 @@ class ConflictSemanticsEngine:
                 )
                 self.audit_ledger.record(rec)
                 return (local_row, rec)
-
-            if incoming_vector.dominates(local_vector):
+            else:
                 if tx_digest:
                     self._applied_tx_digests.add(tx_digest)
                 rec = ConflictAuditRecord(
@@ -781,46 +989,80 @@ class ConflictSemanticsEngine:
                 self.audit_ledger.record(rec)
                 return (incoming_row, rec)
 
-        if before_image is not None and not before_image.is_absent:
-            if before_image.matches(local_row):
-                if tx_digest:
-                    self._applied_tx_digests.add(tx_digest)
-                rec = ConflictAuditRecord(
-                    audit_id=audit_id,
-                    table=table,
-                    key=key,
-                    conflict_type=ConflictType.CLEAN_PROGRESSION.value,
-                    care_badge=CareBadge.PASS.value,
-                    resolved=True,
-                    local_state=local_row,
-                    incoming_state=incoming_row,
-                    before_image=before_image.to_dict(),
-                    resolved_state=incoming_row,
-                    resolution_reason="Serial write progression verified; before-image matches current local row.",
-                    timestamp=current_time,
-                )
-                self.audit_ledger.record(rec)
-                return (incoming_row, rec)
+        if choice.rung.name == "serial_before_image_resolution":
+            if tx_digest:
+                self._applied_tx_digests.add(tx_digest)
+            rec = ConflictAuditRecord(
+                audit_id=audit_id,
+                table=table,
+                key=key,
+                conflict_type=ConflictType.CLEAN_PROGRESSION.value,
+                care_badge=CareBadge.PASS.value,
+                resolved=True,
+                local_state=local_row,
+                incoming_state=incoming_row,
+                before_image=before_image.to_dict(),
+                resolved_state=incoming_row,
+                resolution_reason="Serial write progression verified; before-image matches current local row.",
+                timestamp=current_time,
+            )
+            self.audit_ledger.record(rec)
+            return (incoming_row, rec)
 
-        if before_image is None or before_image.is_absent:
-            if policy.require_before_image:
-                rec = ConflictAuditRecord(
-                    audit_id=audit_id,
-                    table=table,
-                    key=key,
-                    conflict_type=ConflictType.ABSENT_BEFORE_IMAGE.value,
-                    care_badge=CareBadge.ACTION.value,
-                    resolved=False,
-                    local_state=local_row,
-                    incoming_state=incoming_row,
-                    before_image=None,
-                    resolved_state=local_row,
-                    unresolved_columns=list((incoming_row or {}).keys()),
-                    resolution_reason="Before-image absent; cannot prove write concurrency or column difference safety.",
-                    timestamp=current_time,
-                )
-                self.audit_ledger.record(rec)
-                return (local_row, rec)
+        if choice.rung.name == "commutative_column_merge_resolution":
+            return self._resolve_concurrent_columns(
+                table=table,
+                key=key,
+                incoming_row=incoming_row or {},
+                local_row=local_row or {},
+                before_image=before_image,
+                incoming_origin=incoming_origin,
+                local_origin=local_origin or OriginIdentity(origin_id=self.node_id),
+                incoming_hlc=incoming_hlc,
+                local_hlc=local_hlc,
+                policy=policy,
+                current_time=current_time,
+                tx_digest=tx_digest,
+            )
+
+        # Fallback to unresolved_conflict_audit rung
+        if has_tb and not within_hz:
+            rec = ConflictAuditRecord(
+                audit_id=audit_id,
+                table=table,
+                key=key,
+                conflict_type=ConflictType.TOMBSTONE_EXPIRED.value,
+                care_badge=CareBadge.ACTION.value,
+                resolved=False,
+                local_state=None,
+                incoming_state=incoming_row,
+                before_image=before_image.to_dict() if before_image else None,
+                resolved_state=None,
+                resolution_reason="Tombstone expired past horizon; cannot distinguish legal reinsert from stale zombie update.",
+                timestamp=current_time,
+                metadata={"deleted_at": tombstone.deleted_at if tombstone else 0.0, "horizon": tb_horizon},
+            )
+            self.audit_ledger.record(rec)
+            return (None, rec)
+
+        if merge_details.get("absent_before_image"):
+            rec = ConflictAuditRecord(
+                audit_id=audit_id,
+                table=table,
+                key=key,
+                conflict_type=ConflictType.ABSENT_BEFORE_IMAGE.value,
+                care_badge=CareBadge.ACTION.value,
+                resolved=False,
+                local_state=local_row,
+                incoming_state=incoming_row,
+                before_image=None,
+                resolved_state=local_row,
+                unresolved_columns=list((incoming_row or {}).keys()),
+                resolution_reason="Before-image absent; cannot prove write concurrency or column difference safety.",
+                timestamp=current_time,
+            )
+            self.audit_ledger.record(rec)
+            return (local_row, rec)
 
         return self._resolve_concurrent_columns(
             table=table,
@@ -1015,3 +1257,77 @@ class ConflictSemanticsEngine:
         )
         self.audit_ledger.record(rec)
         return (merged_row, rec)
+
+
+class ConflictResolver(ConflictSemanticsEngine):
+    """Conflict resolver for replication follow and apply paths (Row 622: RCH14)."""
+
+    def resolve_batch(
+        self,
+        changes: List[Dict[str, Any]],
+        db: Optional[str] = None,
+        at: Optional[Any] = None,
+        log: Optional[Any] = None,
+    ) -> List[Dict[str, Any]]:
+        """Resolve a batch of replication changes against local state."""
+        resolved_changes = []
+        for c in changes:
+            tbl = c.get("table")
+            k = c.get("key")
+            if not tbl or not k:
+                resolved_changes.append(c)
+                continue
+            op = str(c.get("op") or c.get("type") or "update").upper()
+            if op in ("DDL", "SCHEMA_CHANGE", "SCHEMA_DRIFT_BARRIER"):
+                resolved_changes.append(c)
+                continue
+            incoming_row = c.get("row") or c.get("values")
+            if hasattr(incoming_row, "_asdict"):
+                incoming_row = incoming_row._asdict()
+            elif isinstance(incoming_row, dict):
+                incoming_row = dict(incoming_row)
+            before_img = c.get("before") or c.get("before_image")
+            if before_img is not None and not isinstance(before_img, BeforeImage):
+                before_img = BeforeImage(columns=before_img if isinstance(before_img, dict) else {})
+            incoming_origin = c.get("origin") or c.get("incoming_origin")
+            if incoming_origin is not None and not isinstance(incoming_origin, OriginIdentity):
+                incoming_origin = OriginIdentity(origin_id=str(incoming_origin))
+            elif incoming_origin is None:
+                incoming_origin = OriginIdentity(origin_id="source")
+            local_origin = c.get("local_origin")
+            if local_origin is not None and not isinstance(local_origin, OriginIdentity):
+                local_origin = OriginIdentity(origin_id=str(local_origin))
+            resolved_state, audit_rec = self.resolve_write(
+                table=tbl,
+                key=k if isinstance(k, dict) else {"id": k},
+                operation=op,
+                incoming_row=incoming_row,
+                before_image=before_img,
+                local_row=c.get("local_row"),
+                incoming_origin=incoming_origin,
+                local_origin=local_origin,
+                incoming_vector=c.get("vector") or c.get("incoming_vector"),
+                local_vector=c.get("local_vector"),
+                incoming_hlc=c.get("hlc") or c.get("incoming_hlc"),
+                local_hlc=c.get("local_hlc"),
+                incoming_generation=c.get("generation", 1),
+                tx_digest=c.get("tx_digest"),
+            )
+            if log:
+                log(f"conflict resolution {audit_rec.audit_id}: {audit_rec.conflict_type} badge={audit_rec.care_badge} resolved={audit_rec.resolved}")
+            if audit_rec.care_badge == CareBadge.ACTION.value and not audit_rec.resolved:
+                raise UnresolvedConflictError(
+                    f"Unresolved conflict on {tbl} key {k}: {audit_rec.resolution_reason}",
+                    audit_record=audit_rec,
+                )
+            if audit_rec.conflict_type == ConflictType.CYCLIC_ECHO.value or (resolved_state is None and op != "DELETE"):
+                continue
+            new_c = dict(c)
+            if resolved_state is not None:
+                if "row" in new_c:
+                    new_c["row"] = resolved_state
+                elif "values" in new_c:
+                    new_c["values"] = resolved_state
+            resolved_changes.append(new_c)
+        return resolved_changes
+

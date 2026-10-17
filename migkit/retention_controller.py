@@ -659,3 +659,21 @@ class RetentionController:
             except OSError:
                 pass
             self._lease_lock_file = None
+
+
+def audit_spool_retention_fence(spool_state: Any, hop_name: str = "default") -> Tuple[bool, str]:
+    """Audit spool retention fence in follow/apply loop (Row 624: RCH16)."""
+    controller = RetentionController(hop_name=hop_name)
+    metrics = RetentionMetrics(
+        arrival_rate_bytes_sec=float(getattr(spool_state, "arrival_rate", 1024 * 1024)),
+        consumption_rate_bytes_sec=float(getattr(spool_state, "consumption_rate", 1024 * 1024)),
+        current_retained_bytes=int(getattr(spool_state, "retained_bytes", 0)),
+        free_disk_bytes=int(getattr(spool_state, "free_disk_bytes", 10 * 1024 * 1024 * 1024)),
+        spool_capacity_bytes=int(getattr(spool_state, "capacity_bytes", 5 * 1024 * 1024 * 1024)),
+        snapshot_age_sec=float(getattr(spool_state, "snapshot_age_sec", 60.0)),
+        recovery_window_sec=float(getattr(spool_state, "recovery_window_sec", 86400.0)),
+    )
+    forecast = controller.forecast(metrics)
+    action = controller.decide_action(metrics, forecast)
+    return (not action.stop_truthfully, action.care_reason)
+

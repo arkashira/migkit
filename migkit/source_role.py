@@ -29,7 +29,9 @@ import socket
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
+
+from . import decide, durable
 
 logger = logging.getLogger(__name__)
 
@@ -666,6 +668,297 @@ class SourceRolePolicy:
     primary_cpu_threshold_pct: float = 75.0
 
 
+# -----------------------------------------------------------------------------
+# Decide Ladder for Replica Role Admission (Row 623: RCH15)
+# -----------------------------------------------------------------------------
+
+def replica_role_rungs() -> Tuple[decide.Rung, ...]:
+    """Decide rungs for replica role admission and workload safety (Row 623: RCH15)."""
+    return (
+        decide.Rung(
+            "admit_synced_replica",
+            "admit synced replica with aligned timeline and bounded replication lag",
+            needs=(
+                decide.Need(
+                    "node is discovered replica or standby",
+                    lambda f: bool(f.get("is_replica", False)),
+                    "{rung} requires node role to be a replica or standby",
+                ),
+                decide.Need(
+                    "timeline matches cluster primary without divergence",
+                    lambda f: bool(f.get("timeline_aligned", True)),
+                    "{rung} requires replica timeline to match primary timeline",
+                ),
+                decide.Need(
+                    "replication lag within SLA bounds",
+                    lambda f: float(f.get("replay_lag_seconds", 0.0)) <= float(f.get("max_lag_seconds", 30.0))
+                    and int(f.get("replay_lag_bytes", 0)) <= int(f.get("max_lag_bytes", 64 * 1024 * 1024)),
+                    "{rung} exceeds maximum allowed replication lag for safe reads",
+                ),
+                decide.Need(
+                    "workload capability supported by replica",
+                    lambda f: bool(f.get("capability_supported", True)),
+                    "{rung} requires replica to support required workload capability",
+                ),
+            ),
+            because="replica provides consistent read view with zero risk of stale or skipped changes",
+        ),
+        decide.Rung(
+            "admit_degraded_replica_review",
+            "admit replica under review when timeline is aligned but lag requires review",
+            needs=(
+                decide.Need(
+                    "node is discovered replica or standby",
+                    lambda f: bool(f.get("is_replica", False)),
+                    "{rung} requires node role to be a replica or standby",
+                ),
+                decide.Need(
+                    "timeline matches cluster primary without divergence",
+                    lambda f: bool(f.get("timeline_aligned", True)),
+                    "{rung} requires replica timeline to match primary timeline",
+                ),
+                decide.Need(
+                    "replication lag within extended review ceiling",
+                    lambda f: float(f.get("replay_lag_seconds", 0.0)) <= float(f.get("max_review_lag_seconds", 120.0)),
+                    "{rung} exceeds maximum review lag ceiling",
+                ),
+            ),
+            because="replica timeline is intact but elevated lag requires operator review badge",
+        ),
+        decide.Rung(
+            "route_primary_authoritative",
+            "fallback to authoritative primary when replica fails validation or diverges",
+            because="primary node provides authoritative consistency and eliminates data loss risk",
+        ),
+    )
+
+
+def decide_replica_admission(facts: Dict[str, Any]) -> decide.Choice:
+    """Climbs replica_role_rungs with provided facts."""
+    return decide.climb("replica role admission", replica_role_rungs(), facts)
+
+
+# -----------------------------------------------------------------------------
+# Role Discovery Probes (PostgreSQL pg_is_in_recovery / MySQL SHOW REPLICA STATUS)
+# -----------------------------------------------------------------------------
+
+def probe_postgres_role(query_fn: Callable[[str], Any]) -> Dict[str, Any]:
+    """Execute real PostgreSQL discovery probes: pg_is_in_recovery(), timeline, positions.
+
+    Raises SourceRoleError if query_fn fails or raises an exception.
+    """
+    try:
+        res = query_fn("SELECT pg_is_in_recovery()")
+    except Exception as exc:
+        raise SourceRoleError(f"PostgreSQL role probe failed: {exc}") from exc
+
+    if isinstance(res, list) and res:
+        val = res[0][0] if isinstance(res[0], (list, tuple)) else res[0]
+    elif isinstance(res, tuple) and res:
+        val = res[0]
+    else:
+        val = res
+    is_recovery = bool(val)
+
+    role = NodeRole.REPLICA if is_recovery else NodeRole.PRIMARY
+    info: Dict[str, Any] = {
+        "role": role,
+        "is_read_only": is_recovery,
+        "timeline_id": 1,
+        "current_position": None,
+        "replay_position": None,
+        "replay_lag_bytes": 0,
+        "replay_lag_seconds": 0.0,
+        "replay_state": ReplayState.STREAMING,
+    }
+
+    try:
+        tl_res = query_fn("SELECT timeline_id FROM pg_control_checkpoint()")
+        if tl_res and isinstance(tl_res, list) and tl_res[0]:
+            info["timeline_id"] = int(tl_res[0][0] if isinstance(tl_res[0], (list, tuple)) else tl_res[0])
+    except Exception:
+        pass
+
+    if not is_recovery:
+        try:
+            lsn_res = query_fn("SELECT pg_current_wal_lsn()")
+            if lsn_res and isinstance(lsn_res, list) and lsn_res[0]:
+                lsn_val = str(lsn_res[0][0] if isinstance(lsn_res[0], (list, tuple)) else lsn_res[0])
+                info["current_position"] = PortablePosition.from_postgres(lsn_val, timeline_id=info["timeline_id"])
+        except Exception:
+            try:
+                lsn_res = query_fn("SELECT pg_current_xlog_location()")
+                if lsn_res and isinstance(lsn_res, list) and lsn_res[0]:
+                    lsn_val = str(lsn_res[0][0] if isinstance(lsn_res[0], (list, tuple)) else lsn_res[0])
+                    info["current_position"] = PortablePosition.from_postgres(lsn_val, timeline_id=info["timeline_id"])
+            except Exception as exc:
+                raise SourceRoleError(f"PostgreSQL current LSN probe failed: {exc}") from exc
+    else:
+        try:
+            replay_res = query_fn("SELECT pg_last_wal_replay_lsn()")
+            if replay_res and isinstance(replay_res, list) and replay_res[0]:
+                replay_val = str(replay_res[0][0] if isinstance(replay_res[0], (list, tuple)) else replay_res[0])
+                info["replay_position"] = PortablePosition.from_postgres(replay_val, timeline_id=info["timeline_id"])
+                info["current_position"] = info["replay_position"]
+        except Exception:
+            try:
+                replay_res = query_fn("SELECT pg_last_xlog_replay_location()")
+                if replay_res and isinstance(replay_res, list) and replay_res[0]:
+                    replay_val = str(replay_res[0][0] if isinstance(replay_res[0], (list, tuple)) else replay_res[0])
+                    info["replay_position"] = PortablePosition.from_postgres(replay_val, timeline_id=info["timeline_id"])
+                    info["current_position"] = info["replay_position"]
+            except Exception as exc:
+                raise SourceRoleError(f"PostgreSQL replay LSN probe failed: {exc}") from exc
+
+        try:
+            lag_res = query_fn("SELECT EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))")
+            if lag_res and isinstance(lag_res, list) and lag_res[0]:
+                raw_lag = lag_res[0][0] if isinstance(lag_res[0], (list, tuple)) else lag_res[0]
+                if raw_lag is not None:
+                    info["replay_lag_seconds"] = max(0.0, float(raw_lag))
+        except Exception:
+            pass
+
+        try:
+            paused_res = query_fn("SELECT pg_is_wal_replay_paused()")
+            if paused_res and isinstance(paused_res, list) and paused_res[0]:
+                val = paused_res[0][0] if isinstance(paused_res[0], (list, tuple)) else paused_res[0]
+                if bool(val):
+                    info["replay_state"] = ReplayState.PAUSED
+        except Exception:
+            pass
+
+    return info
+
+
+def probe_mysql_role(query_fn: Callable[[str], Any]) -> Dict[str, Any]:
+    """Execute real MySQL discovery probes: SHOW REPLICA STATUS / SHOW SLAVE STATUS, @@read_only, GTID.
+
+    Raises SourceRoleError if query_fn fails or raises an exception.
+    """
+    rows = []
+    replica_err = None
+    try:
+        rows = query_fn("SHOW REPLICA STATUS")
+    except Exception as exc:
+        replica_err = exc
+        try:
+            rows = query_fn("SHOW SLAVE STATUS")
+        except Exception as slave_exc:
+            raise SourceRoleError(
+                f"MySQL replica status probe failed on both SHOW REPLICA STATUS ({replica_err}) "
+                f"and SHOW SLAVE STATUS ({slave_exc})"
+            ) from slave_exc
+
+    if rows and len(rows) > 0:
+        row = rows[0]
+        if isinstance(row, dict):
+            sql_running = row.get("Replica_SQL_Running") or row.get("Slave_SQL_Running")
+            io_running = row.get("Replica_IO_Running") or row.get("Slave_IO_Running")
+            lag = row.get("Seconds_Behind_Source") if "Seconds_Behind_Source" in row else row.get("Seconds_Behind_Master")
+            gtid_executed = row.get("Executed_Gtid_Set")
+        else:
+            sql_running = "Yes"
+            io_running = "Yes"
+            lag = 0
+            gtid_executed = None
+
+        is_running = str(sql_running).lower() in ("yes", "1", "true")
+        lag_sec = float(lag) if lag is not None and str(lag).isdigit() else 0.0
+        pos = PortablePosition.from_mysql(str(gtid_executed or "")) if gtid_executed else None
+
+        return {
+            "role": NodeRole.REPLICA,
+            "is_read_only": True,
+            "timeline_id": 1,
+            "current_position": pos,
+            "replay_position": pos,
+            "replay_lag_bytes": 0,
+            "replay_lag_seconds": lag_sec,
+            "replay_state": ReplayState.STREAMING if is_running else ReplayState.STOPPED,
+        }
+
+    try:
+        ro_res = query_fn("SELECT @@read_only")
+        if isinstance(ro_res, list) and ro_res:
+            ro_val = ro_res[0][0] if isinstance(ro_res[0], (list, tuple)) else ro_res[0]
+        elif isinstance(ro_res, tuple) and ro_res:
+            ro_val = ro_res[0]
+        else:
+            ro_val = ro_res
+        is_ro = bool(ro_val)
+    except Exception as exc:
+        raise SourceRoleError(f"MySQL read_only probe failed: {exc}") from exc
+
+    pos = None
+    try:
+        gtid_res = query_fn("SELECT @@gtid_executed")
+        if gtid_res and isinstance(gtid_res, list) and gtid_res[0]:
+            gtid_val = str(gtid_res[0][0] if isinstance(gtid_res[0], (list, tuple)) else gtid_res[0])
+            if gtid_val:
+                pos = PortablePosition.from_mysql(gtid_val)
+    except Exception:
+        pass
+
+    role = NodeRole.STANDBY if is_ro else NodeRole.PRIMARY
+    return {
+        "role": role,
+        "is_read_only": is_ro,
+        "timeline_id": 1,
+        "current_position": pos,
+        "replay_position": pos,
+        "replay_lag_bytes": 0,
+        "replay_lag_seconds": 0.0,
+        "replay_state": ReplayState.STREAMING,
+    }
+
+
+def discover_node_endpoint(
+    node_id: str,
+    host: str,
+    port: int,
+    engine: Union[str, EngineDialect],
+    query_fn: Callable[[str], Any],
+    cluster_id: str = "default",
+    supports_snapshot_export: bool = True,
+    supports_replica_cdc: bool = False,
+    slot_failover_status: SlotFailoverStatus = SlotFailoverStatus.DISABLED,
+) -> NodeEndpoint:
+    """Discovers a node's actual role and state using real database engine probes."""
+    if isinstance(engine, EngineDialect):
+        engine_dialect = engine
+    elif isinstance(engine, str):
+        val = engine.split(".")[-1].lower()
+        engine_dialect = EngineDialect(val)
+    else:
+        engine_dialect = engine
+    if engine_dialect == EngineDialect.POSTGRESQL:
+        info = probe_postgres_role(query_fn)
+    elif engine_dialect == EngineDialect.MYSQL:
+        info = probe_mysql_role(query_fn)
+    else:
+        raise SourceRoleError(f"Unsupported engine dialect for role discovery: {engine_dialect}")
+
+    return NodeEndpoint(
+        node_id=node_id,
+        host=host,
+        port=port,
+        role=info["role"],
+        engine=engine_dialect,
+        cluster_id=cluster_id,
+        timeline_id=info.get("timeline_id", 1),
+        is_read_only=info.get("is_read_only", False),
+        current_position=info.get("current_position"),
+        replay_position=info.get("replay_position"),
+        replay_lag_bytes=info.get("replay_lag_bytes", 0),
+        replay_lag_seconds=info.get("replay_lag_seconds", 0.0),
+        replay_state=info.get("replay_state", ReplayState.STREAMING),
+        slot_failover_status=slot_failover_status,
+        supports_replica_cdc=supports_replica_cdc,
+        supports_snapshot_export=supports_snapshot_export,
+    )
+
+
 class SourceRoleCoordinator:
     """Discovers source roles, decides workload reading location, handles failover."""
 
@@ -693,6 +986,86 @@ class SourceRoleCoordinator:
         if node.is_primary():
             self.topology.primary_node_id = node.node_id
         self.topology.updated_at = time.time()
+
+    def discover_and_register_node(
+        self,
+        node_id: str,
+        host: str,
+        port: int,
+        engine: Union[str, EngineDialect],
+        query_fn: Callable[[str], Any],
+        supports_snapshot_export: bool = True,
+        supports_replica_cdc: bool = False,
+        slot_failover_status: SlotFailoverStatus = SlotFailoverStatus.DISABLED,
+    ) -> NodeEndpoint:
+        """Discovers node role dynamically via real database probes and registers it."""
+        node = discover_node_endpoint(
+            node_id=node_id,
+            host=host,
+            port=port,
+            engine=engine,
+            query_fn=query_fn,
+            cluster_id=self.cluster_id,
+            supports_snapshot_export=supports_snapshot_export,
+            supports_replica_cdc=supports_replica_cdc,
+            slot_failover_status=slot_failover_status,
+        )
+        self.register_node(node)
+        return node
+
+    def admit_replica_role(
+        self,
+        node: NodeEndpoint,
+        stage: WorkloadStage = WorkloadStage.SNAPSHOT,
+    ) -> Tuple[str, CareBadge, str]:
+        """Evaluates replica role admission via replica_role_rungs decide ladder."""
+        primary = self.topology.get_primary()
+        timeline_aligned = True
+        if primary and node.timeline_id != primary.timeline_id:
+            timeline_aligned = False
+
+        cap_supported = True
+        if stage == WorkloadStage.SNAPSHOT and self.policy.require_snapshot_export_for_replica_snapshot:
+            cap_supported = node.supports_snapshot_export
+        elif stage == WorkloadStage.CDC:
+            cap_supported = node.supports_replica_cdc
+            if self.policy.require_slot_failover_for_replica_cdc and node.slot_failover_status != SlotFailoverStatus.ENABLED:
+                cap_supported = False
+
+        if stage == WorkloadStage.SNAPSHOT:
+            max_sec = self.policy.max_snapshot_lag_sec
+            max_bytes = self.policy.max_snapshot_lag_bytes
+        elif stage == WorkloadStage.CDC:
+            max_sec = self.policy.max_cdc_lag_sec
+            max_bytes = self.policy.max_cdc_lag_bytes
+        elif stage == WorkloadStage.VERIFICATION:
+            max_sec = self.policy.max_verification_lag_sec
+            max_bytes = 64 * 1024 * 1024
+        else:
+            max_sec = self.policy.max_assessment_lag_sec
+            max_bytes = 100 * 1024 * 1024
+
+        facts = {
+            "is_replica": node.is_replica(),
+            "timeline_aligned": timeline_aligned,
+            "replay_lag_seconds": node.replay_lag_seconds,
+            "replay_lag_bytes": node.replay_lag_bytes,
+            "max_lag_seconds": max_sec,
+            "max_lag_bytes": max_bytes,
+            "max_review_lag_seconds": max_sec * 2.0,
+            "capability_supported": cap_supported,
+        }
+
+        choice = decide_replica_admission(facts)
+        because_text = choice.rung.because if choice.rung else choice.reason
+        if choice.path == "admit_synced_replica":
+            badge = CareBadge.PASS if node.replay_lag_seconds == 0 else CareBadge.BENIGN
+            return choice.path, badge, f"replica {node.node_id} admitted ({because_text})"
+        elif choice.path == "admit_degraded_replica_review":
+            return choice.path, CareBadge.REVIEW, f"replica {node.node_id} admitted under review ({because_text})"
+        else:
+            return choice.path, CareBadge.ACTION, f"replica {node.node_id} rejected, fallback to primary: {choice.reason}"
+
 
     def record_timeline_branch(
         self,
@@ -1463,7 +1836,6 @@ class SourceRoleCheckpoint:
     @staticmethod
     def save(coordinator: SourceRoleCoordinator, file_path: Union[str, Path]) -> None:
         path = Path(file_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
         data = {
             "cluster_id": coordinator.cluster_id,
             "topology": coordinator.topology.to_dict(),
@@ -1471,28 +1843,14 @@ class SourceRoleCheckpoint:
             "decisions": {did: d.to_dict() for did, d in coordinator.active_decisions.items()},
             "saved_at": time.time(),
         }
-        raw_json = json.dumps(data, indent=2, sort_keys=True)
-        tmp = tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False)
-        try:
-            tmp.write(raw_json)
-            tmp.flush()
-            os.fsync(tmp.fileno())
-            tmp.close()
-            os.replace(tmp.name, path)
-        finally:
-            if os.path.exists(tmp.name):
-                try:
-                    os.unlink(tmp.name)
-                except OSError:
-                    pass
+        durable.write_json(path, data, indent=2)
 
     @staticmethod
     def load(file_path: Union[str, Path]) -> SourceRoleCoordinator:
         path = Path(file_path)
-        if not path.exists():
+        data = durable.read_state(path, "state")
+        if data is None:
             raise FileNotFoundError(f"source role checkpoint not found: {file_path}")
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
 
         cluster_id = data["cluster_id"]
         policy = SourceRolePolicy(**data["policy"])

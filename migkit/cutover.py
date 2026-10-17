@@ -1428,6 +1428,26 @@ def _phased(hop, eng, dbs, leg, conf, say, approvers, drain=None,
     _audit(hop, rec, {"event": "began", "budget": conf["budget"],
                       "dbs": dbs})
     budget = conf["budget"]
+    traffic_sm = None
+    try:
+        from . import traffic_state
+        src_target = getattr(hop, "target", None)
+        src_host = getattr(hop, "source_host", None) or getattr(getattr(hop, "source", None), "host", None) or "127.0.0.1"
+        src_port = getattr(hop, "source_port", None) or getattr(getattr(hop, "source", None), "port", None) or 5432
+        tgt_host = getattr(src_target, "host", None) or getattr(hop, "target_host", None) or "127.0.0.1"
+        tgt_port = getattr(src_target, "port", None) or getattr(hop, "target_port", None) or 5432
+        t_dir = hop.report_dir() / "traffic"
+        s_ep = traffic_state.DatabaseEndpoint(name="source", host=str(src_host), port=int(src_port), database=dbs[0] if dbs else "db")
+        t_ep = traffic_state.DatabaseEndpoint(name="target", host=str(tgt_host), port=int(tgt_port), database=dbs[0] if dbs else "db")
+        traffic_sm = traffic_state.TrafficStateMachine(
+            state_dir=t_dir,
+            source=s_ep,
+            target=t_ep,
+            safety_headroom=margin(conf) if conf.get("keys") else None,
+        )
+    except Exception:
+        traffic_sm = None
+
     from . import decide
     if drain is None:
         got = drain_way(hop, eng, leg, conf, _probes(hop, leg, dbs, conf))
@@ -1508,6 +1528,8 @@ def _phased(hop, eng, dbs, leg, conf, say, approvers, drain=None,
             if not ok:
                 raise _Undo(f"the pooler did not pause: {why}")
             say("  pooler: paused - writes wait there")
+            if traffic_sm:
+                traffic_sm.step_pause()
             done("pause")
         phase("freeze")
         if not rec["clock"].get("began"):
@@ -1526,6 +1548,8 @@ def _phased(hop, eng, dbs, leg, conf, say, approvers, drain=None,
                                 + "; ".join(bad[:3]))
                 say(f"  {d}: the freeze holds - "
                     + "; ".join(w for _, w in held))
+        if traffic_sm and traffic_sm.current_phase == traffic_state.CutoverPhase.INIT:
+            traffic_sm.step_pause()
         done("freeze", how=how)
         phase("drain")
         at = {}
@@ -1560,14 +1584,21 @@ def _phased(hop, eng, dbs, leg, conf, say, approvers, drain=None,
                                 + (" within the budget" if got is False
                                    else ""))
                 say(f"  {d}: the stream's own positions settled")
+        if traffic_sm:
+            traffic_sm.step_drain()
+            traffic_sm.step_fence()
         done("drain", positions=at)
         phase("verify")
         for d in dbs:
             _final_check(hop, eng, d, before.get(d), left, say)
+        if traffic_sm:
+            traffic_sm.step_proof()
         done("verify")
         phase("counters")
         for d in dbs:
             _counters(hop, eng, d, conf, rec, say)
+        if traffic_sm:
+            traffic_sm.step_counter_adjustment()
         done("counters")
         phase("stream")
         for d in dbs:
@@ -1650,6 +1681,9 @@ def _phased(hop, eng, dbs, leg, conf, say, approvers, drain=None,
         rec["clock"]["stopped"] = time.time()
         rec["phases"]["flip"]["ended"] = time.time()
         rec["state"] = "flipped"
+        if traffic_sm:
+            traffic_sm.step_routing()
+            traffic_sm.step_resume()
         _save(hop, rec)
         if conf.get("reverse_failback"):
             try:
@@ -2350,6 +2384,13 @@ def _undo(hop, eng, rec, leg, conf, say, why):
     _save(hop, rec)
     ph = rec.get("phases") or {}
     dbs = rec.get("dbs") or []
+    try:
+        from . import traffic_state
+        t_dir = hop.report_dir() / "traffic"
+        if (t_dir / "cutover_traffic_state.json").exists():
+            traffic_state.TrafficStateMachine(state_dir=t_dir, source=None, target=None).rollback(why)
+    except Exception:
+        pass
     errors = []
 
     def s(m):

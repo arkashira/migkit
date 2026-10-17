@@ -9682,6 +9682,35 @@ def stream_with_store_and_forward(
     return pipeline
 
 
+def snapshot_stream_handoff(
+    hop=None,
+    db=None,
+    table_name=None,
+    source_profile=None,
+    table_profile=None,
+    coordinator=None,
+):
+    """Select consistent snapshot-to-stream handoff mechanism climbing decide rungs (Row 619: RCH11)."""
+    from . import snapshot_watermark
+    if coordinator is None:
+        coordinator = snapshot_watermark.HandoffStrategyCoordinator()
+    if source_profile is None:
+        source_profile = snapshot_watermark.SourceProfile(
+            engine="postgres",
+            is_standby=False,
+            supports_snapshot_export=True,
+            primary_cpu_headroom_pct=100.0,
+        )
+    if table_profile is None:
+        table_profile = snapshot_watermark.TableProfile(
+            table_name=str(table_name or "table"),
+            estimated_row_count=1000,
+            estimated_bytes=1024 * 1024,
+            primary_key="id",
+        )
+    return coordinator.select_best_strategy(source_profile, table_profile)
+
+
 from .engines import hooks  # noqa: E402
 
 hooks.fill("movers", globals())

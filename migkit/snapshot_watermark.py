@@ -24,7 +24,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
-from migkit import durable
+from migkit import decide, durable
 from migkit.verifiers import gtid_is_subset, lsn_compare, lsn_to_int
 
 
@@ -60,6 +60,16 @@ class HandoffCostExceededError(SnapshotWatermarkError):
 
 class ActiveLeaseConflictError(SnapshotWatermarkError):
     """Raised when another active worker holds the verification/handoff lease."""
+    pass
+
+
+class CorruptLockError(SnapshotWatermarkError):
+    """Raised when an existing lease/lock file cannot be parsed, to prevent clobbering."""
+    pass
+
+
+class LockAcquisitionError(SnapshotWatermarkError):
+    """Raised when lease/lock file cannot be read or acquired."""
     pass
 
 
@@ -910,8 +920,10 @@ class ActiveLeaseLock:
                     raise ActiveLeaseConflictError(
                         f"Active lease held by {holder} until {expires} (remaining {expires - now:.1f}s)"
                     )
-            except (json.JSONDecodeError, OSError):
-                pass
+            except json.JSONDecodeError as exc:
+                raise CorruptLockError(f"Corrupt lease file at {self.lock_file}: {exc}") from exc
+            except OSError as exc:
+                raise LockAcquisitionError(f"Cannot read lease file at {self.lock_file}: {exc}") from exc
 
         payload = {
             "holder": self.holder_id,
@@ -956,6 +968,68 @@ class ActiveLeaseLock:
 # ---------------------------------------------------------------------------
 
 
+def snapshot_handoff_rungs() -> Tuple[decide.Rung, ...]:
+    """Decide ladder for snapshot-to-stream handoff mechanisms (Row 619: RCH11)."""
+    return (
+        decide.Rung(
+            "zero_impact_logical_export",
+            "logical export from physical standby or isolated replica",
+            needs=(
+                decide.Need(
+                    "source is isolated replica or standby",
+                    lambda f: bool(f.get("is_standby_or_replica")),
+                    "{rung} requires source node to be an isolated standby or replica",
+                ),
+                decide.Need(
+                    "snapshot export supported",
+                    lambda f: bool(f.get("supports_snapshot_export")),
+                    "{rung} requires engine snapshot export capability",
+                ),
+            ),
+            because="isolates snapshot load entirely away from production primary",
+        ),
+        decide.Rung(
+            "consistent_primary_export",
+            "consistent transactional snapshot export from primary",
+            needs=(
+                decide.Need(
+                    "snapshot export supported",
+                    lambda f: bool(f.get("supports_snapshot_export")),
+                    "{rung} requires engine snapshot export capability",
+                ),
+                decide.Need(
+                    "primary headroom available",
+                    lambda f: float(f.get("primary_cpu_headroom_pct", 100.0)) >= 25.0,
+                    "{rung} requires at least 25% primary CPU headroom",
+                ),
+            ),
+            because="consistent transactional snapshot export with bounded impact",
+        ),
+        decide.Rung(
+            "keyset_chunked_handoff",
+            "keyset-chunked incremental copy with bounded lock duration",
+            needs=(
+                decide.Need(
+                    "table has monotonic or indexed key",
+                    lambda f: bool(f.get("has_indexed_key", True)),
+                    "{rung} requires table to have an indexed primary or unique key",
+                ),
+            ),
+            because="keyset-chunked copy bounds lock duration and avoids long-lived transactions",
+        ),
+        decide.Rung(
+            "bounded_table_scan_fallback",
+            "fallback bounded table scan",
+            because="fallback table scan when advanced handoff strategies are inadmissible",
+        ),
+    )
+
+
+def decide_snapshot_handoff(facts: Dict[str, Any]) -> decide.Choice:
+    """Climbs snapshot_handoff_rungs decide ladder."""
+    return decide.climb("snapshot handoff selection", snapshot_handoff_rungs(), facts)
+
+
 class SnapshotWatermarkCoordinator:
     """Orchestrates strategy selection, pricing, execution, and coverage verification."""
 
@@ -980,36 +1054,39 @@ class SnapshotWatermarkCoordinator:
         table: TableProfile,
         copy_rate_bytes_per_sec: float = 10.0 * 1024 * 1024,
     ) -> Tuple[BaseHandoffStrategy, HandoffPricing]:
-        """Select the optimal viable strategy with lowest cost score."""
+        """Select optimal viable strategy by climbing snapshot_handoff_rungs decide ladder."""
         evals = self.evaluate_all_strategies(source, table, copy_rate_bytes_per_sec)
-        viable = [p for p in evals if p.is_viable]
+        viable_map = {p.strategy: p for p in evals if p.is_viable}
 
-        if not viable:
+        if not viable_map:
             reasons = [f"{p.strategy}: {p.rejection_reason or p.care_reasons}" for p in evals]
             raise SnapshotWatermarkError(
                 f"No viable handoff strategy available. Evaluations: {'; '.join(reasons)}"
             )
 
-        # Sort viable by:
-        # 1. Care badge priority (PASS > BENIGN > REVIEW)
-        # 2. Source impact score
-        # 3. Snapshot lifetime
-        badge_rank = {
-            CareBadge.PASS.value: 0,
-            CareBadge.BENIGN.value: 1,
-            CareBadge.REVIEW.value: 2,
-            CareBadge.ACTION.value: 3,
+        facts = {
+            "is_standby_or_replica": bool(getattr(source, "is_standby", False) or getattr(source, "is_replica", False) or source.is_read_only),
+            "supports_snapshot_export": bool(getattr(source, "supports_snapshot_export", True) and (source.supports_shared_snapshot or source.supports_engine_native)),
+            "primary_cpu_headroom_pct": float(getattr(source, "primary_cpu_headroom_pct", 100.0)),
+            "has_indexed_key": bool(getattr(table, "has_primary_key", False) or getattr(table, "primary_key", None) or getattr(table, "indexed_columns", None)),
         }
+        choice = decide_snapshot_handoff(facts)
 
-        viable.sort(
-            key=lambda p: (
-                badge_rank.get(p.care_badge, 99),
-                p.source_impact_score,
-                p.snapshot_lifetime_seconds,
-            )
-        )
+        strategy_map = {
+            "zero_impact_logical_export": "pg_physical_standby_export",
+            "consistent_primary_export": "pg_consistent_export_snapshot",
+            "keyset_chunked_handoff": "keyset_chunked_handoff",
+            "bounded_table_scan_fallback": "single_transaction_read_only",
+        }
+        target_strat = strategy_map.get(choice.path, "single_transaction_read_only")
 
-        chosen_pricing = viable[0]
+        if target_strat in viable_map:
+            chosen_pricing = viable_map[target_strat]
+        else:
+            viable = list(viable_map.values())
+            viable.sort(key=lambda p: (p.source_impact_score, p.snapshot_lifetime_seconds))
+            chosen_pricing = viable[0]
+
         strategy = self.registry.get(chosen_pricing.strategy)
         return strategy, chosen_pricing
 
@@ -1129,3 +1206,7 @@ class SnapshotWatermarkCoordinator:
         lines.append(f"OVERALL STATUS: {overall_badge}")
         lines.append("=" * 80)
         return "\n".join(lines)
+
+
+HandoffStrategyCoordinator = SnapshotWatermarkCoordinator
+

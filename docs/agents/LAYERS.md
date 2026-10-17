@@ -569,7 +569,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a safety check reads `fleet` for the step it guards; the step reports its own state down
 
-- `migkit/lease.py:201` safety -> workflows (`fleet`)
+- `migkit/lease.py:203` safety -> workflows (`fleet`)
 
 ### a safety check reads `tailctl` for the step it guards; the step reports its own state down
 

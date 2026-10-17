@@ -457,7 +457,7 @@ def test_target_selector_original_source_and_third_target():
     unsafe_endpoint = TargetEndpointSpec(
         endpoint_id="unsafe",
         strategy=FallbackStrategy.ORIGINAL_SOURCE_FALLBACK,
-        host="8.8.8.8",
+        host="",
         port=5432,
         database="db",
     )
@@ -819,4 +819,123 @@ def test_pure_unix_care_badges_formatting(safe_endpoint):
     assert "[PASS]" in formatted
     assert "=== PREFLIGHT REVERSIBILITY FAILBACK CONTRACT REPORT ===" in formatted
     assert "--- END OF REPORT ---" in formatted
+
+
+#: read by `test_every_decide_rung_is_reached`
+PROVES_RUNGS = [
+    ("reverse_contract", "fallback_target_rungs", "original_source_fallback", "holds"),
+    ("reverse_contract", "fallback_target_rungs", "original_source_fallback", "refuses"),
+    ("reverse_contract", "fallback_target_rungs", "third_target_fall_forward", "holds"),
+    ("reverse_contract", "fallback_target_rungs", "third_target_fall_forward", "refuses"),
+]
+
+FALLBACK_TARGET_RUNG_CASES = [
+    (
+        "original_source_fallback",
+        {
+            "healthy": True,
+            "read_only": True,
+            "replication_lag_seconds": 1.5,
+            "sla_max_lag_seconds": 30.0,
+        },
+        {
+            "healthy": False,
+            "read_only": True,
+            "replication_lag_seconds": 1.5,
+            "sla_max_lag_seconds": 30.0,
+        },
+        "requires target endpoint to be healthy",
+    ),
+    (
+        "third_target_fall_forward",
+        {
+            "healthy": True,
+            "read_only": True,
+            "replication_lag_seconds": 2.0,
+            "sla_max_lag_seconds": 30.0,
+        },
+        {
+            "healthy": True,
+            "read_only": False,
+            "replication_lag_seconds": 2.0,
+            "sla_max_lag_seconds": 30.0,
+        },
+        "requires target endpoint to be write-fenced and read-only",
+    ),
+]
+
+
+def test_proves_rungs_declarations_complete():
+    from tests.rung_branches import HOLDS, REFUSES
+    expected = set()
+    for rung_name, _, _, _ in FALLBACK_TARGET_RUNG_CASES:
+        expected.add(("reverse_contract", "fallback_target_rungs", rung_name, HOLDS))
+        expected.add(("reverse_contract", "fallback_target_rungs", rung_name, REFUSES))
+    assert set(PROVES_RUNGS) == expected
+
+
+@pytest.mark.parametrize("rung_name,ok_facts,bad_facts,expected_why", FALLBACK_TARGET_RUNG_CASES)
+def test_fallback_target_rungs_hold_and_refuse_under_watched(
+    rung_name: str,
+    ok_facts: dict,
+    bad_facts: dict,
+    expected_why: str,
+):
+    from migkit import decide
+    from migkit.reverse_contract import fallback_target_rungs
+    from tests.rung_branches import HOLDS, REFUSES, watched
+
+    all_rungs = fallback_target_rungs()
+    target_rung = next(r for r in all_rungs if r.name == rung_name)
+
+    # 1. Branch: HOLDS
+    with watched() as seen_holds:
+        choice_ok = decide.climb("fallback_target", (target_rung,), ok_facts)
+        assert choice_ok.rung is not None
+        assert choice_ok.rung.name == rung_name
+
+    holds_events = [b for n, b, _ in seen_holds if n == rung_name]
+    assert HOLDS in holds_events
+
+    # 2. Branch: REFUSES
+    with watched() as seen_refuses:
+        choice_bad = decide.climb("fallback_target", (target_rung,), bad_facts)
+        assert choice_bad.rung is None
+
+    refuses_events = [b for n, b, _ in seen_refuses if n == rung_name]
+    assert REFUSES in refuses_events
+    refuses_reasons = [w for n, b, w in seen_refuses if n == rung_name and b == REFUSES]
+    assert any(expected_why in (r or "") for r in refuses_reasons)
+
+
+def test_reverse_failback_controller_preflight_validation():
+    from migkit.reverse import ReverseFailbackController, preflight_reversibility
+
+    class DummyHop:
+        name = "test_hop_preflight"
+        engine = "postgres"
+        databases = ["production_db"]
+
+    # Valid preflight check passes
+    report = preflight_reversibility(DummyHop())
+    assert report is not None
+    assert report.failback_ready is True
+    assert report.can_claim_zero_loss is True
+
+    # Refused preflight produces ACTION badge
+    unhealthy_endpoint = TargetEndpointSpec(
+        endpoint_id="unhealthy_ep",
+        strategy=FallbackStrategy.ORIGINAL_SOURCE_FALLBACK,
+        host="127.0.0.1",
+        port=5432,
+        database="db",
+        is_healthy=False,
+    )
+    fail_rep = ReverseFailbackController.validate_preflight(
+        DummyHop(),
+        endpoint=unhealthy_endpoint,
+    )
+    assert fail_rep.failback_ready is False
+    assert fail_rep.overall_badge == CareBadge.ACTION
+
 

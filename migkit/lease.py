@@ -55,6 +55,8 @@ def lapse(have):
     over: its expiry and the jitter its holder measured of its own
     renewals, no more than one term of it."""
     expires = float(have.get("expires") or 0)
+    if not expires and have.get("heartbeat") and have.get("ttl"):
+        expires = float(have["heartbeat"]) + float(have["ttl"])
     if not expires:
         return 0.0
     try:
@@ -309,7 +311,7 @@ class Lease:
                 self.took_over = have
                 heard = have.get("renewed") or have.get("since")
                 self.unheld = max(0.0, now - float(heard)) if heard else None
-            got = {"holder": self.me, "host": socket.gethostname(),
+            got = {"holder": self.me, "owner": self.me, "host": socket.gethostname(),
                    "pid": os.getpid(), "what": self.what,
                    "since": now, "renewed": now, "expires": now + self.term()}
             if self.fenced:
@@ -450,3 +452,7 @@ class Lease:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.release()
+
+
+#: Exported alias for active verification lease lock
+ActiveLease = Lease

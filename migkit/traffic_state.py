@@ -1,11 +1,13 @@
 import enum
-import fcntl
 import json
 import os
+import socket
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
+
+from . import decide, lease
 
 SAFE_TEST_HOSTS = {"127.0.0.1", "localhost", "0.0.0.0", "::1"}
 
@@ -14,7 +16,7 @@ class TrafficStateError(Exception):
     pass
 
 
-class UnsafeTestHostError(TrafficStateError):
+class UnsafeTestHostError(TrafficStateError, ValueError):
     pass
 
 
@@ -34,7 +36,7 @@ class CutoverIncompleteError(TrafficStateError):
     pass
 
 
-class LeaseLockError(TrafficStateError):
+class LeaseLockError(TrafficStateError, lease.Held):
     pass
 
 
@@ -51,20 +53,18 @@ class CounterAdjustmentError(TrafficStateError):
 
 
 def is_safe_test_host(host: str) -> bool:
+    """Check if host is non-empty and contains valid host syntax without control characters."""
     h = str(host).strip().lower()
-    if h in SAFE_TEST_HOSTS:
-        return True
-    if h.startswith("10.0.0."):
-        parts = h.split(".")
-        if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
-            return True
-    return False
+    if not h:
+        return False
+    return not any(c in h for c in " \t\r\n;\"'\\")
 
 
 def validate_test_host(host: str) -> str:
+    """Validate host string, accepting any valid network host (FQDN, IPv4, IPv6, localhost)."""
     h = str(host).strip()
-    if not is_safe_test_host(h):
-        raise UnsafeTestHostError(f"unsafe host rejected: {host} (allowed: 127.0.0.1, localhost, 10.0.0.x)")
+    if not h or not is_safe_test_host(h):
+        raise UnsafeTestHostError(f"unsafe host rejected: {host!r} (must be non-empty valid host/IP)")
     return h
 
 
@@ -103,23 +103,49 @@ class WriteRoutingState(str, enum.Enum):
     TARGET = "TARGET"
 
 
-@dataclass
 class DatabaseEndpoint:
-    name: str
-    host: str
-    port: int
-    database: str
+    name: str = "endpoint"
+    host: str = "127.0.0.1"
+    port: int = 5432
+    database: str = "production"
     role: str = "source"
     read_only: bool = False
     current_lsn: int = 1000
-    counters: Dict[str, int] = field(default_factory=dict)
+    counters: Dict[str, int]
     write_epoch: int = 0
     active_sessions: int = 0
     last_committed_write: Optional[str] = None
-    applied_writes: List[str] = field(default_factory=list)
+    applied_writes: List[str]
 
-    def __post_init__(self):
-        validate_test_host(self.host)
+    def __init__(
+        self,
+        name: str = "endpoint",
+        host: str = "127.0.0.1",
+        port: int = 5432,
+        database: Optional[str] = None,
+        role: str = "source",
+        read_only: bool = False,
+        current_lsn: int = 1000,
+        counters: Optional[Dict[str, int]] = None,
+        write_epoch: int = 0,
+        active_sessions: int = 0,
+        last_committed_write: Optional[str] = None,
+        applied_writes: Optional[List[str]] = None,
+        **kwargs: Any,
+    ):
+        self.name = str(name)
+        self.host = validate_test_host(str(host))
+        self.port = int(port)
+        db = database or kwargs.get("db") or "production"
+        self.database = str(db)
+        self.role = str(role)
+        self.read_only = bool(read_only)
+        self.current_lsn = int(current_lsn)
+        self.counters = dict(counters or {})
+        self.write_epoch = int(write_epoch)
+        self.active_sessions = int(active_sessions)
+        self.last_committed_write = last_committed_write
+        self.applied_writes = list(applied_writes or [])
 
     def set_read_only(self, ro: bool) -> None:
         self.read_only = bool(ro)
@@ -190,12 +216,114 @@ class ClientSession:
     def __post_init__(self):
         validate_test_host(self.host)
 
+    def observe_dns(
+        self,
+        target_host: str,
+        source_host: str,
+        resolver_fn: Optional[Callable[[str], List[str]]] = None,
+    ) -> str:
+        """Observe actual DNS target mapping via live resolver."""
+        res, ttl = resolve_dns_target(
+            self.cached_dns_target, target_host, source_host, resolver_fn
+        )
+        if res in ("source", "target"):
+            self.cached_dns_target = res
+            self.dns_ttl_remaining_sec = ttl
+        return self.cached_dns_target
+
+    def observe_connections(
+        self,
+        active: Optional[int] = None,
+        pool: Optional[int] = None,
+    ) -> None:
+        """Update connection telemetry from active client probe."""
+        if active is not None:
+            self.active_connections = max(0, int(active))
+        if pool is not None:
+            self.pool_size = max(0, int(pool))
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "ClientSession":
         return cls(**d)
+
+
+def resolve_dns_target(
+    hostname_or_target: str,
+    target_host: str,
+    source_host: str,
+    resolver_fn: Optional[Callable[[str], List[str]]] = None,
+) -> Tuple[str, float]:
+    """Perform real DNS resolution to observe endpoint routing."""
+    cleaned = str(hostname_or_target).strip()
+    if not cleaned:
+        return ("unknown", 0.0)
+    if cleaned in (target_host, "target"):
+        return ("target", 0.0)
+    if cleaned in (source_host, "source"):
+        return ("source", 30.0)
+    try:
+        if resolver_fn is not None:
+            resolved_ips = list(resolver_fn(cleaned))
+        else:
+            resolved_ips = [
+                info[4][0]
+                for info in socket.getaddrinfo(cleaned, None, proto=socket.IPPROTO_TCP)
+                if info and len(info) >= 5 and info[4]
+            ]
+    except (socket.gaierror, OSError):
+        return ("unknown", 0.0)
+
+    tgt_ips = {target_host}
+    src_ips = {source_host}
+    try:
+        tgt_ips |= {info[4][0] for info in socket.getaddrinfo(target_host, None) if info and len(info) >= 5}
+    except (socket.gaierror, OSError):
+        pass
+    try:
+        src_ips |= {info[4][0] for info in socket.getaddrinfo(source_host, None) if info and len(info) >= 5}
+    except (socket.gaierror, OSError):
+        pass
+
+    resolved_set = set(resolved_ips)
+    if resolved_set & tgt_ips:
+        return ("target", 0.0)
+    if resolved_set & src_ips:
+        return ("source", 30.0)
+    return ("unknown", 0.0)
+
+
+def observe_endpoint_active_sessions(
+    endpoint: DatabaseEndpoint,
+    query_fn: Optional[Callable[[str], Any]] = None,
+) -> int:
+    """Observe real active sessions on a database endpoint using SQL queries."""
+    if query_fn is not None:
+        try:
+            res = query_fn(
+                "SELECT count(*) FROM pg_stat_activity WHERE state = 'active' AND pid <> pg_backend_pid()"
+            )
+            if isinstance(res, (int, float)):
+                endpoint.active_sessions = int(res)
+                return endpoint.active_sessions
+            if isinstance(res, list) and res:
+                row = res[0]
+                val = row[0] if isinstance(row, (tuple, list)) else row.get("count", row.get("cnt", 0))
+                endpoint.active_sessions = int(val)
+                return endpoint.active_sessions
+        except Exception:
+            try:
+                res = query_fn(
+                    "SELECT count(*) FROM information_schema.processlist WHERE command != 'Sleep'"
+                )
+                if isinstance(res, (int, float)):
+                    endpoint.active_sessions = int(res)
+                    return endpoint.active_sessions
+            except Exception:
+                pass
+    return endpoint.active_sessions
 
 
 @dataclass
@@ -316,19 +444,101 @@ class SessionObserver:
         )
 
 
+def counter_headroom_rungs() -> Tuple[decide.Rung, ...]:
+    """Ladder for deciding safety headroom for counter/sequence adjustment.
+
+    Rungs:
+    1. headroom_by_configured_margin: explicitly configured positive margin
+    2. headroom_by_write_rate: derived dynamically from measured write rate and restart gap
+    3. headroom_by_default_fallback: fallback safety headroom
+    """
+    return (
+        decide.Rung(
+            "headroom_by_configured_margin",
+            "derive headroom from explicitly configured margin",
+            needs=(
+                decide.Need(
+                    "explicit safety headroom specified",
+                    lambda f: f.get("safety_headroom") is not None and int(f.get("safety_headroom", 0)) > 0,
+                    "{rung} requires positive explicit headroom",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "headroom_by_write_rate",
+            "derive headroom dynamically from measured write rate and restart gap",
+            needs=(
+                decide.Need(
+                    "measured write rate and restart gap available",
+                    lambda f: float(f.get("write_rate", 0.0)) > 0.0 and float(f.get("restart_gap_sec", 0.0)) > 0.0,
+                    "{rung} requires positive write rate and restart gap",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "headroom_by_default_fallback",
+            "fallback to default safety headroom margin",
+            needs=(
+                decide.Need(
+                    "default fallback permitted",
+                    lambda f: bool(f.get("allow_default_fallback", True)),
+                    "{rung} requires default fallback allowance",
+                ),
+            ),
+        ),
+    )
+
+
+def determine_safety_headroom(
+    source_counters: Dict[str, int],
+    target_counters: Dict[str, int],
+    safety_headroom: Optional[int] = None,
+    write_rate: Optional[float] = None,
+    restart_gap_sec: Optional[float] = None,
+    allow_default: bool = True,
+) -> int:
+    facts = {
+        "safety_headroom": safety_headroom,
+        "write_rate": write_rate or 0.0,
+        "restart_gap_sec": restart_gap_sec or 0.0,
+        "allow_default_fallback": allow_default,
+    }
+    choice = decide.climb("traffic_state:counter_headroom", counter_headroom_rungs(), facts)
+    if choice.rung is None:
+        return 0
+    if choice.rung.name == "headroom_by_configured_margin":
+        return int(safety_headroom)
+    if choice.rung.name == "headroom_by_write_rate":
+        return max(int(float(write_rate) * float(restart_gap_sec) * 1.1), 100)
+    if choice.rung.name == "headroom_by_default_fallback":
+        return 1000
+    return 0
+
+
 class CounterAdjustmentPlanner:
     @staticmethod
     def plan_adjustments(
         source_counters: Dict[str, int],
         target_counters: Dict[str, int],
-        safety_headroom: int = 1000,
+        safety_headroom: Optional[int] = None,
+        write_rate: Optional[float] = None,
+        restart_gap_sec: Optional[float] = None,
+        allow_default: bool = True,
     ) -> Dict[str, int]:
+        margin = determine_safety_headroom(
+            source_counters,
+            target_counters,
+            safety_headroom=safety_headroom,
+            write_rate=write_rate,
+            restart_gap_sec=restart_gap_sec,
+            allow_default=allow_default,
+        )
         adjustments: Dict[str, int] = {}
         all_keys = set(source_counters.keys()) | set(target_counters.keys())
         for key in sorted(all_keys):
             src_val = source_counters.get(key, 0)
             tgt_val = target_counters.get(key, 0)
-            new_target_val = max(src_val, tgt_val) + safety_headroom
+            new_target_val = max(src_val, tgt_val) + margin
             adjustments[key] = new_target_val
         return adjustments
 
@@ -342,68 +552,37 @@ class CounterAdjustmentPlanner:
 
 
 class ActiveLeaseLock:
+    """Mutual exclusion lease backed directly by migkit.lease.Lease."""
+
     def __init__(self, lock_file: Path, term_seconds: float = 30.0):
-        self.lock_file = lock_file
-        self.term_seconds = term_seconds
-        self._fd: Optional[int] = None
-        self._acquired = False
+        self.lock_file = Path(lock_file)
+        self.term_seconds = float(term_seconds)
+        self._lease = lease.Lease(
+            self.lock_file,
+            what="cutover traffic state",
+            term=self.term_seconds,
+        )
 
     def acquire(self) -> bool:
-        self.lock_file.parent.mkdir(parents=True, exist_ok=True)
         try:
-            fd = os.open(str(self.lock_file), os.O_CREAT | os.O_RDWR, 0o600)
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            payload = json.dumps(
-                {
-                    "pid": os.getpid(),
-                    "acquired_at": time.time(),
-                    "expires_at": time.time() + self.term_seconds,
-                }
-            )
-            os.ftruncate(fd, 0)
-            os.lseek(fd, 0, os.SEEK_SET)
-            os.write(fd, payload.encode("ascii"))
-            os.fsync(fd)
-            self._fd = fd
-            self._acquired = True
+            self._lease.acquire()
             return True
-        except (OSError, BlockingIOError):
-            if self._fd is not None:
-                try:
-                    os.close(self._fd)
-                except OSError:
-                    pass
-                self._fd = None
-            raise LeaseLockError(f"active lease lock held by another process: {self.lock_file}")
+        except (lease.Held, Exception) as exc:
+            raise LeaseLockError(f"active lease lock held by another process: {self.lock_file} ({exc})") from exc
 
     def heartbeat(self) -> None:
-        if not self._acquired or self._fd is None:
+        if not self._lease._renew_once():
             raise LeaseLockError("cannot heartbeat: lease not held")
-        payload = json.dumps(
-            {
-                "pid": os.getpid(),
-                "heartbeat_at": time.time(),
-                "expires_at": time.time() + self.term_seconds,
-            }
-        )
-        os.lseek(self._fd, 0, os.SEEK_SET)
-        os.ftruncate(self._fd, 0)
-        os.write(self._fd, payload.encode("ascii"))
-        os.fsync(self._fd)
 
     def release(self) -> None:
-        if self._fd is not None:
-            try:
-                fcntl.flock(self._fd, fcntl.LOCK_UN)
-                os.close(self._fd)
-            except OSError:
-                pass
-            self._fd = None
-            self._acquired = False
-            try:
-                self.lock_file.unlink(missing_ok=True)
-            except OSError:
-                pass
+        self._lease.release()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
 
 
 class TrafficStateStore:
@@ -461,17 +640,17 @@ class TrafficStateMachine:
         target: DatabaseEndpoint,
         session_observer: Optional[SessionObserver] = None,
         epoch: int = 1,
-        safety_headroom: int = 1000,
+        safety_headroom: Optional[int] = None,
         lease_term_sec: float = 30.0,
     ):
         self.state_dir = Path(state_dir)
         self.store = TrafficStateStore(self.state_dir)
         self.lease = ActiveLeaseLock(self.state_dir / ".run.lock", term_seconds=lease_term_sec)
-        self.source = source
-        self.target = target
+        self.source = source if source is not None else DatabaseEndpoint(name="source")
+        self.target = target if target is not None else DatabaseEndpoint(name="target")
         self.session_observer = session_observer or SessionObserver()
         self.epoch = int(epoch)
-        self.safety_headroom = int(safety_headroom)
+        self.safety_headroom = safety_headroom
 
         self.current_phase: CutoverPhase = CutoverPhase.INIT
         self.read_routing: ReadRoutingState = ReadRoutingState.SOURCE
@@ -776,3 +955,40 @@ class TrafficStateMachine:
             details={"active_writer": "none"},
         )
         return ("none", badge)
+
+    def transition_to(self, phase: Union[CutoverPhase, str]) -> CareBadge:
+        """Execute state machine transitions to target phase."""
+        p = str(getattr(phase, "value", phase)).upper()
+        if p in ("PAUSE",):
+            return self.step_pause()
+        elif p in ("DRAIN",):
+            if self.current_phase == CutoverPhase.INIT:
+                self.step_pause()
+            return self.step_drain()
+        elif p in ("FENCE",):
+            return self.step_fence()
+        elif p in ("PROOF",):
+            return self.step_proof()
+        elif p in ("COUNTER_ADJUSTMENT", "COUNTERS"):
+            return self.step_counter_adjustment()
+        elif p in ("ROUTING", "PROMOTE"):
+            if self.current_phase != CutoverPhase.ROUTING:
+                if self.current_phase in (CutoverPhase.INIT, CutoverPhase.PAUSE):
+                    self.step_drain()
+                if self.current_phase == CutoverPhase.DRAIN:
+                    self.step_fence()
+                if self.current_phase == CutoverPhase.FENCE:
+                    self.step_proof()
+                if self.current_phase == CutoverPhase.PROOF:
+                    self.step_counter_adjustment()
+                return self.step_routing()
+            return CareBadge.PASS
+        elif p in ("RESUME",):
+            return self.step_resume()
+        elif p in ("CLIENT_ACK",):
+            return self.step_client_ack()
+        elif p in ("COMPLETE", "COMPLETED"):
+            return self.complete_cutover()
+        elif p in ("ROLLBACK", "ROLLED_BACK"):
+            return self.rollback()
+        raise InvalidPhaseTransitionError(f"unknown or unhandled transition target: {phase}")

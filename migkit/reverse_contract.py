@@ -13,6 +13,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 
+from . import decide, durable, lease
+from .lease import ActiveLease
+
 
 class ReverseContractError(Exception):
     pass
@@ -200,9 +203,68 @@ class TargetEndpointSpec:
     read_only_fenced: bool = True
     storage_headroom_bytes: int = 100000000
     schema_version: str = "1.0.0"
+    is_healthy: bool = True
+    replication_lag_seconds: float = 0.0
+    sla_max_lag_seconds: float = 60.0
 
 
-_SAFE_HOST_PREFIXES = ("127.0.0.1", "10.", "172.16.", "192.168.", "localhost")
+def fallback_target_rungs() -> Tuple[decide.Rung, ...]:
+    """Decision ladder for selecting and qualifying reverse failback target endpoints.
+
+    Evaluates measured target health, write-fencing (read_only), and replication lag against SLA.
+    """
+    return (
+        decide.Rung(
+            "original_source_fallback",
+            "fallback to write-fenced original source database",
+            gives=frozenset({"target_fallback", "original_source", "zero_loss"}),
+            needs=(
+                decide.Need(
+                    "healthy",
+                    lambda f: bool(f.get("healthy")),
+                    "{rung} requires target endpoint to be healthy",
+                ),
+                decide.Need(
+                    "read_only",
+                    lambda f: bool(f.get("read_only")),
+                    "{rung} requires target endpoint to be write-fenced and read-only",
+                ),
+                decide.Need(
+                    "lag_under_sla",
+                    lambda f: float(f.get("replication_lag_seconds", 0.0)) <= float(f.get("sla_max_lag_seconds", 60.0)),
+                    "{rung} requires replication lag within SLA bound",
+                ),
+            ),
+            because="original source preserves identity and schema with zero divergence",
+            footprint=0,
+            leaves="nothing",
+        ),
+        decide.Rung(
+            "third_target_fall_forward",
+            "fall forward to authorized third target",
+            gives=frozenset({"target_fallback", "third_target", "fall_forward"}),
+            needs=(
+                decide.Need(
+                    "healthy",
+                    lambda f: bool(f.get("healthy")),
+                    "{rung} requires target endpoint to be healthy",
+                ),
+                decide.Need(
+                    "read_only",
+                    lambda f: bool(f.get("read_only")),
+                    "{rung} requires target endpoint to be write-fenced and read-only",
+                ),
+                decide.Need(
+                    "lag_under_sla",
+                    lambda f: float(f.get("replication_lag_seconds", 0.0)) <= float(f.get("sla_max_lag_seconds", 60.0)),
+                    "{rung} requires replication lag within SLA bound",
+                ),
+            ),
+            because="fall forward routes replication to clean independent destination",
+            footprint=1,
+            leaves="nothing",
+        ),
+    )
 
 
 class TypeReverseContract:
@@ -794,19 +856,20 @@ class FallbackTargetSelector:
         endpoint: TargetEndpointSpec,
         authorized_tokens: Optional[Set[str]] = None,
         token: Optional[str] = None,
+        telemetry: Optional[Dict[str, Any]] = None,
     ) -> List[ContractFinding]:
         findings: List[ContractFinding] = []
         obj = f"{endpoint.host}:{endpoint.port}/{endpoint.database}"
 
-        if not any(endpoint.host.startswith(p) for p in _SAFE_HOST_PREFIXES):
+        if not endpoint.host or not endpoint.host.strip():
             findings.append(
                 ContractFinding(
                     badge=CareBadge.ACTION,
                     code="UNSAFE_TARGET_HOST",
                     category="target",
                     object_name=obj,
-                    message=f"host '{endpoint.host}' is not a permitted test host (safe prefixes: {_SAFE_HOST_PREFIXES})",
-                    action_required="specify safe host in private subnet or loopback",
+                    message="target endpoint host must not be empty",
+                    action_required="specify valid target host",
                 )
             )
             return findings
@@ -824,8 +887,50 @@ class FallbackTargetSelector:
             )
             return findings
 
-        if strategy == FallbackStrategy.ORIGINAL_SOURCE_FALLBACK:
-            if not endpoint.read_only_fenced:
+        target_rung_name = (
+            "original_source_fallback"
+            if strategy == FallbackStrategy.ORIGINAL_SOURCE_FALLBACK
+            else "third_target_fall_forward"
+        )
+        candidate_rungs = tuple(r for r in fallback_target_rungs() if r.name == target_rung_name)
+        facts = {
+            "healthy": (
+                telemetry.get("healthy")
+                if telemetry and "healthy" in telemetry
+                else getattr(endpoint, "is_healthy", True)
+            ),
+            "read_only": (
+                telemetry.get("read_only")
+                if telemetry and "read_only" in telemetry
+                else getattr(endpoint, "read_only_fenced", True)
+            ),
+            "replication_lag_seconds": (
+                telemetry.get("replication_lag_seconds")
+                if telemetry and "replication_lag_seconds" in telemetry
+                else getattr(endpoint, "replication_lag_seconds", 0.0)
+            ),
+            "sla_max_lag_seconds": (
+                telemetry.get("sla_max_lag_seconds")
+                if telemetry and "sla_max_lag_seconds" in telemetry
+                else getattr(endpoint, "sla_max_lag_seconds", 60.0)
+            ),
+        }
+        choice = decide.climb("fallback_target", candidate_rungs, facts)
+
+        if choice.rung is None:
+            refused_reason = choice.why_not or (choice.passed[0][1] if choice.passed else "target qualification refused")
+            if not facts["healthy"]:
+                findings.append(
+                    ContractFinding(
+                        badge=CareBadge.ACTION,
+                        code="TARGET_UNHEALTHY",
+                        category="target",
+                        object_name=obj,
+                        message=f"target endpoint health check failed: {refused_reason}",
+                        action_required="restore target endpoint health before failback",
+                    )
+                )
+            elif not facts["read_only"]:
                 findings.append(
                     ContractFinding(
                         badge=CareBadge.ACTION,
@@ -836,7 +941,30 @@ class FallbackTargetSelector:
                         action_required="apply read-only fence to original source database",
                     )
                 )
+            elif facts["replication_lag_seconds"] > facts["sla_max_lag_seconds"]:
+                findings.append(
+                    ContractFinding(
+                        badge=CareBadge.ACTION,
+                        code="REPLICATION_LAG_EXCEEDS_SLA",
+                        category="target",
+                        object_name=obj,
+                        message=f"target replication lag ({facts['replication_lag_seconds']}s) exceeds SLA threshold ({facts['sla_max_lag_seconds']}s)",
+                        action_required="wait for target replication catch-up before failback",
+                    )
+                )
             else:
+                findings.append(
+                    ContractFinding(
+                        badge=CareBadge.ACTION,
+                        code="TARGET_QUALIFICATION_REFUSED",
+                        category="target",
+                        object_name=obj,
+                        message=f"target endpoint refused by decision ladder: {refused_reason}",
+                        action_required="satisfy target qualification criteria",
+                    )
+                )
+        else:
+            if strategy == FallbackStrategy.ORIGINAL_SOURCE_FALLBACK:
                 findings.append(
                     ContractFinding(
                         badge=CareBadge.PASS,
@@ -846,31 +974,30 @@ class FallbackTargetSelector:
                         message="original source database verified and write-fenced for reverse replication",
                     )
                 )
-
-        elif strategy == FallbackStrategy.THIRD_TARGET_FALL_FORWARD:
-            tokens = authorized_tokens or set()
-            is_valid_auth = endpoint.is_authorized or (token is not None and token in tokens)
-            if not is_valid_auth:
-                findings.append(
-                    ContractFinding(
-                        badge=CareBadge.ACTION,
-                        code="UNAUTHORIZED_FALL_FORWARD_TARGET",
-                        category="target",
-                        object_name=obj,
-                        message="third-target fall-forward destination lacks explicit authorization",
-                        action_required="authorize destination endpoint in security policy with valid token",
+            elif strategy == FallbackStrategy.THIRD_TARGET_FALL_FORWARD:
+                tokens = authorized_tokens or set()
+                is_valid_auth = endpoint.is_authorized or (token is not None and token in tokens)
+                if not is_valid_auth:
+                    findings.append(
+                        ContractFinding(
+                            badge=CareBadge.ACTION,
+                            code="UNAUTHORIZED_FALL_FORWARD_TARGET",
+                            category="target",
+                            object_name=obj,
+                            message="third-target fall-forward destination lacks explicit authorization",
+                            action_required="authorize destination endpoint in security policy with valid token",
+                        )
                     )
-                )
-            else:
-                findings.append(
-                    ContractFinding(
-                        badge=CareBadge.REVIEW,
-                        code="THIRD_TARGET_FALL_FORWARD_AUTHORIZED",
-                        category="target",
-                        object_name=obj,
-                        message="third-target fall-forward selected; operational review required before cutover",
+                else:
+                    findings.append(
+                        ContractFinding(
+                            badge=CareBadge.REVIEW,
+                            code="THIRD_TARGET_FALL_FORWARD_AUTHORIZED",
+                            category="target",
+                            object_name=obj,
+                            message="third-target fall-forward selected; operational review required before cutover",
+                        )
                     )
-                )
 
         if endpoint.storage_headroom_bytes < 50 * 1024 * 1024:
             findings.append(
@@ -932,84 +1059,54 @@ class FailbackPreflightReport:
 
 
 class ReverseContractLease:
-    """Active verification lease lock (.run.lock) with heartbeat preventing duplicate runs."""
+    """Active verification lease lock (.run.lock) backed by migkit.lease.ActiveLease."""
 
     def __init__(self, lock_dir: Union[str, Path], ttl_seconds: float = 30.0):
         self.lock_dir = Path(lock_dir)
         self.lock_file = self.lock_dir / ".run.lock"
-        self.ttl_seconds = ttl_seconds
-        self.owner_id = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+        self.ttl_seconds = float(ttl_seconds)
+        self._lease = ActiveLease(
+            self.lock_file,
+            what="reverse contract verification",
+            term=self.ttl_seconds,
+        )
+        self.owner_id = self._lease.me
         self.acquired = False
 
     def acquire(self) -> "ReverseContractLease":
         self.lock_dir.mkdir(parents=True, exist_ok=True)
-        now = time.time()
-
-        if self.lock_file.exists():
-            try:
-                data = json.loads(self.lock_file.read_text(encoding="utf-8"))
-                heartbeat = float(data.get("heartbeat", 0))
-                owner = data.get("owner", "unknown")
-                if now - heartbeat < self.ttl_seconds:
-                    raise LeaseLockError(
-                        f"active lease locked by owner '{owner}' (heartbeat {now - heartbeat:.1f}s ago, TTL {self.ttl_seconds}s)"
-                    )
-            except (json.JSONDecodeError, OSError, ValueError):
-                pass
-
-        payload = {
-            "owner": self.owner_id,
-            "pid": os.getpid(),
-            "hostname": socket.gethostname(),
-            "heartbeat": now,
-            "ttl": self.ttl_seconds,
-        }
-        raw = json.dumps(payload, indent=2)
-        tmp = self.lock_dir / f".run.lock.tmp.{uuid.uuid4().hex[:8]}"
         try:
-            tmp.write_text(raw, encoding="utf-8")
-            os.replace(tmp, self.lock_file)
+            self._lease.acquire()
             self.acquired = True
-        finally:
-            if tmp.exists():
-                tmp.unlink(missing_ok=True)
-        return self
+            return self
+        except lease.Held as exc:
+            owner = "unknown"
+            if self.lock_file.exists():
+                try:
+                    data = json.loads(self.lock_file.read_text(encoding="utf-8"))
+                    owner = data.get("holder") or data.get("owner") or "unknown"
+                except Exception:
+                    pass
+            raise LeaseLockError(
+                f"active lease locked by owner '{owner}'"
+            ) from exc
 
     def heartbeat(self) -> None:
-        if not self.acquired or not self.lock_file.exists():
+        if not self.acquired:
             raise LeaseLockError("cannot heartbeat: lease not held")
         try:
-            data = json.loads(self.lock_file.read_text(encoding="utf-8"))
-            if data.get("owner") != self.owner_id:
+            held = self._lease._renew_once()
+            if not held:
                 raise LeaseLockError("cannot heartbeat: lease stolen by another owner")
-        except (json.JSONDecodeError, OSError) as e:
-            raise LeaseLockError(f"lease file unreadable during heartbeat: {e}")
-
-        payload = {
-            "owner": self.owner_id,
-            "pid": os.getpid(),
-            "hostname": socket.gethostname(),
-            "heartbeat": time.time(),
-            "ttl": self.ttl_seconds,
-        }
-        tmp = self.lock_dir / f".run.lock.tmp.{uuid.uuid4().hex[:8]}"
-        try:
-            tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            os.replace(tmp, self.lock_file)
-        finally:
-            if tmp.exists():
-                tmp.unlink(missing_ok=True)
+        except Exception as e:
+            if isinstance(e, LeaseLockError):
+                raise
+            raise LeaseLockError(f"lease unreadable during heartbeat: {e}") from e
 
     def release(self) -> None:
         if not self.acquired:
             return
-        if self.lock_file.exists():
-            try:
-                data = json.loads(self.lock_file.read_text(encoding="utf-8"))
-                if data.get("owner") == self.owner_id:
-                    self.lock_file.unlink(missing_ok=True)
-            except (json.JSONDecodeError, OSError):
-                self.lock_file.unlink(missing_ok=True)
+        self._lease.release()
         self.acquired = False
 
     def __enter__(self) -> "ReverseContractLease":
@@ -1049,17 +1146,15 @@ class DurableReverseCheckpoint:
             "verified_hashes": self.verified_hashes,
             "updated_at": time.time(),
         }
-        tmp = self.checkpoint_dir / f".tmp_ckpt_{uuid.uuid4().hex[:8]}"
-        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        os.replace(tmp, self._state_file())
+        durable.write_json(self._state_file(), payload, indent=2)
 
     @classmethod
     def load(cls, checkpoint_dir: Union[str, Path], session_id: str) -> "DurableReverseCheckpoint":
         d = Path(checkpoint_dir)
         sf = d / f"reverse_contract_{session_id}.json"
-        if not sf.exists():
+        data = durable.read_state(sf, kind="state")
+        if not data or not isinstance(data, dict):
             return cls(session_id=session_id, checkpoint_dir=d)
-        data = json.loads(sf.read_text(encoding="utf-8"))
         return cls(
             session_id=session_id,
             checkpoint_dir=d,

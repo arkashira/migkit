@@ -78,7 +78,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/commercial.py` - The types only the commercial engines have (backlog W6; the type-fidelity research, docs/research/type-fidelity-2026-09-28.md, sections 6, 8 Classes: Variant.
 - `migkit/complete_path.py` - Optimize verified completion across the full path (Row 589: SMART-N6.complete-path). Classes: CareBadge, CompletePathStage, CompletePathStrategy, EncodingTransportMode, SkewHandlingMode, OptimizerSearchMode.
 - `migkit/config.py` - (no docstring) Classes: Endpoint, SideEndpoint, IamEndpoint, KeychainEndpoint, Hop.
-- `migkit/conflict_semantics.py` - (no docstring) Classes: CareBadge, MergeAlgebraKind, ConflictType, OriginIdentity, VersionVector, HybridLogicalClock.
+- `migkit/conflict_semantics.py` - (no docstring) Classes: CareBadge, MergeAlgebraKind, ConflictType, ConflictSemanticsError, UnresolvedConflictError, OriginIdentity.
 - `migkit/connection_only.py` - Complete endpoint-only operation with reusable intent (Row 594: SMART-N11.connection-only). Classes: CareBadge, ConnectionOnlyError, PolicyMissingError, UnknownBusinessIntentError, UnauthorizedTargetReplacementError, UnauthorizedCutoverError.
 - `migkit/connector_capability.py` - Model schema drift and limitations per connector version (Row 640: RCH32.connector-capability). Classes: CareBadge, ReplicationMode, DriftOperation, SupportDisposition, DocReleaseStatus, ConnectorCapabilityError.
 - `migkit/consolidate.py` - Many databases or tenants into one (backlog P0-SCENARIOS): each source's rows carried into one target under a column the hop names, filled w Classes: Source, TablePlan, SliceVerdict.

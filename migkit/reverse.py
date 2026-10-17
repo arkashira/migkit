@@ -2,7 +2,24 @@ import dataclasses
 from pathlib import Path
 import threading
 import time
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
+
+from . import reverse_contract
+from .reverse_contract import (
+    CareBadge,
+    ColumnMappingSpec,
+    DDLEventSpec,
+    DurableReverseCheckpoint,
+    FailbackPreflightReport,
+    FallbackStrategy,
+    FencePreparationContract,
+    ReverseContractAssessor,
+    SequenceRangeSpec,
+    TableKeySpec,
+    TargetEndpointSpec,
+    TypeSpec,
+    WriteInterval,
+)
 
 
 ORIGIN_FORWARD = "forward"
@@ -434,6 +451,72 @@ def pre_warm_reverse_loop(
 
 class ReverseFailbackController:
     @classmethod
+    def validate_preflight(
+        cls,
+        hop: Any,
+        target_eng: Any = None,
+        source_eng: Any = None,
+        strategy: Optional[FallbackStrategy] = None,
+        endpoint: Optional[TargetEndpointSpec] = None,
+        options: Optional[Dict[str, Any]] = None,
+        type_specs: Sequence[TypeSpec] = (),
+        mapping_specs: Sequence[ColumnMappingSpec] = (),
+        key_specs: Sequence[TableKeySpec] = (),
+        sequence_specs: Sequence[SequenceRangeSpec] = (),
+        ddl_events: Sequence[DDLEventSpec] = (),
+        write_intervals: Sequence[WriteInterval] = (),
+        checkpoint: Optional[DurableReverseCheckpoint] = None,
+        authorization_token: Optional[str] = None,
+        authorized_tokens: Optional[Set[str]] = None,
+    ) -> FailbackPreflightReport:
+        """Execute preflight reversibility validation before cutover or failback claim."""
+        hop_name = getattr(hop, "name", str(hop))
+        opt = options or getattr(hop, "options", {}) or {}
+        strat = strategy or opt.get("fallback_strategy", FallbackStrategy.ORIGINAL_SOURCE_FALLBACK)
+        if isinstance(strat, str):
+            try:
+                strat = FallbackStrategy(strat)
+            except ValueError:
+                strat = FallbackStrategy.ORIGINAL_SOURCE_FALLBACK
+
+        if endpoint is None:
+            src = getattr(hop, "source", None)
+            src_host = getattr(src, "host", "127.0.0.1") if src else "127.0.0.1"
+            fam = getattr(getattr(source_eng, "engine_family", None) or getattr(hop, "engine", "postgres"), "value", getattr(hop, "engine", "postgres"))
+            default_port = 3306 if "mysql" in str(fam).lower() else 5432
+            src_port = int(getattr(src, "port", None) or default_port)
+            dbs = list(getattr(hop, "databases", None) or ["production_db"])
+            src_db = getattr(src, "database", None) or dbs[0]
+            endpoint = TargetEndpointSpec(
+                endpoint_id=f"fallback_{hop_name}",
+                strategy=strat,
+                host=src_host,
+                port=src_port,
+                database=str(src_db),
+                is_authorized=True,
+                read_only_fenced=True,
+            )
+
+        fence_contract = FencePreparationContract()
+        if opt.get("arm_reverse_capture", True):
+            fence_contract.arm_at_forward_fence(fence_lsn=1000, target_is_write_fenced=True)
+        assessor = ReverseContractAssessor(fence_contract=fence_contract)
+        return assessor.assess(
+            session_id=f"preflight_{hop_name}",
+            strategy=strat,
+            endpoint=endpoint,
+            type_specs=type_specs,
+            mapping_specs=mapping_specs,
+            key_specs=key_specs,
+            sequence_specs=sequence_specs,
+            ddl_events=ddl_events,
+            write_intervals=write_intervals,
+            checkpoint=checkpoint,
+            authorization_token=authorization_token,
+            authorized_tokens=authorized_tokens,
+        )
+
+    @classmethod
     def trigger_failback(
         cls,
         hop: Any,
@@ -495,6 +578,30 @@ class ReverseFailbackController:
             "ok": True,
             "remaining_hours": round(loop.remaining_retention_hours(), 2),
         }
+
+        # Preflight reversibility contract validation
+        if not options or not options.get("skip_preflight", False):
+            t_pref = time.time()
+            preflight_res = cls.validate_preflight(
+                hop=hop,
+                target_eng=target_eng,
+                source_eng=source_eng,
+                options=options,
+            )
+            steps["preflight_contract"] = {
+                "ok": preflight_res.failback_ready,
+                "overall_badge": preflight_res.overall_badge.value,
+                "can_claim_zero_loss": preflight_res.can_claim_zero_loss,
+                "duration_seconds": round(time.time() - t_pref, 4),
+            }
+            if not preflight_res.failback_ready and not force:
+                return FailbackResult(
+                    ok=False,
+                    duration_seconds=round(time.time() - t0, 4),
+                    remaining_window_hours=round(loop.remaining_retention_hours(), 2) if loop else 0.0,
+                    steps=steps,
+                    error=f"Preflight reversibility contract failed [{preflight_res.overall_badge.value}]: reverse capability not guaranteed",
+                )
 
         databases = list(getattr(hop, "databases", None) or [])
 
@@ -662,3 +769,9 @@ class ReverseFailbackController:
 
 def trigger_failback(hop: Any, **kwargs) -> FailbackResult:
     return ReverseFailbackController.trigger_failback(hop, **kwargs)
+
+
+def preflight_reversibility(hop: Any, **kwargs) -> FailbackPreflightReport:
+    """Preflight reversibility verification before claiming failback readiness."""
+    return ReverseFailbackController.validate_preflight(hop, **kwargs)
+

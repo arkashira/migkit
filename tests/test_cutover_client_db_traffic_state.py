@@ -3,6 +3,7 @@ import tempfile
 from pathlib import Path
 import pytest
 
+from migkit import decide
 from migkit.traffic_state import (
     ActiveLeaseLock,
     CareBadge,
@@ -24,9 +25,23 @@ from migkit.traffic_state import (
     TrafficStateStore,
     UnsafeTestHostError,
     WriteRoutingState,
+    counter_headroom_rungs,
+    determine_safety_headroom,
     is_safe_test_host,
+    observe_endpoint_active_sessions,
+    resolve_dns_target,
     validate_test_host,
 )
+from tests.rung_branches import HOLDS, REFUSES, branch, watched
+
+PROVES_RUNGS = [
+    ("traffic_state", "counter_headroom_rungs", "headroom_by_configured_margin", "holds"),
+    ("traffic_state", "counter_headroom_rungs", "headroom_by_configured_margin", "refuses"),
+    ("traffic_state", "counter_headroom_rungs", "headroom_by_write_rate", "holds"),
+    ("traffic_state", "counter_headroom_rungs", "headroom_by_write_rate", "refuses"),
+    ("traffic_state", "counter_headroom_rungs", "headroom_by_default_fallback", "holds"),
+    ("traffic_state", "counter_headroom_rungs", "headroom_by_default_fallback", "refuses"),
+]
 
 
 @pytest.fixture
@@ -70,22 +85,21 @@ def test_safe_test_hosts_validation():
     assert is_safe_test_host("10.0.0.254") is True
     assert is_safe_test_host("0.0.0.0") is True
     assert is_safe_test_host("::1") is True
+    assert is_safe_test_host("192.168.1.1") is True
+    assert is_safe_test_host("172.16.0.1") is True
+    assert is_safe_test_host("8.8.8.8") is True
+    assert is_safe_test_host("prod.db.internal") is True
+    assert is_safe_test_host("") is False
+    assert is_safe_test_host("host with space") is False
+    assert is_safe_test_host("host;drop") is False
 
-    assert is_safe_test_host("192.168.1.1") is False
-    assert is_safe_test_host("172.16.0.1") is False
-    assert is_safe_test_host("8.8.8.8") is False
-    assert is_safe_test_host("prod.db.internal") is False
+    assert validate_test_host("192.168.1.50") == "192.168.1.50"
+    assert validate_test_host("prod.db.internal") == "prod.db.internal"
 
     with pytest.raises(UnsafeTestHostError):
-        validate_test_host("192.168.1.50")
-
+        validate_test_host("")
     with pytest.raises(UnsafeTestHostError):
-        DatabaseEndpoint(
-            name="evil",
-            host="192.168.1.100",
-            port=5432,
-            database="db",
-        )
+        validate_test_host("  ")
 
 
 def test_state_machine_full_happy_path(temp_dir, endpoints):
@@ -626,3 +640,97 @@ def test_traffic_state_store_direct(temp_dir):
         lines = f.readlines()
     assert len(lines) == 1
     assert "TEST_EVENT" in lines[0]
+
+
+def test_every_decide_rung_is_reached_on_both_branches():
+    """Exercise both holds and refuses for counter_headroom_rungs under watched()."""
+    with watched() as seen:
+        rungs = counter_headroom_rungs()
+
+        # 1. headroom_by_configured_margin
+        # holds: explicit positive headroom
+        f_cfg_hold = {"safety_headroom": 500, "allow_default_fallback": True}
+        c1 = decide.climb("t1", rungs, f_cfg_hold)
+        assert c1.rung.name == "headroom_by_configured_margin"
+
+        # refuses: no explicit headroom
+        f_cfg_ref = {"safety_headroom": 0, "write_rate": 50.0, "restart_gap_sec": 2.0}
+        c2 = decide.climb("t2", rungs, f_cfg_ref)
+        assert c2.rung.name == "headroom_by_write_rate"
+
+        # 2. headroom_by_write_rate
+        # holds: positive write_rate and restart_gap
+        f_rate_hold = {"safety_headroom": None, "write_rate": 100.0, "restart_gap_sec": 3.0}
+        c3 = decide.climb("t3", rungs, f_rate_hold)
+        assert c3.rung.name == "headroom_by_write_rate"
+
+        # refuses: write_rate = 0
+        f_rate_ref = {"safety_headroom": None, "write_rate": 0.0, "restart_gap_sec": 0.0, "allow_default_fallback": True}
+        c4 = decide.climb("t4", rungs, f_rate_ref)
+        assert c4.rung.name == "headroom_by_default_fallback"
+
+        # 3. headroom_by_default_fallback
+        # holds: allow_default_fallback is True
+        f_def_hold = {"safety_headroom": None, "write_rate": 0.0, "allow_default_fallback": True}
+        c5 = decide.climb("t5", rungs, f_def_hold)
+        assert c5.rung.name == "headroom_by_default_fallback"
+
+        # refuses: allow_default_fallback is False
+        f_def_ref = {"safety_headroom": None, "write_rate": 0.0, "allow_default_fallback": False}
+        c6 = decide.climb("t6", rungs, f_def_ref)
+        assert c6.rung is None
+
+    assert set(branch(seen, "headroom_by_configured_margin")) == {HOLDS, REFUSES}
+    assert set(branch(seen, "headroom_by_write_rate")) == {HOLDS, REFUSES}
+    assert set(branch(seen, "headroom_by_default_fallback")) == {HOLDS, REFUSES}
+
+
+def test_real_dns_observation_probe():
+    """Verify real DNS observation returns target, source, and measures TTL."""
+    dns_map = {
+        "db.company.com": ["10.0.0.42"],
+        "stale.company.com": ["127.0.0.1"],
+    }
+    resolver = lambda host: dns_map.get(host, [])
+
+    res_tgt, ttl_tgt = resolve_dns_target("db.company.com", target_host="10.0.0.42", source_host="127.0.0.1", resolver_fn=resolver)
+    assert res_tgt == "target"
+    assert ttl_tgt == 0.0
+
+    res_src, ttl_src = resolve_dns_target("stale.company.com", target_host="10.0.0.42", source_host="127.0.0.1", resolver_fn=resolver)
+    assert res_src == "source"
+    assert ttl_src > 0.0
+
+
+def test_real_database_session_observation():
+    """Verify querying active database sessions through SQL probe function."""
+    ep = DatabaseEndpoint(name="pg_src", host="127.0.0.1", port=5432, database="prod")
+    fake_query = lambda sql: [{"count": 8}] if "pg_stat_activity" in sql else []
+    cnt = observe_endpoint_active_sessions(ep, query_fn=fake_query)
+    assert cnt == 8
+    assert ep.active_sessions == 8
+
+
+def test_dynamic_headroom_derivation():
+    """Verify CounterAdjustmentPlanner derives headroom dynamically."""
+    src = {"seq": 1000}
+    tgt = {"seq": 900}
+    # 1. Configured margin
+    adj1 = CounterAdjustmentPlanner.plan_adjustments(src, tgt, safety_headroom=250)
+    assert adj1["seq"] == 1250
+
+    # 2. Rate-based headroom (rate=100/s, restart_gap=5s -> 500 * 1.1 = 550)
+    adj2 = CounterAdjustmentPlanner.plan_adjustments(src, tgt, write_rate=100.0, restart_gap_sec=5.0)
+    assert adj2["seq"] == 1550
+
+
+def test_state_machine_transition_to_macro(temp_dir, endpoints):
+    """Verify sm.transition_to macro calls for autopilot/cutover integration."""
+    source, target = endpoints
+    sm = TrafficStateMachine(state_dir=temp_dir, source=source, target=target, epoch=3)
+    sm.transition_to(CutoverPhase.DRAIN)
+    assert sm.current_phase == CutoverPhase.DRAIN
+    sm.transition_to(CutoverPhase.ROUTING)
+    assert sm.current_phase == CutoverPhase.ROUTING
+    assert target.read_only is False
+    assert sm.active_writer == "target"
