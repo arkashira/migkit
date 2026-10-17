@@ -594,7 +594,9 @@ _BY_NAME = {
                  " conversion_ledger ai_proof_loop rule_generalization"
                  " dynamic_sql_tracer etl_bi_waves query_regression principal_migration"
                  " target_tuning_contract history_contract stream_metadata document_model"
-                 " cache_semantics shard_ddl placement_advice",
+                 " cache_semantics shard_ddl placement_advice"
+                 " connector_capability agent_control release_intelligence incumbent_switch"
+                 " verify_method failure_budget storage_protocol",
     "cli": "cli guide ui estate",
 }
 #: a subpackage, whole

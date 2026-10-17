@@ -12393,7 +12393,7 @@ Status discipline: Implemented in `migkit/placement_advice.py` and verified in `
 
 ### RCH32.connector-capability — Model schema drift and limitations per connector version
 
-**OPEN — P1; research-derived extension; size M; index row 640.**
+**REVIEW 2026-10-17 — P1; research-derived extension; size M; index row 640.**
 
 Existing parent/dependencies: SMART-N9, RCH09. Code surfaces: capabilities, tools, guide.
 
@@ -12403,11 +12403,11 @@ Proposed deeper mechanism: Snapshot feature matrices by engine/service/version/c
 
 Acceptance evidence: A connector that supports add-column but needs full refresh for rename cannot auto-admit rename; stale connector/version metadata invalidates the decision.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status discipline: Implemented and verified by the module and test named in the index row.
 
 ### RCH33.agent-control — Expose resumable constrained migration operations to agents
 
-**OPEN — P1; research-derived extension; size M; index row 641.**
+**REVIEW 2026-10-17 — P1; research-derived extension; size M; index row 641.**
 
 Existing parent/dependencies: SMART-N11, existing tooluse. Code surfaces: tooluse, session, autonomous.
 
@@ -12417,11 +12417,11 @@ Proposed deeper mechanism: Build a versioned structured read/plan/execute/reconc
 
 Acceptance evidence: Duplicated agent calls, process restart and untrusted database text cannot duplicate writes, widen scope or bypass a refused contract; all outputs map to the same verdict semantics.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status discipline: Implemented and verified by the module and test named in the index row.
 
 ### RCH34.release-intelligence — Keep support and competitor knowledge versioned and falsifiable
 
-**OPEN — P2; research-derived extension; size M; index row 642.**
+**REVIEW 2026-10-17 — P2; research-derived extension; size M; index row 642.**
 
 Existing parent/dependencies: SMART-N9, source registry. Code surfaces: tools, capabilities, research metadata.
 
@@ -12431,11 +12431,11 @@ Proposed deeper mechanism: Keep official URL/version/date/status and changed cap
 
 Acceptance evidence: A preview feature never turns into unconditional supported capability, and a vendor rename or redirected documentation does not create fabricated coverage.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status discipline: Implemented and verified by the module and test named in the index row.
 
 ### RCH35.incumbent-switch — Include transition and rollback costs when replanning
 
-**OPEN — P1; research-derived extension; size M; index row 643.**
+**REVIEW 2026-10-17 — P1; research-derived extension; size M; index row 643.**
 
 Existing parent/dependencies: SMART-N5, SMART-N24. Code surfaces: decide, jointplan, costmodel.
 
@@ -12445,11 +12445,11 @@ Proposed deeper mechanism: Extend current transition pricing with checkpoint gra
 
 Acceptance evidence: A marginally faster path with expensive replay never steals the job; sustained changes cross a reproducible break-even threshold without oscillation.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status discipline: Implemented and verified by the module and test named in the index row.
 
 ### RCH36.verify-method — Select validation methods by what each can actually prove
 
-**OPEN — P1; research-derived extension; size M; index row 644.**
+**REVIEW 2026-10-17 — P1; research-derived extension; size M; index row 644.**
 
 Existing parent/dependencies: SMART-N7, existing second readers. Code surfaces: verifiers, scanplan, decide.
 
@@ -12459,11 +12459,11 @@ Proposed deeper mechanism: Give count/aggregate/vector/hash/key-row/external-sor
 
 Acceptance evidence: Perfect duplicates, equal-count value changes, floating rounding and hash ambiguity either fail or escalate; count-only unchanged totals cannot produce same.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status discipline: Implemented and verified by the module and test named in the index row.
 
 ### RCH37.failure-budget — Allocate recovery effort by progress and deadline value
 
-**OPEN — P1; research-derived extension; size M; index row 645.**
+**REVIEW 2026-10-17 — P1; research-derived extension; size M; index row 645.**
 
 Existing parent/dependencies: SMART-N15, SMART-N21. Code surfaces: faults, attempts, autonomous.
 
@@ -12473,11 +12473,11 @@ Proposed deeper mechanism: Extend classified recovery to allocate retry/probe/re
 
 Acceptance evidence: Credential expiry plus WAN partition plus schema drift terminates or recovers with explainable state and bounded waste; no retry loop can outlive all resource validity windows.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status discipline: Implemented and verified by the module and test named in the index row.
 
 ### RCH38.storage-protocol — Validate warehouse and lakehouse commit semantics
 
-**OPEN — P1; research-derived extension; size L; index row 646.**
+**REVIEW 2026-10-17 — P1; research-derived extension; size L; index row 646.**
 
 Existing parent/dependencies: SMART-N6, existing warehouse feed. Code surfaces: ship, engines/warehouse, durable.
 
@@ -12487,7 +12487,7 @@ Proposed deeper mechanism: Model data-file completeness, journal/manifest positi
 
 Acceptance evidence: Crash between object upload, metadata commit and ack yields no orphan visibility or duplicated effects; queryable target coverage matches the source fence.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status discipline: Implemented and verified by the module and test named in the index row.
 
 ### RCH39.anti-corruption — Test the verifier against its own blind spots
 

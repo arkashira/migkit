@@ -22,13 +22,14 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - [`docs/agents/INVENTORY.md`](INVENTORY.md) - every file of `migkit/` and `tools/`: its responsibility package, owner domain, size, importers, the packages it reaches, the programs it wraps and the tests that reach it
 - [`docs/agents/LAYERS.md`](LAYERS.md) - the layering rule (a package imports its own rank and below) and every upward import still listed, with its reason
 
-## `migkit/` (246 modules)
+## `migkit/` (253 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/ack_lattice.py` - (no docstring) Classes: PipelineStage, MonotoneRegressionError, SourceAckRefusedError, CutoverRefusedError, CutoverAuthorization, PositionLattice.
 - `migkit/adaptive_bounds.py` - (no docstring) Classes: AdaptiveBoundsError, InfeasibleBoundsError, CutoverStatus, AdaptiveBoundsEnvelope, ClusterNode, ShardInfo.
 - `migkit/addresses.py` - A hop from two addresses (backlog R21).
 - `migkit/advisors.py` - (no docstring)
+- `migkit/agent_control.py` - Expose resumable constrained migration operations to agents (Row 641: RCH33.agent-control). Classes: CareBadge, AgentPhase, AdmissionVerdict, AgentControlError, UnsupportedInterfaceVersionError, ScopeWideningRefusedError.
 - `migkit/ai_proof_loop.py` - AI Proof Loop with independent executable evidence (RCH19.ai-proof-loop). Classes: CareBadge, ProofStatus, SemanticFaultType, TransactionState, AiAnnotation, CandidateProvenance.
 - `migkit/anchor.py` - Signed checkpoints of the audit record, kept in a bucket that cannot be rewritten (backlog R5.anchor). Classes: Refused, Blocked.
 - `migkit/applyway.py` - How a batch of changes is applied (backlog W9): collapsed change by change, or its keys collapsed as columns and each table's net rows hande Classes: Pace, Plan.
@@ -70,6 +71,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/commercial.py` - The types only the commercial engines have (backlog W6; the type-fidelity research, docs/research/type-fidelity-2026-09-28.md, sections 6, 8 Classes: Variant.
 - `migkit/config.py` - (no docstring) Classes: Endpoint, SideEndpoint, IamEndpoint, KeychainEndpoint, Hop.
 - `migkit/conflict_semantics.py` - (no docstring) Classes: CareBadge, MergeAlgebraKind, ConflictType, OriginIdentity, VersionVector, HybridLogicalClock.
+- `migkit/connector_capability.py` - Model schema drift and limitations per connector version (Row 640: RCH32.connector-capability). Classes: CareBadge, ReplicationMode, DriftOperation, SupportDisposition, DocReleaseStatus, ConnectorCapabilityError.
 - `migkit/consolidate.py` - Many databases or tenants into one (backlog P0-SCENARIOS): each source's rows carried into one target under a column the hop names, filled w Classes: Source, TablePlan, SliceVerdict.
 - `migkit/control_upgrade.py` - (no docstring) Classes: StateSchemaVersion, InvariantViolationError, UpgradeRollbackError, HopDefinition, AdapterCheckpoint, DurableControlState.
 - `migkit/conversion_ledger.py` - Scope-distinct conversion ledger (RCH18.conversion-ledger). Classes: CareBadge, ArtefactKind, ArtefactCriticality, LifecycleStage, DebtType, DebtRecord.
@@ -107,6 +109,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/export.py` - The evidence of a migration, exported: what migkit did on a hop and what it measured, in the forms audit and change processes take - HTML an
 - `migkit/factbook.py` - Every fact a choice may read, in one place (backlog P0-SMART, the owner's note B of 2026-09-30: "every factor"). Classes: Fact.
 - `migkit/failpoint.py` - Failure on purpose, at the places a move keeps what it has done.
+- `migkit/failure_budget.py` - Allocate recovery effort by progress and deadline value (Row 645: RCH37.failure-budget). Classes: CareBadge, RecoveryStage, TerminationReason, FailureBudgetError, DiagnosisFailureError, LeaseLockHeldError.
 - `migkit/faults.py` - What can go wrong in a migration, how each is told by its effect, and what is done about it (backlog P0-RESILIENCE-ALL). Classes: Fault, Told, Breaker, Owned, Injected.
 - `migkit/fencing.py` - A mover's token, carried into every transaction it writes, so that a mover which lost its hold is refused by the target itself (backlog W1). Classes: Fenced, Token, Way, GuardedDocument, ComparedKey, LightweightTransaction.
 - `migkit/fleet.py` - One table's ranges across machines, as the machine that takes a hop over finds them, and the proof once the table is done that every range w Classes: Departed, Account.
@@ -125,6 +128,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/huawei_sdk.py` - Huawei Cloud's API for migkit, run in the environment its SDK lives in.
 - `migkit/identity_semantics.py` - (no docstring) Classes: IdentitySemanticsError, IdentityContractViolationError, NonInjectiveKeyError, KeyStrategy, CollationSemantics, BulkApplyResult.
 - `migkit/imports.py` - A hop from another tool's task (backlog R21: switching costs nothing). Classes: Imported.
+- `migkit/incumbent_switch.py` - Include transition and rollback costs when replanning (Row 643: RCH35.incumbent-switch). Classes: CareBadge, CheckpointGranularity, SwitchVerdict, IncumbentSwitchError, ActiveLeaseConflictError, UnvalidatedIncumbentError.
 - `migkit/indexes.py` - Getting the indexes out of the way of a bulk load, and putting them back. Classes: NotRebuilt, IndexWindow, NotPutBack, ForeignKeyWindow, DeferredIndexLifecycle.
 - `migkit/init.py` - (no docstring)
 - `migkit/integrations.py` - migkit inside the team's tools: a task for Airflow and Dagster, a step for GitHub Actions and Argo Workflows, each a thin wrapper over migki
@@ -182,6 +186,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/redisshake.py` - A Redis keyspace copied by the replica protocol's own copy (backlog F7.rshake).
 - `migkit/registry.py` - A schema registry spoken to over its HTTP API (the one Confluent's registry defines and Redpanda's, Apicurio's and Karapace's also speak), a Classes: Refused, Missing, Registry.
 - `migkit/rehearsal.py` - Rehearse, then forecast (backlog R23, 2).
+- `migkit/release_intelligence.py` - Keep support and competitor knowledge versioned and falsifiable (Row 642: RCH34.release-intelligence). Classes: CareBadge, KnowledgeTier, ReleaseDocStatus, PredicateChangeKind, TaskKind, SupportStanding.
 - `migkit/render.py` - The canonical text of a column's values, with the rendering chosen once for the column rather than once for every value.
 - `migkit/repairlog.py` - A statement-level record of a repair, beside its undo (problems C3, backlog C3.repair). Classes: Record, CanonIO, DocumentIO, DumpIO, TableIO.
 - `migkit/repairways.py` - The way a table's rows are repaired, chosen by how far it drifted and what each way costs here (backlog P0-DEPTH 1). Classes: Sides, Span, Outcome, RepairCosts, Ladder.
@@ -228,6 +233,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/stall.py` - A copy whose link holds and passes nothing is given up on. Classes: Stalled, Guard, Watch.
 - `migkit/standby.py` - Reading a side that is a replica, and what that does to the answer.
 - `migkit/state.py` - Pluggable state backend, terraform-style. Classes: LocalStore, S3Store, Taken, S3RunState, Mirror, TailMirror.
+- `migkit/storage_protocol.py` - Validate warehouse and lakehouse commit semantics (Row 646: RCH38.storage-protocol). Classes: CareBadge, StoragePlatform, CommitProtocolMode, TombstoneMechanism, CrashInjectionPoint, CommitPhaseState.
 - `migkit/stream_metadata.py` - Move event consumers and schemas with stream bytes (Row 635: RCH27.stream-metadata). Classes: CareBadge, OffsetCapability, CleanupPolicy, PromotionPhase, ConsumerGroupState, SchemaFormat.
 - `migkit/streamout.py` - Changes delivered as messages into a stream, in the shapes consumers expect (backlog 35): what a message is, whatever carries it - a Kafka t
 - `migkit/subset.py` - Copies for testing (backlog R23, 5): the rows chosen and every row they refer to, masked where the hop says, into a staging or developer dat Classes: Rule, Plan.
@@ -265,6 +271,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/vectors.py` - A vector - an embedding - as the numbers it holds, each exactly.
 - `migkit/verdict.py` - The one result shape, whatever engine produced it. Classes: Verdict, Refused, Usage, Decision, Held.
 - `migkit/verifiers.py` - What migkit asks of each verifier it wraps, read off the code, with every feature it does not use given its reason (backlog 0f). Classes: ChangeIntervals, FencingResult, CrossoverWatermarkFencer.
+- `migkit/verify_method.py` - Select validation methods by what each can actually prove (Row 644: RCH36.verify-method). Classes: CareBadge, ValidationMethodKind, ProofStrength, ClaimedGuarantee, ValidationVerdict, PathologyKind.
 - `migkit/waysaid.py` - What `doctor` says of the ways a hop stands on: the way the whole database moves, the way its changes are followed, and how deeply each tabl
 - `migkit/wording.py` - What the operator reads while migkit works, in migkit's own words. Classes: Tally, DebugLog, Step.
 - `migkit/workflow_exporter.py` - A hop's whole move as a scheduler's workflow (backlog R23.8): an Airflow DAG, a Dagster job or an Argo workflow, each step a migkit command 
