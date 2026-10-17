@@ -12964,3 +12964,206 @@ Acceptance test: Publish reproducible results per pair with injected compound fa
 Sources: [P069](https://www.reddit.com/r/SQL/comments/1qk44yi/database_migration/), [P011](https://www.reddit.com/r/dataengineering/comments/1u81nqa/evaluating_dlt_vs_fivetran_for_a_small_team_that/), [P046](https://www.reddit.com/r/dataengineering/comments/1mwvz6p/what_is_the_most_painful_data_migration_project/).
 
 Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### FIELD-OPS01.universal-durable-resume — Universal typed durable resume across all phases down to range/cursor level
+
+**OPEN — P0; operations/scale; size L; index row 677.**
+
+Parent/dependencies and code: `migkit/cli.py`, `migkit/durable.py`, `migkit/state.py`.
+
+Reported field incident / evidence: Heartbeat recovery in `production-rehearsal-validation` failed at checkpoint 387/399 when `order_histories` died. Script resume crashed because `json.dumps(r, default=str)` serialized datetime values as raw strings, causing comparison predicates to reject string types. Furthermore, `check-progress.jsonl` only recorded whole-table keys `(check, scope)`, forcing 451 chunks of `orders` to re-scan from chunk 0 whenever interrupted.
+
+Architecture & mechanism design: Implement sub-unit and range-level durable checkpointing for every long-running command (`check`, `move`, `sync`, `repair`, `tail`). Checkpoints record exact cursor values with canonical type preservation:
+`{"hop": h, "db": d, "table": t, "range_id": rid, "cursor": {"_type": "datetime", "val": 1728000000}, "hash_so_far": h, "rows": n}`.
+Resume reads the journal, skips completed ranges in $O(1)$, and reconstructs native query predicates without type coercion.
+
+Acceptance test: Inject SIGINT / process kill at 50% of a multi-range table check with composite PKs and datetime columns. Resume completes within the remaining duration, issues zero duplicate queries on completed ranges, and produces byte-identical final verdict.
+
+---
+
+### FIELD-OPS02.active-hop-lease-lock — Active Hop mutual-exclusion lease and PID heartbeat for read/verify operations
+
+**OPEN — P0; operations/scale; size M; index row 678.**
+
+Parent/dependencies and code: `migkit/lease.py`, `migkit/cli.py`.
+
+Reported field incident / evidence: During `production-rehearsal-validation` validation, detached background scripts and foreground sessions overlapped without detection (`order PID30903` and `adapter PID30906`), driving cumulative query duration to 25,723 seconds within a 21,109-second window. `migkit/lease.py` guarded only write steps (`move`, `repair`, `cutover`), leaving read/verify completely unguarded against concurrent execution.
+
+Architecture & mechanism design: Extend `lease.py` to acquire an active Hop verification lease (`reports/migkit/<hop>/.run.lock`) for all read/verify commands. The lease records host, PID, active command, progress fraction, and renewal heartbeat (every 10s). If an active lease is found:
+- Refuse duplicate execution by default: `[BLOCKED] Active verification PID 30903 is running on hop 'batch1-mysql' (progress: 240/451 units, 53%). Use --attach or --steal.`
+- Stale leases (>30s without heartbeat) are safely reclaimed with logged audit trail.
+
+Acceptance test: Starting two concurrent `migkit check <hop>` processes on the same host or shared state store blocks the second process with an explicit diagnostic message and PID identifier.
+
+---
+
+### FIELD-OPS03.adaptive-aimd-batch-sizing — Dynamic AIMD batch and chunk autosizing adapting to row bytes and query latency
+
+**OPEN — P0; verify; size L; index row 679.**
+
+Parent/dependencies and code: `migkit/sizing.py`, `migkit/scanplan.py`, `migkit/ranges.py`.
+
+Reported field incident / evidence: In `production-rehearsal-validation`, static batch slicing timed out repeatedly on `order_details` (409 KB/row) and 68 LOB columns across `orders`, while small-row tables suffered excessive latency overhead from thousands of small query round-trips.
+
+Architecture & mechanism design: Implement dynamic Additive Increase / Multiplicative Decrease (AIMD) chunk autosizing.
+1. When average row footprint exceeds 64 KB or query latency exceeds 5.0 seconds, dynamically halve the chunk size (`chunk_size = max(100, chunk_size // 2)`).
+2. When query latency is sub-second and endpoint memory is healthy, expand chunk size (`chunk_size = min(50000, int(chunk_size * 1.5))`).
+3. Auto-slice LOB/JSON columns into dedicated bounded predicates to prevent database buffer thrashing.
+
+Acceptance test: Verify a heterogeneous table containing mixed 100-byte rows and 500KB blobs without query timeout and with automatic chunk expansion on small-row sections.
+
+---
+
+### FIELD-OPS04.byte-weighted-instant-eta — Zero-warmup instant cold-start ETA via byte-weighted EWMA and P90 confidence
+
+**OPEN — P1; ease of use; size M; index row 680.**
+
+Parent/dependencies and code: `migkit/util.py`, `migkit/cli.py`.
+
+Reported field incident / evidence: In `batch1-mysql.data.log`, migkit reported `eta not enough evidence yet: 1 of 3 units measured; wait for 2 more units to finish` across 50% of the run. Operators were left blind to completion time during tight cutover rehearsal windows.
+
+Architecture & mechanism design:
+1. Eliminate the rigid 3-unit warmup requirement. Estimate baseline duration from initial catalog row/byte counts and preflight bandwidth probing on the first second of execution.
+2. Replace simple unit counts with Byte-Weighted Exponentially Weighted Moving Average (EWMA), weighting recent throughput at $lpha = 0.7$.
+3. Compute and display explicit P50 and P90 duration ranges: `Progress: 42% (1.8 GB / 4.2 GB) | Rate: 45 MB/s | ETA: 54s (P50: 48s, P90: 68s)`.
+
+Acceptance test: On any single-table or multi-table verification run, an initial estimated ETA is emitted within the first 3 seconds and monotonically narrows towards completion.
+
+---
+
+### FIELD-OPS05.fused-pushdown-verification — Single-query fused aggregation combining row count, XOR hash, charset, and NULL ratios
+
+**OPEN — P0; verify; size L; index row 681.**
+
+Parent/dependencies and code: `migkit/scanplan.py`, `migkit/engines/mysql.py`, `migkit/engines/postgres.py`.
+
+Reported field incident / evidence: In `production-rehearsal-validation`, the native replacement-character charset scan and NULL/empty scan iterated `order_items` 30 times (once per text column), causing 30 full-table scans and repeated database timeouts.
+
+Architecture & mechanism design: Fuse all column-level audit expressions into a single pushdown aggregation query per table or partition:
+`SELECT COUNT(*) as total_rows, BIT_XOR(HASH_EXPR) as data_hash, SUM(CASE WHEN c1 LIKE "%�%" OR c2 LIKE "%�%" THEN 1 ELSE 0 END) as charset_anomalies, SUM(CASE WHEN c1 IS NULL AND c2 = "" THEN 1 ELSE 0 END) as null_empty_diffs FROM tbl;`
+Ensures exactly one sequential I/O scan per table slice.
+
+Acceptance test: A table with 30 text columns is verified for row count, content hash, charset anomalies, and nullability drift in exactly 1 database query per slice rather than 30.
+
+---
+
+### FIELD-OPS06.lob-projection-hash-pushdown — Server-side length and chunked substring hashing for LOB columns > 64KB
+
+**OPEN — P0; verify; size M; index row 682.**
+
+Parent/dependencies and code: `migkit/scanplan.py`, `migkit/leaves.py`.
+
+Reported field incident / evidence: Full-value LOB queries on `order_details` (409 KB/row) caused client OOM and network stalls over WARP/SSM tunnels.
+
+Architecture & mechanism design: When an engine detects columns with type `TEXT`, `BLOB`, `JSON`, `BYTEA`, or maximum declared length > 64KB, push down lightweight projection hashing:
+`MD5(CONCAT(COALESCE(LENGTH(col), 0), ":", SUBSTRING(col, 1, 1024), ":", SUBSTRING(col, -1024)))`.
+Full column contents never transit the network unless a mismatch is confirmed.
+
+Acceptance test: Verifying 10,000 rows containing 500KB LOB values completes in under 5 seconds with constant <50MB client RAM consumption.
+
+---
+
+### FIELD-OPS07.cdc-watermark-inflight-fencing — Low/high watermark and LSN/GTID crossover fencing to eliminate CDC false diff alarms
+
+**OPEN — P0; correctness; size L; index row 683.**
+
+Parent/dependencies and code: `migkit/verifiers.py`, `migkit/engines/postgres.py`, `migkit/engines/mysql.py`.
+
+Reported field incident / evidence: In `syncback-pg.data.log` and `VERIFY-RUN-REVIEW.md`, active replication caused a temporary 7-row delta in order partitions, falsely flagged as corruption during continuous replication.
+
+Architecture & mechanism design: Implement Crossover Watermark Fencing:
+1. Capture Source LSN/GTID ($L_0$) at snapshot start.
+2. Collect candidate mismatched rows.
+3. If CDC apply position has not reached $L_0$, defer judgment; wait until target replication flush LSN $\ge L_0$ and re-check candidate keys.
+4. Rows that converge to parity are classified as `in_flight_replication_write` (clean); only persistent discrepancies are emitted as defects.
+
+Acceptance test: Run verification while an active worker generates 100 INSERTs/sec via replication. Zero false positive diffs are reported for synchronized rows.
+
+---
+
+### FIELD-OPS08.adaptive-merkle-bucket-diff — Hierarchical Merkle bucket diffing (ABE) for tables > 1M rows skipping matching data
+
+**OPEN — P0; verify; size L; index row 684.**
+
+Parent/dependencies and code: `migkit/scanplan.py`, `migkit/leaves.py`.
+
+Reported field incident / evidence: The 4h 10m validation run in `production-rehearsal-validation` scanned 44.9M rows sequentially across 233 tables. 99.9% of data was identical, yet every row was re-hashed linearly.
+
+Architecture & mechanism design: Implement Adaptive Bucket Expansion (ABE) Merkle Diffing.
+1. Partition the primary key space into $2^k$ buckets (e.g. 128 to 1024 buckets).
+2. Execute a single pushdown grouping query:
+   `SELECT bucket_id, COUNT(*), BIT_XOR(HASH(row)) FROM tbl GROUP BY bucket_id;`
+3. Compare bucket hashes. Identical buckets ($>99\%$) are certified complete in $O(1)$ time.
+4. Divergent buckets are subdivided recursively until individual mismatched primary keys are pinpointed.
+
+Acceptance test: Verifying a 10M-row table with 5 mismatched rows completes within 15 seconds, examining fewer than 0.1% of total rows during drilldown.
+
+---
+
+### FIELD-OPS09.ssm-tunnel-keepalive-armor — Socket keepalive and application-level heartbeats preventing SSM/proxy connection drops
+
+**OPEN — P1; operations/scale; size M; index row 685.**
+
+Parent/dependencies and code: `migkit/config.py`, `migkit/engines/mysql.py`, `migkit/engines/postgres.py`.
+
+Reported field incident / evidence: In `batch1-mysql.data.log` and memory `tencent-aws-migration-legs.md`, AWS SSM port-forwarding tunnels and Cloud Proxies silently severed connections after 30-60 minutes of long queries, leaving orphaned sessions on RDS and aborted checks on client.
+
+Architecture & mechanism design:
+1. Enable OS TCP keepalives (`SO_KEEPALIVE`, `TCP_KEEPIDLE=15`, `TCP_KEEPINTVL=5`, `TCP_KEEPCNT=3`) across all database client socket connections.
+2. Embed an asynchronous background heartbeat query (`SELECT 1`) every 20 seconds during long pushdown executions to ensure intermediate proxies and NAT gateways remain active.
+
+Acceptance test: A 45-minute continuous table check executed over an SSM port-forwarding session completes without session drop or client disconnection.
+
+---
+
+### FIELD-OPS10.pre-syncback-headroom-ratchet — Pre-syncback automated headroom ratchet (+10,000) and slot-before-snapshot verification
+
+**OPEN — P0; cutover; size M; index row 686.**
+
+Parent/dependencies and code: `migkit/cli.py`, `migkit/engines/postgres.py`, `migkit/engines/mysql.py`.
+
+Reported field incident / evidence: In `slot-before-snapshot.md`, creating a slot 27 minutes after snapshot led to an unrecoverable 11-row data hole. In `rds-tencent-sync-verify.md`, target sequences stuck at 0 caused immediate primary key collisions upon cutover/syncback.
+
+Architecture & mechanism design:
+1. Verify logical replication slot existence on target *before* authorizing snapshot export.
+2. In pre-syncback cutover checks, execute an automated sequence and auto_increment ratchet:
+   `target_seq = GREATEST(source_max, target_max) + 10000;`
+   Refuse cutover if target sequences lack adequate headroom.
+
+Acceptance test: Pre-syncback verification flags un-ratcheted sequences as a blocking gate and successfully applies headroom DDL with generated reversible rollback script.
+
+---
+
+### FIELD-OPS11.no-pk-ctid-page-slicing — Physical CTID/page chunking for tables lacking primary keys avoiding slow offset scans
+
+**OPEN — P1; verify; size M; index row 687.**
+
+Parent/dependencies and code: `migkit/engines/postgres.py`, `migkit/engines/mysql.py`, `migkit/scanplan.py`.
+
+Reported field incident / evidence: In `tencent-aws-migration-legs.md`, 12 no-PK tables could not be verified by index and suffered severe latency degradation when queried with large `OFFSET` values.
+
+Architecture & mechanism design:
+1. For PostgreSQL keyless tables, chunk by physical tuple identifiers (`ctid`):
+   `WHERE ctid >= '(block_start, 0)' AND ctid < '(block_end, 0)'`.
+2. For MySQL keyless InnoDB tables, slice by hidden clustered index `_rowid` or page offsets, guaranteeing $O(1)$ block retrieval without table sorting.
+
+Acceptance test: Verify a 1M-row keyless table in constant sequential read time without issuing `OFFSET` queries.
+
+---
+
+### FIELD-OPS12.users-grants-parity-orchestrator — Complete users, roles, table permissions, and sequence USAGE/UPDATE parity extraction
+
+**OPEN — P0; schema; size L; index row 688.**
+
+Parent/dependencies and code: `migkit/engines/postgres.py`, `migkit/engines/mysql.py`, `migkit/cli.py`.
+
+Reported field incident / evidence: In memory `tencent-aws-migration-legs.md` (2026-07-30), DTS migrated schemas and tables but left 38 application users and 1,310 table/sequence grants missing on the target. Applications crashed with `permission denied for sequence` despite having table INSERT privileges.
+
+Architecture & mechanism design: Implement full catalog extraction and parity auditing for:
+1. User accounts and password hash equivalence.
+2. Role memberships and role attributes.
+3. Object grants (`SELECT`, `INSERT`, `UPDATE`, `DELETE`).
+4. Sequence permissions (`USAGE`, `UPDATE`), separating table-level permissions from sequence dependencies.
+Generate idempotent, safe target `GRANT` DDL and reversible `REVOKE` scripts.
+
+Acceptance test: Run check against a target database lacking sequence USAGE grants; migkit identifies the exact missing permissions and generates verified executable grant DDL.
