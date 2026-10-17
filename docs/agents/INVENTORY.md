@@ -30,7 +30,7 @@ None.
 
 | file | owner | lines | imported by | reaches | wraps | tests |
 |---|---|---|---|---|---|---|
-| `migkit/__init__.py` | - | 109 | 53: avrostream, barriers, binlog_marks, capabilities, cli (+48) | - | - | 853: conftest.py, holdkit.py, large_values_rig.py (+850) |
+| `migkit/__init__.py` | - | 109 | 53: avrostream, barriers, binlog_marks, capabilities, cli (+48) | - | - | 854: conftest.py, holdkit.py, large_values_rig.py (+851) |
 | `migkit/addresses.py` | - | 529 | 10: config, diagnostics, engineat, guide, hopkeys (+5) | configuration 2, engines 4 | - | 5: a_hop_file_is_checked_whole_at_load, a_hop_from_two_addresses, copybook_files_as_a_side_of_a_pair (+2) |
 | `migkit/clouds.py` | - | 337 | 13: case, cli, cloudseed, engines.kafka, engines.mysql (+8) | configuration 3 | - | 11: a_hop_from_two_addresses, a_managed_mysql_says_how_long_its_log_is_kept, a_managed_side_is_read_and_held_by_what_its_admin_may_do (+8) |
 | `migkit/config.py` | scope: Hop.excluded, Hop.carries, Hop.target_table_in | 2478 | 61: approvals, backupseed, carriers, changetopic, cli (+56) | configuration 14, conversion 1, engines 1, execution 13, integrations 4, persistence 3, reporting 1, safety 4 | - | 840: bigquery_fake.py, cosmos_fake.py, dynamodb_on_moto.py (+837) |
@@ -220,7 +220,7 @@ None.
 | `migkit/cost_envelope.py` | - | 608 | 1: cli | - | - | 1: cost_envelope_enforcement |
 | `migkit/costmodel.py` | - | 781 | 10: decide, engines.generic, incumbent_switch, legs, marks (+5) | configuration 2, decision 2, engines 4, persistence 2, reporting 1, workflows 1 | - | 12: a_managed_services_own_operation_is_ranked_by_its_eligibility, a_mysql_copy_passes_rows_server_to_server, a_way_is_costed_by_what_the_unit_is (+9) |
 | `migkit/dba.py` | - | 1502 | 6: cli, guide, managed, physical, ready (+1) | configuration 3, decision 1, engines 8, integrations 1 | - | 11: a_managed_mysql_says_how_long_its_log_is_kept, a_managed_side_is_read_and_held_by_what_its_admin_may_do, a_source_change_is_offered_never_assumed (+8) |
-| `migkit/decide.py` | decision: every choice is a rung | 7774 | 176: action_compiler, advisors, agent_control, anchor, application_readiness (+171) | configuration 1, conversion 5, decision 34, engines 5, persistence 4 | - | 250: rung_branches.py, a_batch_that_is_not_a_page_is_the_decisions, a_clone_plugin_offer_on_mysql (+247) |
+| `migkit/decide.py` | decision: every choice is a rung | 7774 | 176: action_compiler, advisors, agent_control, anchor, application_readiness (+171) | configuration 1, conversion 5, decision 34, engines 5, persistence 4 | - | 251: rung_branches.py, a_batch_that_is_not_a_page_is_the_decisions, a_clone_plugin_offer_on_mysql (+248) |
 | `migkit/factbook.py` | - | 483 | 5: cli, decide, fact_validity, jointplan, waysaid | - | - | 1: every_fact_is_declared |
 | `migkit/faults.py` | - | 801 | 17: autonomous, causal_diagnosis, cli, engines.generic, engines.hetero (+12) | decision 2, execution 3, reporting 1 | - | 10: a_copier_reconciles_and_retunes, a_failed_bulk_copy_falls_back_to_the_range_copier_on_mysql, a_failure_is_told_by_what_it_did (+7) |
 | `migkit/guarantees.py` | - | 682 | 10: apply_contract, cli, decide, engines.base, execution_contract (+5) | - | - | 8: a_finished_tables_indexes_build_while_the_next_copies, a_move_keeps_what_it_must, every_way_is_weighed (+5) |

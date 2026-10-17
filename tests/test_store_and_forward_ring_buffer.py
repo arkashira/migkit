@@ -24,6 +24,15 @@ from migkit.ring_buffer import (
     parse_lsn,
     store_and_forward_buffer,
 )
+from tests.rung_branches import HOLDS, REFUSES, branch, watched
+
+PROVES_RUNGS = [
+    ('ring_buffer', 'buffer_envelope_rungs', 'configured_custom_envelope', 'holds'),
+    ('ring_buffer', 'buffer_envelope_rungs', 'configured_custom_envelope', 'refuses'),
+    ('ring_buffer', 'buffer_envelope_rungs', 'adaptive_host_scaled_envelope', 'holds'),
+    ('ring_buffer', 'buffer_envelope_rungs', 'adaptive_host_scaled_envelope', 'refuses'),
+    ('ring_buffer', 'buffer_envelope_rungs', 'constrained_minimal_envelope', 'holds'),
+]
 
 
 @pytest.fixture
@@ -337,26 +346,31 @@ def test_dynamic_buffer_envelope_ladder(monkeypatch):
         "constrained_minimal_envelope",
     ]
 
-    mem, seg = decide_buffer_envelope(max_memory_bytes=8 * 1024 * 1024)
-    assert mem == 8 * 1024 * 1024
-    assert seg == 2 * 1024 * 1024
+    with watched() as seen:
+        mem, seg = decide_buffer_envelope(max_memory_bytes=8 * 1024 * 1024)
+        assert mem == 8 * 1024 * 1024
+        assert seg == 2 * 1024 * 1024
 
-    class FakeHop:
-        options = {"ring_buffer_max_memory": 16 * 1024 * 1024, "ring_buffer_segment_size": 4 * 1024 * 1024}
+        class FakeHop:
+            options = {"ring_buffer_max_memory": 16 * 1024 * 1024, "ring_buffer_segment_size": 4 * 1024 * 1024}
 
-    mem2, seg2 = decide_buffer_envelope(hop=FakeHop())
-    assert mem2 == 16 * 1024 * 1024
-    assert seg2 == 4 * 1024 * 1024
+        mem2, seg2 = decide_buffer_envelope(hop=FakeHop())
+        assert mem2 == 16 * 1024 * 1024
+        assert seg2 == 4 * 1024 * 1024
 
-    monkeypatch.setattr("migkit.sizing._memory", lambda: 4 * 1024 * 1024 * 1024)
-    mem3, seg3 = decide_buffer_envelope()
-    assert mem3 == 1024 * 1024 * 1024
-    assert seg3 == 64 * 1024 * 1024
+        monkeypatch.setattr("migkit.sizing._memory", lambda: 4 * 1024 * 1024 * 1024)
+        mem3, seg3 = decide_buffer_envelope()
+        assert mem3 == 1024 * 1024 * 1024
+        assert seg3 == 64 * 1024 * 1024
 
-    monkeypatch.setattr("migkit.sizing._memory", lambda: 100 * 1024 * 1024)
-    mem4, seg4 = decide_buffer_envelope()
-    assert mem4 == 64 * 1024 * 1024
-    assert seg4 == 16 * 1024 * 1024
+        monkeypatch.setattr("migkit.sizing._memory", lambda: 100 * 1024 * 1024)
+        mem4, seg4 = decide_buffer_envelope()
+        assert mem4 == 64 * 1024 * 1024
+        assert seg4 == 16 * 1024 * 1024
+
+    assert set(branch(seen, "configured_custom_envelope")) == {HOLDS, REFUSES}
+    assert set(branch(seen, "adaptive_host_scaled_envelope")) == {HOLDS, REFUSES}
+    assert branch(seen, "constrained_minimal_envelope") == [HOLDS]
 
 
 def test_care_badges(temp_spool):

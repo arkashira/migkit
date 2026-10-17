@@ -20,6 +20,15 @@ from migkit.schema_drift import (
     generate_alter_statements,
     map_type_to_dialect,
 )
+from tests.rung_branches import HOLDS, REFUSES, branch, watched
+
+PROVES_RUNGS = [
+    ('schema_drift', 'schema_evolution_rungs', 'admit_inline_safe_evolution', 'holds'),
+    ('schema_drift', 'schema_evolution_rungs', 'admit_inline_safe_evolution', 'refuses'),
+    ('schema_drift', 'schema_evolution_rungs', 'admit_evolution_with_batched_backfill', 'holds'),
+    ('schema_drift', 'schema_evolution_rungs', 'admit_evolution_with_batched_backfill', 'refuses'),
+    ('schema_drift', 'schema_evolution_rungs', 'refuse_incompatible_schema_drift', 'holds'),
+]
 
 
 def test_type_widening_rules():
@@ -532,35 +541,40 @@ def test_schema_evolution_rungs_ladder_climb():
     rungs = schema_evolution_rungs()
     assert len(rungs) == 3
 
-    f_safe = decide.Facts({
-        "has_drift": True,
-        "all_inline_safe": True,
-        "requires_backfill": False,
-        "has_key": True,
-        "incompatible": False,
-    })
-    c_safe = decide.climb("schema_evolution", rungs, facts=f_safe)
-    assert c_safe.rung.name == "admit_inline_safe_evolution"
+    with watched() as seen:
+        f_safe = decide.Facts({
+            "has_drift": True,
+            "all_inline_safe": True,
+            "requires_backfill": False,
+            "has_key": True,
+            "incompatible": False,
+        })
+        c_safe = decide.climb("schema_evolution", rungs, facts=f_safe)
+        assert c_safe.rung.name == "admit_inline_safe_evolution"
 
-    f_backfill = decide.Facts({
-        "has_drift": True,
-        "all_inline_safe": False,
-        "requires_backfill": True,
-        "has_key": True,
-        "incompatible": False,
-    })
-    c_backfill = decide.climb("schema_evolution", rungs, facts=f_backfill)
-    assert c_backfill.rung.name == "admit_evolution_with_batched_backfill"
+        f_backfill = decide.Facts({
+            "has_drift": True,
+            "all_inline_safe": False,
+            "requires_backfill": True,
+            "has_key": True,
+            "incompatible": False,
+        })
+        c_backfill = decide.climb("schema_evolution", rungs, facts=f_backfill)
+        assert c_backfill.rung.name == "admit_evolution_with_batched_backfill"
 
-    f_incompat = decide.Facts({
-        "has_drift": True,
-        "all_inline_safe": False,
-        "requires_backfill": False,
-        "has_key": True,
-        "incompatible": True,
-    })
-    c_incompat = decide.climb("schema_evolution", rungs, facts=f_incompat)
-    assert c_incompat.rung.name == "refuse_incompatible_schema_drift"
+        f_incompat = decide.Facts({
+            "has_drift": True,
+            "all_inline_safe": False,
+            "requires_backfill": False,
+            "has_key": True,
+            "incompatible": True,
+        })
+        c_incompat = decide.climb("schema_evolution", rungs, facts=f_incompat)
+        assert c_incompat.rung.name == "refuse_incompatible_schema_drift"
+
+    assert set(branch(seen, "admit_inline_safe_evolution")) == {HOLDS, REFUSES}
+    assert set(branch(seen, "admit_evolution_with_batched_backfill")) == {HOLDS, REFUSES}
+    assert branch(seen, "refuse_incompatible_schema_drift") == [HOLDS]
 
 
 def test_wire_drift_resolver_into_tailctl_apply_unit():

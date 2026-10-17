@@ -57,6 +57,8 @@ PROVES_RUNGS = [
     ('movers', 'stream_ways', 'subscription', 'refuses'),
     ('movers', 'stream_ways', 'tail', 'holds'),
     ('movers', 'stream_ways', 'tail', 'refuses'),
+    ('movers', 'stream_ways', 'store_and_forward', 'holds'),
+    ('movers', 'stream_ways', 'store_and_forward', 'refuses'),
 ]
 
 
@@ -242,6 +244,8 @@ def test_the_servers_replication_is_refused_where_the_target_cannot_dial(
      "the log's terms were not accepted"),
     ("pipeline", dict(STREAM, engine="mysql", ready=False),
      dict(STREAM, engine="mysql"), "the change tail runs here"),
+    ("store_and_forward", dict(STREAM, store_and_forward=True),
+     dict(STREAM, store_and_forward=False), "store-and-forward ring buffer is not selected"),
 ])
 def test_a_way_of_following_is_held_where_it_reads_the_source(
         monkeypatch, name, ok, bad, said):
