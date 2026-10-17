@@ -550,18 +550,18 @@ OUTSIDE = (("tools", "the generators, the full suite and the checks run"
 #: top-level modules of migkit/ by package; a module is in one package
 _BY_NAME = {
     "configuration": "hopkeys envkeys config addresses engineat clouds"
-                     " variants managed",
-    "scope": "rowfilter case result_scope",
+                     " variants managed init",
+    "scope": "rowfilter case result_scope resume_scope",
     "persistence": "state checkpoint durable repairlog revert audit digests"
                    " evidence session runlog kept anchor setaside claims"
-                   " shared",
+                   " shared snapshot_state",
     "safety": "redact egress tls approvals interlock fencing ownership"
               " masking freeze leftovers lease",
     "execution": "runner schedule throttle stall attempts ranges util"
-                 " failpoint tunnel locks",
+                 " failpoint tunnel locks keepalive ack_lattice cancel_recovery",
     "conversion": "canon canon_oracle rowtext render transforms nanotime intervals geo"
                   " vectors bsontype charsets commercial zones copybook"
-                  " pieces ddl ddl_shield merkle schema schema_drift loadtext schemaformats described tally",
+                  " pieces ddl ddl_shield merkle schema schema_drift loadtext schemaformats described tally grants",
     "reporting": "verdict report wording diagnostics export"
                  " troubleshooting telemetry traces notify servicecheck query_guard",
     "decision": "decide costmodel jointplan factbook guarantees scanplan"
@@ -569,9 +569,9 @@ _BY_NAME = {
                 " scenarios legs sizing changedepth lacks sourcechange"
                 " bulkways ready cloud_readiness dba handwork rehearsal"
                 " faults model"
-                " machine topology waysaid workload advisors",
+                " machine topology waysaid workload advisors keyless offset_diag",
     "engines": "catalog pgslot binlog_marks binlog_payload logddl standby"
-               " tailwhere",
+               " tailwhere quiet_source",
     "integrations": "tools tooluse toolversion cloudapi cloudseed"
                     " huawei_sdk imports integrations workflow_exporter"
                     " assist mirror redisshake dsbulk ddbexport"
@@ -583,6 +583,7 @@ _BY_NAME = {
                  " archive editions tableengine twoway barriers marks"
                  " drainmark applyway replicasum rules leaves unchanged"
                  " streamout changetopic fleet second_reader proxy ring_buffer"
+                 " ratchet rollback handoff_overlap"
                  " dag_scheduler reverse autopilot",
     "cli": "cli guide ui estate",
 }

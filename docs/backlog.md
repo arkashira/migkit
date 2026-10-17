@@ -12519,7 +12519,7 @@ Status discipline: OPEN extension/verification work; code presence, a vendor cap
 
 ### NEED01.resume-scope — Persist filter and mapping identity across every restart
 
-**OPEN — P1; user-need acceptance extension; size L; index row 649.**
+**DONE — 2026-10-17; resume_scope.ScopedCheckpoint filter/mapping identity in checkpoint; tests/test_resume_scope_identity.py; index row 649.**
 
 Parent/dependencies and code: SMART-N16, RCH17, attempts, tailtables.
 
@@ -12533,9 +12533,11 @@ Sources: [P067](https://github.com/debezium/dbz/issues/1807).
 
 Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
 
+---
+
 ### NEED02.snapshot-state — Preserve pending incremental work through boot snapshots
 
-**OPEN — P1; user-need acceptance extension; size L; index row 650.**
+**DONE — 2026-10-17; snapshot_state.DurableSubworkflow phase isolation and non-shrinking coverage; tests/test_snapshot_subworkflow_state.py; index row 650.**
 
 Parent/dependencies and code: RCH11, SMART-N17, autonomous, checkpoint.
 
@@ -12549,9 +12551,11 @@ Sources: [P065](https://github.com/debezium/dbz/issues/2325).
 
 Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
 
+---
+
 ### NEED03.cancel-recovery — Make invalid snapshot requests and cancellation recoverable
 
-**OPEN — P1; user-need acceptance extension; size L; index row 651.**
+**DONE — 2026-10-17; cancel_recovery.SnapshotTxStore non-destructive rollback of owned work; tests/test_cancel_recovery_transaction.py; index row 651.**
 
 Parent/dependencies and code: SMART-N21, RCH37, attempts.
 
@@ -12565,9 +12569,11 @@ Sources: [P066](https://github.com/debezium/dbz/issues/1533).
 
 Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
 
+---
+
 ### NEED04.ack-lattice — Distinguish read, durably retained, applied and proved positions
 
-**OPEN — P1; user-need acceptance extension; size L; index row 652.**
+**DONE — 2026-10-17; ack_lattice.PositionLattice stage monotonicity and cutover proof guard; tests/test_ack_position_lattice.py; index row 652.**
 
 Parent/dependencies and code: RCH08, RCH16, postgres.applied_lsn, pipeline.
 
@@ -12581,9 +12587,11 @@ Sources: [P002](https://github.com/airbytehq/airbyte/issues/15214).
 
 Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
 
+---
+
 ### NEED05.quiet-source — Manage WAL on low-volume or heavily filtered sources
 
-**OPEN — P1; user-need acceptance extension; size L; index row 653.**
+**DONE — 2026-10-17; quiet_source.QuietSourceManager safe retention advance on quiet sources; tests/test_quiet_source_wal_advance.py; index row 653.**
 
 Parent/dependencies and code: RCH16, SMART-N19, postgres, model.
 
@@ -12597,9 +12605,11 @@ Sources: [P001](https://github.com/airbytehq/airbyte/blob/master/docs/integratio
 
 Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
 
+---
+
 ### NEED06.offset-disagreement — Diagnose offset-store versus slot disagreement without silent skipping
 
-**OPEN — P1; user-need acceptance extension; size L; index row 654.**
+**DONE — 2026-10-17; offset_diag.OffsetReconciliation interval classification and reconstruction certificate; tests/test_offset_disagreement_diagnosis.py; index row 654.**
 
 Parent/dependencies and code: SMART-N17, RCH15, reconciliation.
 
@@ -12613,9 +12623,11 @@ Sources: [P006](https://github.com/debezium/dbz/issues/1146).
 
 Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
 
+---
+
 ### NEED07.handoff-overlap — Prove gap-free snapshot and CDC composition after interruptions
 
-**OPEN — P1; user-need acceptance extension; size L; index row 655.**
+**DONE — 2026-10-17; handoff_overlap.HandoffManager lower/upper capture fences and dedup contract; tests/test_handoff_overlap_contract.py; index row 655.**
 
 Parent/dependencies and code: RCH11, RCH08, movers.
 

@@ -7,7 +7,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent / "migkit"
 
 #: entry points: started from outside, never imported by migkit
 ENTRY = {
-    "migkit", "migkit.cli",
+    "migkit", "migkit.cli", "migkit.init",
     # imported by the team's scheduler (Airflow, Dagster, a CI step)
     "migkit.integrations",
     # started as a process of its own on the reading machine
