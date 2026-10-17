@@ -142,3 +142,11 @@ Write tests with every change; run them once, at the end (`tools/final_suite.py`
 - User-facing text never names a wrapped program.
 - Commits: one line, no trailers. Never push - the owner pushes.
 - The manual (`tools/gen_docs.py`) and the code map (`tools/gen_codemap.py`) are written from the code; when the hook stops a commit for them, add the written files and commit again.
+
+## Migkit Operations, Output Readability & Universal Resilience (Mandatory User Rule)
+- **Zero AI Slop & Terse Output:** Strictly NO emojis, icons, or decorative glyphs in code, logs, or results. Pure UNIX/enterprise style only. No chatty conversational filler. 4-tier care badges: `ACTION`, `REVIEW`, `BENIGN`, `PASS`.
+- **Universal Typed Durable Resume in $O(1)$:** Checkpoint down to range/cursor level with native type preservation (datetime, composite keys, UUID, Decimal). Skip completed units in $O(1)$ without rescanning.
+- **Mutual Exclusion & Active Lease:** Active verification lease lock (`.run.lock`) with heartbeat preventing duplicate or overlapping runs.
+- **Adaptive Execution:** Dynamic AIMD batch sizing, instant cold-start byte-weighted ETA, fused pushdown verification, Merkle bucket diffing.
+- **Full-Capacity Tool Wrapper:** Wrapper for Datafold, DMS, DTS, reladiff, DVT, pgcopydb, debezium via Decision Engine with zero internal tool leaks.
+

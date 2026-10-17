@@ -204,12 +204,21 @@ def classify_care(r: Dict[str, Any], hop: Any = None) -> Dict[str, Any]:
             "action_required": False,
         }
 
-    if any(k in det for k in ("suspect in-flight", "caught up", "replication fence", "grace period", "watermark")):
+    if any(k in det for k in ("suspect in-flight", "caught up", "replication fence", "grace period", "watermark", "in_flight_replication_write")):
         return {
             "tier": "benign",
             "tier_badge": "BENIGN",
             "care_level": "dont_care",
             "care_reason": "in-flight replication lag (fence cleared)",
+            "action_required": False,
+        }
+
+    if r.get("defect_class") == "in_flight_replication_write":
+        return {
+            "tier": "benign",
+            "tier_badge": "BENIGN",
+            "care_level": "dont_care",
+            "care_reason": "in-flight replication write (watermark fenced)",
             "action_required": False,
         }
 
@@ -488,7 +497,7 @@ def build_grouped_summary(
                 source_state=str(r.get("source_state", "")),
                 target_state=str(r.get("target_state", "")),
                 impact=_assess_impact(cat, chk, det, is_artifact),
-                defect_class="replication_artifact" if is_artifact else "application_defect",
+                defect_class=r.get("defect_class") or ("replication_artifact" if is_artifact else "application_defect"),
                 is_replication_artifact=is_artifact,
                 artifact_origin=origin or "",
                 category=cat,

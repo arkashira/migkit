@@ -24,6 +24,9 @@ none of it reaches an operator.
 """
 import math
 import sys
+import time
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from . import tooluse
 from .tools import SECOND_READER_LICENCE
@@ -1303,6 +1306,244 @@ def engines_with_own_compare():
         except Exception:  # noqa: BLE001 - an engine that cannot load here
             continue
     return sorted(out)
+
+
+def lsn_to_int(val: Any) -> Optional[int]:
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return int(val)
+    if isinstance(val, str):
+        val = val.strip()
+        if "/" in val:
+            parts = val.split("/")
+            if len(parts) == 2:
+                try:
+                    return (int(parts[0], 16) << 32) + int(parts[1], 16)
+                except ValueError:
+                    pass
+        try:
+            return int(val)
+        except ValueError:
+            pass
+    return None
+
+
+def lsn_compare(a: Any, b: Any) -> int:
+    ia, ib = lsn_to_int(a), lsn_to_int(b)
+    if ia is None or ib is None:
+        return 0
+    if ia < ib:
+        return -1
+    if ia > ib:
+        return 1
+    return 0
+
+
+def lsn_gte(a: Any, b: Any) -> bool:
+    return lsn_compare(a, b) >= 0
+
+
+def _normalize_intervals(intervals: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    if not intervals:
+        return []
+    sorted_int = sorted(intervals, key=lambda x: (x[0], x[1]))
+    merged = [sorted_int[0]]
+    for cur_lo, cur_hi in sorted_int[1:]:
+        last_lo, last_hi = merged[-1]
+        if cur_lo <= last_hi + 1:
+            merged[-1] = (last_lo, max(last_hi, cur_hi))
+        else:
+            merged.append((cur_lo, cur_hi))
+    return merged
+
+
+def parse_gtid_set(gtid_str: str) -> Dict[str, List[Tuple[int, int]]]:
+    if not gtid_str or not isinstance(gtid_str, str):
+        return {}
+    res: Dict[str, List[Tuple[int, int]]] = {}
+    cleaned = "".join(gtid_str.split()).lower()
+    for entry in cleaned.split(","):
+        if not entry:
+            continue
+        parts = entry.split(":")
+        if not parts:
+            continue
+        uuid = parts[0]
+        intervals = []
+        for p in parts[1:]:
+            if "-" in p:
+                lo_s, _, hi_s = p.partition("-")
+                if lo_s.isdigit() and hi_s.isdigit():
+                    intervals.append((int(lo_s), int(hi_s)))
+            elif p.isdigit():
+                intervals.append((int(p), int(p)))
+        if intervals:
+            res.setdefault(uuid, []).extend(intervals)
+    for uuid in res:
+        res[uuid] = _normalize_intervals(res[uuid])
+    return res
+
+
+def gtid_is_subset(sub_str: str, sup_str: str) -> bool:
+    if not sub_str:
+        return True
+    if not sup_str:
+        return False
+    sub_set = parse_gtid_set(sub_str)
+    sup_set = parse_gtid_set(sup_str)
+    for uuid, sub_intervals in sub_set.items():
+        if uuid not in sup_set:
+            return False
+        sup_intervals = sup_set[uuid]
+        for s_lo, s_hi in sub_intervals:
+            covered = any(sup_lo <= s_lo and s_hi <= sup_hi for sup_lo, sup_hi in sup_intervals)
+            if not covered:
+                return False
+    return True
+
+
+@dataclass
+class FencingResult:
+    table: str
+    l0: Any
+    status: str
+    converged: List[str] = field(default_factory=list)
+    defects: List[str] = field(default_factory=list)
+    missing: List[str] = field(default_factory=list)
+    extra: List[str] = field(default_factory=list)
+    changed: List[str] = field(default_factory=list)
+    defect_class: str = "in_flight_replication_write"
+    tier: str = "benign"
+    classifications: Dict[str, str] = field(default_factory=dict)
+    proof: List[str] = field(default_factory=list)
+
+
+class CrossoverWatermarkFencer:
+    def __init__(self, engine=None, db=None, table=None, timeout=300):
+        self.engine = engine
+        self.db = db
+        self.table = table
+        self.timeout = timeout
+        self.l0 = None
+
+    def capture_l0(self, db=None):
+        db = db or self.db
+        if hasattr(self.engine, "capture_watermark"):
+            self.l0 = self.engine.capture_watermark(db)
+        elif hasattr(self.engine, "src_lsn"):
+            self.l0 = self.engine.src_lsn(db)
+        return self.l0
+
+    def is_cdc_applied(self, l0=None, db=None):
+        l0 = l0 or self.l0
+        db = db or self.db
+        if not l0:
+            return True
+        if hasattr(self.engine, "is_cdc_applied"):
+            return self.engine.is_cdc_applied(db, l0)
+        pos = None
+        if hasattr(self.engine, "target_flush_lsn"):
+            pos = self.engine.target_flush_lsn(db)
+        elif hasattr(self.engine, "target_flush_gtid"):
+            pos = self.engine.target_flush_gtid(db)
+        elif hasattr(self.engine, "cdc_apply_position"):
+            pos = self.engine.cdc_apply_position(db)
+        elif hasattr(self.engine, "applied_lsn"):
+            pos = self.engine.applied_lsn(db)
+        if pos is None:
+            return False
+        if "/" in str(l0) or (isinstance(l0, str) and l0.isdigit()):
+            return lsn_gte(pos, l0)
+        if ":" in str(l0):
+            return gtid_is_subset(str(l0), str(pos))
+        return str(pos) >= str(l0)
+
+    def wait_for_cdc_flush(self, l0=None, db=None, timeout=None):
+        l0 = l0 or self.l0
+        db = db or self.db
+        timeout = timeout if timeout is not None else self.timeout
+        if hasattr(self.engine, "wait_cdc_flush"):
+            return self.engine.wait_cdc_flush(db, l0, timeout=timeout)
+        if hasattr(self.engine, "fence_wait"):
+            return self.engine.fence_wait(db, l0, timeout=timeout)
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < timeout:
+            if self.is_cdc_applied(l0, db):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def recheck_candidates(self, table, candidate_keys, db=None):
+        db = db or self.db
+        if hasattr(self.engine, "_compare_pks"):
+            cmp = self.engine._compare_pks(db, table, candidate_keys)
+            if cmp is not None:
+                return cmp
+        return [], [], []
+
+    def fence(self, table, candidate_keys, l0=None, db=None, timeout=None):
+        db = db or self.db
+        timeout = timeout if timeout is not None else self.timeout
+        proof = []
+        l0 = l0 or self.l0 or self.capture_l0(db)
+
+        if isinstance(candidate_keys, (tuple, list)) and len(candidate_keys) == 3 and isinstance(candidate_keys[0], list):
+            m, e, c = candidate_keys
+            cand_set = set(m) | set(e) | set(c)
+        elif isinstance(candidate_keys, dict):
+            cand_set = set(candidate_keys.get("missing", [])) | set(candidate_keys.get("extra", [])) | set(candidate_keys.get("changed", []))
+        else:
+            cand_set = set(candidate_keys)
+
+        if not cand_set:
+            return FencingResult(
+                table=table, l0=l0, status="ok",
+                defect_class="in_flight_replication_write",
+                tier="benign", proof=["no candidate mismatches"])
+
+        if not self.is_cdc_applied(l0, db):
+            proof.append(f"CDC apply position < L0 ({l0}); deferring judgment")
+            flushed = self.wait_for_cdc_flush(l0, db, timeout=timeout)
+            if not flushed:
+                proof.append(f"CDC flush wait timed out for L0={l0}")
+                missing, extra, changed = sorted(cand_set), [], []
+                surviving = cand_set
+                classifications = {k: "application_defect" for k in cand_set}
+                return FencingResult(
+                    table=table, l0=l0, status="diff",
+                    defects=sorted(surviving), missing=missing, extra=extra,
+                    changed=changed, defect_class="application_defect",
+                    tier="diff", classifications=classifications, proof=proof)
+            proof.append(f"CDC apply reached flush LSN/GTID >= L0 ({l0})")
+        else:
+            proof.append(f"CDC apply already >= L0 ({l0})")
+
+        missing, extra, changed = self.recheck_candidates(table, cand_set, db=db)
+        surviving = set(missing) | set(extra) | set(changed)
+        converged = cand_set - surviving
+
+        classifications = {}
+        for k in converged:
+            classifications[k] = "in_flight_replication_write"
+        for k in surviving:
+            classifications[k] = "application_defect"
+
+        status = "ok" if not surviving else "diff"
+        defect_class = "in_flight_replication_write" if not surviving else "application_defect"
+        tier = "benign" if not surviving else "diff"
+
+        return FencingResult(
+            table=table, l0=l0, status=status,
+            converged=sorted(converged), defects=sorted(surviving),
+            missing=sorted(missing), extra=sorted(extra), changed=sorted(changed),
+            defect_class=defect_class, tier=tier,
+            classifications=classifications, proof=proof)
+
+
+def crossover_watermark_fence(engine, db, table, candidate_keys, l0=None, timeout=300):
+    fencer = CrossoverWatermarkFencer(engine, db, table, timeout=timeout)
+    return fencer.fence(table, candidate_keys, l0=l0)
 
 
 from .engines import hooks  # noqa: E402

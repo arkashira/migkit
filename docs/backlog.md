@@ -13065,7 +13065,7 @@ Acceptance test: Verifying 10,000 rows containing 500KB LOB values completes in 
 
 ### FIELD-OPS07.cdc-watermark-inflight-fencing — Low/high watermark and LSN/GTID crossover fencing to eliminate CDC false diff alarms
 
-**OPEN — P0; correctness; size L; index row 683.**
+**DONE (2026-10-17) — P0; correctness; size L; index row 683.**
 
 Parent/dependencies and code: `migkit/verifiers.py`, `migkit/engines/postgres.py`, `migkit/engines/mysql.py`.
 
@@ -13083,7 +13083,8 @@ Acceptance test: Run verification while an active worker generates 100 INSERTs/s
 
 ### FIELD-OPS08.adaptive-merkle-bucket-diff — Hierarchical Merkle bucket diffing (ABE) for tables > 1M rows skipping matching data
 
-**OPEN — P0; verify; size L; index row 684.**
+**DONE (2026-10-17; scanplan/leaves adaptive Merkle bucket diffing; tests/test_adaptive_merkle_bucket_diff.py) — P0; verify; size L; index row 684.**
+
 
 Parent/dependencies and code: `migkit/scanplan.py`, `migkit/leaves.py`.
 

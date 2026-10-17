@@ -2466,6 +2466,112 @@ def by_groups(pair, db, a, b, digests, rows, group, hash_way="md5"):
     return out, None
 
 
+class AdaptiveBucketDiffer:
+    def __init__(self, key_col, lo, hi, num_buckets=1024, hash_expr=None,
+                 leaf_threshold=16, max_depth=8, engine="mysql"):
+        self.key_col = key_col
+        self.lo = int(lo) if lo is not None else 0
+        self.hi = int(hi) if hi is not None else 0
+        self.num_buckets = max(1, int(num_buckets))
+        self.hash_expr = hash_expr
+        self.leaf_threshold = max(1, int(leaf_threshold))
+        self.max_depth = max(1, int(max_depth))
+        self.engine = engine
+
+    def bucket_bounds(self, b, lo, hi, nb):
+        span = hi - lo + 1
+        width = max(1, (span + nb - 1) // nb)
+        b_lo = lo + b * width
+        b_hi = min(hi, lo + (b + 1) * width - 1)
+        return b_lo, b_hi
+
+    def run(self, query_fn, row_fn=None, table="tbl", sides=("src", "dst"), total_rows=None):
+        from . import scanplan
+        if total_rows is None:
+            total_rows = max(0, self.hi - self.lo + 1)
+        if self.lo > self.hi or total_rows == 0:
+            return scanplan.AdaptiveMerkleResult(
+                table, 0, [], 0, 0, 0, "ok", f"{table}: OK rows=0 clean", certified_complete=True)
+
+        src_res = query_fn(sides[0], self.lo, self.hi, self.num_buckets)
+        dst_res = query_fn(sides[1], self.lo, self.hi, self.num_buckets)
+        src_map = {int(r[0]): (int(r[1]), int(r[2]) if r[2] is not None else 0) for r in src_res}
+        dst_map = {int(r[0]): (int(r[1]), int(r[2]) if r[2] is not None else 0) for r in dst_res}
+
+        all_buckets = sorted(set(src_map.keys()) | set(dst_map.keys()))
+        identical_cnt = sum(1 for b in all_buckets if src_map.get(b) == dst_map.get(b))
+        divergent = [b for b in all_buckets if src_map.get(b) != dst_map.get(b)]
+
+        drilldown_rows = 0
+        mismatched_pks = []
+
+        stack = []
+        for b in divergent:
+            b_lo, b_hi = self.bucket_bounds(b, self.lo, self.hi, self.num_buckets)
+            if b_lo <= self.hi and b_lo <= b_hi:
+                stack.append((b_lo, b_hi, 1))
+
+        while stack:
+            cur_lo, cur_hi, cur_depth = stack.pop()
+            if cur_lo > cur_hi:
+                continue
+            span = cur_hi - cur_lo + 1
+            if span <= self.leaf_threshold or cur_depth >= self.max_depth:
+                if row_fn is not None:
+                    s_rows = row_fn(sides[0], cur_lo, cur_hi)
+                    d_rows = row_fn(sides[1], cur_lo, cur_hi)
+                    drilldown_rows += max(len(s_rows), len(d_rows))
+                    s_keys = {int(r[0]): r[1] for r in s_rows}
+                    d_keys = {int(r[0]): r[1] for r in d_rows}
+                    for k in set(s_keys.keys()) | set(d_keys.keys()):
+                        if s_keys.get(k) != d_keys.get(k):
+                            mismatched_pks.append(k)
+                else:
+                    if cur_lo == cur_hi:
+                        mismatched_pks.append(cur_lo)
+                        drilldown_rows += 1
+                continue
+
+            sub_nb = min(self.num_buckets, max(2, 1 << min(7, (span - 1).bit_length() - 1)))
+            sub_src = query_fn(sides[0], cur_lo, cur_hi, sub_nb)
+            sub_dst = query_fn(sides[1], cur_lo, cur_hi, sub_nb)
+            sub_s_map = {int(r[0]): (int(r[1]), int(r[2]) if r[2] is not None else 0) for r in sub_src}
+            sub_d_map = {int(r[0]): (int(r[1]), int(r[2]) if r[2] is not None else 0) for r in sub_dst}
+            sub_all = sorted(set(sub_s_map.keys()) | set(sub_d_map.keys()))
+            for sb in sub_all:
+                if sub_s_map.get(sb) != sub_d_map.get(sb):
+                    sb_lo, sb_hi = self.bucket_bounds(sb, cur_lo, cur_hi, sub_nb)
+                    if sb_lo <= cur_hi and sb_lo <= sb_hi:
+                        stack.append((sb_lo, sb_hi, cur_depth + 1))
+
+        mismatched_sorted = sorted(set(mismatched_pks))
+        clean = (len(divergent) == 0 and len(mismatched_sorted) == 0)
+        status = "ok" if clean else "diff"
+        detail = (f"{table}: OK rows={total_rows} buckets={identical_cnt} clean" if clean
+                  else f"{table}: DIFF mismatched_keys={len(mismatched_sorted)} drilldown_rows={drilldown_rows}")
+        return scanplan.AdaptiveMerkleResult(
+            table=table,
+            total_rows=total_rows,
+            mismatched_keys=mismatched_sorted,
+            identical_buckets=identical_cnt,
+            divergent_buckets=len(divergent),
+            drilldown_rows_examined=drilldown_rows,
+            status=status,
+            detail=detail,
+            certified_complete=clean,
+        )
+
+
+def adaptive_merkle_bucket_diff(a, b, key_col, *, lo=None, hi=None,
+                                num_buckets=1024, hash_expr=None,
+                                leaf_threshold=16, max_depth=8):
+    return AdaptiveBucketDiffer(
+        key_col=key_col, lo=lo, hi=hi, num_buckets=num_buckets,
+        hash_expr=hash_expr, leaf_threshold=leaf_threshold,
+        max_depth=max_depth)
+
+
 from .engines import hooks  # noqa: E402
 
 hooks.fill("leaves", globals())
+

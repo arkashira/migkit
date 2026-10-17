@@ -4081,6 +4081,85 @@ class MySQLEngine(Engine):
 
     _fused_pushdown_verification = fused_pushdown_verification
 
+    def adaptive_merkle_bucket_query(self, db, table, key_col, hash_expr=None, *,
+                                     num_buckets=1024, lo=None, hi=None, width=None,
+                                     where="", aliases=False, quote_identifiers=True):
+        from .. import scanplan
+        src_table = self._scope("src", db, table)
+        return scanplan.adaptive_merkle_bucket_query(
+            "mysql", src_table, key_col, hash_expr=hash_expr, num_buckets=num_buckets,
+            lo=lo, hi=hi, width=width, where=where, aliases=aliases,
+            quote_identifiers=quote_identifiers)
+
+    def adaptive_merkle_bucket_diff(self, db, table, key_col, *,
+                                    lo=None, hi=None, num_buckets=1024,
+                                    hash_expr=None, sides=("src", "dst"),
+                                    leaf_threshold=16, max_depth=8):
+        from .. import scanplan
+        src_table = self._scope("src", db, table)
+        if lo is None or hi is None:
+            k = f"`{key_col}`"
+            res = self._q("src", f"SELECT MIN({k}), MAX({k}), COUNT(*) FROM {src_table}")
+            if not res or res[0][0] is None:
+                return scanplan.AdaptiveMerkleResult(
+                    table, 0, [], 0, 0, 0, "ok", f"{table}: OK rows=0 clean", certified_complete=True)
+            lo = int(res[0][0])
+            hi = int(res[0][1])
+
+        return scanplan.adaptive_merkle_bucket_verify(
+            self, db, table, key_col, lo=lo, hi=hi, num_buckets=num_buckets,
+            hash_expr=hash_expr, query=lambda side, sql: self._q(side, sql),
+            source=lambda side, t: self._scope(side, db, t),
+            sides=sides, leaf_threshold=leaf_threshold, max_depth=max_depth)
+
+    _adaptive_merkle_bucket_diff = adaptive_merkle_bucket_diff
+
+    def capture_watermark(self, db):
+        return self.src_lsn(db)
+
+    def cdc_apply_position(self, db):
+        brand = self._brands()[1].name if hasattr(self, "_brands") else "mysql"
+        sql = ("select @@gtid_binlog_pos" if brand == "mariadb"
+               else "select @@global.gtid_executed")
+        try:
+            got = self._q("dst", sql)
+            pos = str(got[0][0]).strip() if got and got[0][0] is not None else ""
+            return pos or None
+        except Exception:
+            return None
+
+    def target_flush_gtid(self, db):
+        return self.cdc_apply_position(db)
+
+    def is_cdc_applied(self, db, l0):
+        if not l0:
+            return True
+        brand = self._brands()[1].name if hasattr(self, "_brands") else "mysql"
+        try:
+            if brand == "mariadb":
+                got = self._q("dst", "select master_gtid_wait(%s, 0)", (l0,))
+                return got and got[0][0] is not None and int(got[0][0]) == 0
+            else:
+                got = self._q("dst", "select gtid_subset(%s, @@global.gtid_executed)", (l0,))
+                return got and got[0][0] is not None and int(got[0][0]) == 1
+        except Exception:
+            curr = self.cdc_apply_position(db)
+            if not curr:
+                return False
+            from ..verifiers import gtid_is_subset
+            return gtid_is_subset(str(l0), str(curr))
+
+    def wait_cdc_flush(self, db, l0, timeout=300):
+        return self.fence_wait(db, l0, timeout=timeout)
+
+    def crossover_watermark_fence(self, db, table, candidate_keys, l0=None, timeout=300):
+        from ..verifiers import crossover_watermark_fence
+        return crossover_watermark_fence(self, db, table, candidate_keys, l0=l0, timeout=timeout)
+
+    _crossover_watermark_fence = crossover_watermark_fence
+
+
+
 
     def _charset_columns(self, db):
         return self._scoped_rows(db, self._q(

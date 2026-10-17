@@ -927,3 +927,114 @@ def fused_pushdown_verify(eng, db, table, *, query,
                   f"{table}: OK rows={src_r} hash={src_h} clean",
                   category="verify.fused")
 
+
+@dataclass
+class AdaptiveMerkleResult:
+    table: str
+    total_rows: int
+    mismatched_keys: list
+    identical_buckets: int
+    divergent_buckets: int
+    drilldown_rows_examined: int
+    status: str
+    detail: str
+    certified_complete: bool = False
+
+
+def adaptive_merkle_bucket_query(engine, table, key_col, hash_expr=None, *,
+                                 num_buckets=1024, lo=None, hi=None, width=None,
+                                 where="", aliases=False, quote_identifiers=True):
+    eng = str(engine).lower()
+    k = _quote_ident(eng, key_col, quote_identifiers)
+    if lo is not None and hi is not None:
+        span = hi - lo + 1
+        w = width or max(1, -(-span // num_buckets))
+        b_expr = f"(({k} - {lo}) DIV {w})" if eng == "mysql" else f"div({k} - {lo}, {w})"
+    elif width is not None:
+        base = lo if lo is not None else 0
+        b_expr = f"(({k} - {base}) DIV {width})" if eng == "mysql" else f"div({k} - {base}, {width})"
+    else:
+        if eng == "mysql":
+            b_expr = f"(conv(substr(md5(cast({k} as char)), 1, 8), 16, 10) % {num_buckets})"
+        else:
+            b_expr = f"(abs(('x' || substr(md5(cast({k} as text)), 1, 8))::bit(32)::bigint) % {num_buckets})"
+
+    h_expr = k if hash_expr is None else hash_expr
+    if eng == "mysql":
+        h_part = h_expr if h_expr.upper().startswith("BIT_XOR(") else f"BIT_XOR({h_expr})"
+    else:
+        h_part = h_expr if h_expr.lower().startswith("bit_xor(") else f"bit_xor({h_expr})"
+
+    cols = []
+    cols.append(f"{b_expr} as bucket_id" if aliases else b_expr)
+    cols.append("COUNT(*) as row_count" if aliases else "COUNT(*)")
+    cols.append(f"{h_part} as bucket_hash" if aliases else h_part)
+
+    sql = f"SELECT {', '.join(cols)} FROM {table}"
+    conds = []
+    if lo is not None and hi is not None:
+        conds.append(f"{k} >= {lo} AND {k} <= {hi}")
+    if where:
+        w = where.strip()
+        if w.lower().startswith("where "):
+            w = w[6:].strip()
+        if w:
+            conds.append(w)
+    if conds:
+        sql += " WHERE " + " AND ".join(f"({c})" for c in conds)
+    sql += f" GROUP BY {b_expr} ORDER BY bucket_id" if aliases else f" GROUP BY {b_expr}"
+    return sql
+
+
+def adaptive_merkle_bucket_verify(eng, db, table, key_col, *,
+                                  lo=None, hi=None, num_buckets=1024,
+                                  hash_expr=None, query=None, row_query=None,
+                                  source=None, sides=("src", "dst"),
+                                  leaf_threshold=16, max_depth=8,
+                                  quote_identifiers=True):
+    from . import leaves
+    dialect = getattr(eng, "CANON_ENGINE", "mysql")
+    if source is None:
+        source = lambda side, t: t
+    src_table = source("src", table)
+    dst_table = source("dst", table)
+
+    def _q_fn(side, q_lo, q_hi, q_nb):
+        tbl = src_table if side == "src" else dst_table
+        sql = adaptive_merkle_bucket_query(
+            dialect, tbl, key_col, hash_expr=hash_expr, num_buckets=q_nb,
+            lo=q_lo, hi=q_hi, quote_identifiers=quote_identifiers)
+        ans = query(side, sql)
+        out = []
+        for r in ans:
+            if isinstance(r, str):
+                r = r.split("|")
+            b_id = int(r[0])
+            cnt = int(r[1])
+            h = int(r[2]) if r[2] is not None and str(r[2]).strip() != "" else 0
+            out.append((b_id, cnt, h))
+        return out
+
+    def _row_fn(side, r_lo, r_hi):
+        if row_query is not None:
+            ans = row_query(side, r_lo, r_hi)
+        else:
+            tbl = src_table if side == "src" else dst_table
+            k = _quote_ident(dialect, key_col, quote_identifiers)
+            h = hash_expr or k
+            sql = f"SELECT {k}, {h} FROM {tbl} WHERE {k} >= {r_lo} AND {k} <= {r_hi} ORDER BY {k}"
+            ans = query(side, sql)
+        out = []
+        for r in ans:
+            if isinstance(r, str):
+                r = r.split("|")
+            out.append((int(r[0]), int(r[1]) if r[1] is not None else 0))
+        return out
+
+    differ = leaves.AdaptiveBucketDiffer(
+        key_col=key_col, lo=lo, hi=hi, num_buckets=num_buckets,
+        hash_expr=hash_expr, leaf_threshold=leaf_threshold,
+        max_depth=max_depth, engine=dialect)
+    return differ.run(_q_fn, row_fn=_row_fn, table=table, sides=sides)
+
+
