@@ -2083,8 +2083,23 @@ def check(hop_name, db, table, only, do_deep, drill, limit, consistent,
         if got.exit:
             raise SystemExit(got.exit)
         return
-    got, _ = _check(hop, db, table, only, do_deep, consistent, workers,
-                    resume, exclude)
+    from .lease import Lease, Held
+    from .state import run_state
+    try:
+        with Lease(hop.report_dir() / "lease-check.json",
+                   what="verification",
+                   remote=run_state(hop)) as check_lease:
+            if check_lease.took_over:
+                was = check_lease.took_over
+                console.print(f"[yellow]took the verification over from"
+                              f" {was.get('host')} process {was.get('pid')}, whose"
+                              " lease had lapsed: it stopped without letting go"
+                              "[/yellow]")
+            got, _ = _check(hop, db, table, only, do_deep, consistent, workers,
+                            resume, exclude)
+    except Held as e:
+        from .verdict import Refused
+        raise Refused(f"[BLOCKED] {e}")
     if got.exit:
         raise SystemExit(got.exit)
 

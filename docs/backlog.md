@@ -12983,7 +12983,7 @@ Acceptance test: Inject SIGINT / process kill at 50% of a multi-range table chec
 
 ### FIELD-OPS02.active-hop-lease-lock — Active Hop mutual-exclusion lease and PID heartbeat for read/verify operations
 
-**OPEN — P0; operations/scale; size M; index row 678.**
+**DONE (2026-10-17; check guarded with active verification lease; tests/test_a_check_holds_a_lease.py) — P0; operations/scale; size M; index row 678.**
 
 Parent/dependencies and code: `migkit/lease.py`, `migkit/cli.py`.
 

@@ -444,3 +444,9 @@ class Lease:
 
     # the callers held the old lock file and removed it when done
     unlink = release
+
+    def __enter__(self):
+        return self.acquire()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()

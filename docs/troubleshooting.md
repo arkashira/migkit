@@ -181,6 +181,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the row-by-row drilldown needs a component that is not installed here: migkit doctor --install puts it in place
 
+* [BLOCKED] <...>
+
 * --only <...>: not a check of this hop's engine; its checks are <...>
 
 * <...>: <...>. Nothing has been compared
