@@ -1,0 +1,968 @@
+{
+  "retrieved": "2026-10-17 Asia/Bangkok",
+  "sources": [
+    {
+      "ref": "turn31search0",
+      "aliases": [
+        "turn31search0",
+        "turn30search2"
+      ],
+      "title": "airbyte/docs/integrations/sources/postgres/postgres-troubleshooting.md at master \u00b7 airbytehq/airbyte \u00b7 GitHub",
+      "url": "https://github.com/airbytehq/airbyte/blob/master/docs/integrations/sources/postgres/postgres-troubleshooting.md",
+      "host": "github.com",
+      "kind": "official-technical-documentation",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P001"
+    },
+    {
+      "ref": "turn31search1",
+      "aliases": [
+        "turn31search1",
+        "turn37view4"
+      ],
+      "title": "postgres cdc lsn commit on source side should happen after loading data into the destination \u00b7 Issue #15214 \u00b7 airbytehq/airbyte \u00b7 GitHub",
+      "url": "https://github.com/airbytehq/airbyte/issues/15214",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P002"
+    },
+    {
+      "ref": "turn31search2",
+      "aliases": [
+        "turn31search2"
+      ],
+      "title": "Investigate usage of heartbeat property in debezium for CDC \u00b7 Issue #15040 \u00b7 airbytehq/airbyte \u00b7 GitHub",
+      "url": "https://github.com/airbytehq/airbyte/issues/15040",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P003"
+    },
+    {
+      "ref": "turn31search3",
+      "aliases": [
+        "turn31search3",
+        "turn37view5"
+      ],
+      "title": "[source-postgresql] CDC sync is only allowing WAL to be emptied every two syncs \u00b7 Issue #70887 \u00b7 airbytehq/airbyte \u00b7 GitHub",
+      "url": "https://github.com/airbytehq/airbyte/issues/70887",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P004"
+    },
+    {
+      "ref": "turn31search4",
+      "aliases": [
+        "turn31search4",
+        "turn30search1"
+      ],
+      "title": "debezium/documentation/modules/ROOT/pages/connectors/postgresql.adoc at main \u00b7 debezium/debezium \u00b7 GitHub",
+      "url": "https://github.com/debezium/debezium/blob/main/documentation/modules/ROOT/pages/connectors/postgresql.adoc",
+      "host": "github.com",
+      "kind": "official-technical-documentation",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P005"
+    },
+    {
+      "ref": "turn31search5",
+      "aliases": [
+        "turn31search5",
+        "turn37view6"
+      ],
+      "title": "Introduce flexible recovery from LSN desynchronisation [DBZ-9688] \u00b7 Issue #1146 \u00b7 debezium/dbz \u00b7 GitHub",
+      "url": "https://github.com/debezium/dbz/issues/1146",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P006"
+    },
+    {
+      "ref": "turn31search6",
+      "aliases": [
+        "turn31search6"
+      ],
+      "title": "Pull requests \u00b7 PeerDB-io/peerdb \u00b7 GitHub",
+      "url": "https://github.com/PeerDB-io/peerdb/pulls",
+      "host": "github.com",
+      "kind": "vendor-or-project-publication",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P007"
+    },
+    {
+      "ref": "turn31search7",
+      "aliases": [
+        "turn31search7",
+        "turn35search1",
+        "turn39view15"
+      ],
+      "title": "What's new in YugabyteDB Voyager | YugabyteDB Docs",
+      "url": "https://docs.yugabyte.com/stable/yugabyte-voyager/release-notes/",
+      "host": "docs.yugabyte.com",
+      "kind": "official-technical-documentation",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P008"
+    },
+    {
+      "ref": "turn33search0",
+      "aliases": [
+        "turn33search0"
+      ],
+      "title": "PostgreSQL: Re: Database migration to RDS issues permissions",
+      "url": "https://www.postgresql.org/message-id/042619bb-06b5-2b3f-1bb3-0c436bd91ab1%40aklaver.com",
+      "host": "www.postgresql.org",
+      "kind": "official-technical-documentation",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P009"
+    },
+    {
+      "ref": "turn33search1",
+      "aliases": [
+        "turn33search1"
+      ],
+      "title": "streaming replication on-premise posgresql(src) -> aws rds postgresql (dst) | AWS re:Post",
+      "url": "https://www.repost.aws/questions/QUoNntBzyEQMiN18US16KQzg/streaming-replication-on-premise-posgresql-src-aws-rds-postgresql-dst",
+      "host": "www.repost.aws",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P010"
+    },
+    {
+      "ref": "turn33reddit6",
+      "aliases": [
+        "turn33reddit6",
+        "turn39view0"
+      ],
+      "title": "Evaluating DLT vs Fivetran for a small team that lives in SQL, not Python",
+      "url": "https://www.reddit.com/r/dataengineering/comments/1u81nqa/evaluating_dlt_vs_fivetran_for_a_small_team_that/",
+      "host": "www.reddit.com",
+      "kind": "community-anecdote",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P011"
+    },
+    {
+      "ref": "turn33reddit7",
+      "aliases": [
+        "turn33reddit7"
+      ],
+      "title": "Fivetran Pricing",
+      "url": "https://www.reddit.com/r/dataengineering/comments/1ii4ry5",
+      "host": "www.reddit.com",
+      "kind": "community-anecdote",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P012"
+    },
+    {
+      "ref": "turn33reddit8",
+      "aliases": [
+        "turn33reddit8",
+        "turn39view2"
+      ],
+      "title": "Thinking of Migrating from Fivetran to Hevo \u2014 Would Love Your Input",
+      "url": "https://www.reddit.com/r/dataengineering/comments/1jwrfit/thinking_of_migrating_from_fivetran_to_hevo_would/",
+      "host": "www.reddit.com",
+      "kind": "community-anecdote",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P013"
+    },
+    {
+      "ref": "turn33reddit9",
+      "aliases": [
+        "turn33reddit9"
+      ],
+      "title": "Portable vs Fivetran, anyone make the swap?",
+      "url": "https://www.reddit.com/r/dataengineering/comments/1uk2cl7/portable_vs_fivetran_anyone_make_the_swap/",
+      "host": "www.reddit.com",
+      "kind": "community-anecdote",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P014"
+    },
+    {
+      "ref": "turn33search2",
+      "aliases": [
+        "turn33search2"
+      ],
+      "title": "Release rollback which contains database migrations via git revert \u00b7 werf werf \u00b7 Discussion #5749 \u00b7 GitHub",
+      "url": "https://github.com/werf/werf/discussions/5749",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P015"
+    },
+    {
+      "ref": "turn33search4",
+      "aliases": [
+        "turn33search4"
+      ],
+      "title": "streaming replication on-premise posgresql(src) -> aws rds postgresql (dst) | AWS re:Post",
+      "url": "https://www.repost.aws/es/questions/QUoNntBzyEQMiN18US16KQzg/streaming-replication-on-premise-posgresql-src-aws-rds-postgresql-dst",
+      "host": "www.repost.aws",
+      "kind": "vendor-or-project-publication",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P016"
+    },
+    {
+      "ref": "turn33reddit10",
+      "aliases": [
+        "turn33reddit10"
+      ],
+      "title": "Beware of Fivetran and other ELT tools.",
+      "url": "https://www.reddit.com/r/dataengineering/comments/11xbpjy",
+      "host": "www.reddit.com",
+      "kind": "community-anecdote",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P017"
+    },
+    {
+      "ref": "turn30search0",
+      "aliases": [
+        "turn30search0",
+        "turn37view7"
+      ],
+      "title": "Duplicate events from the snapshot and streaming phases [DBZ-8704] \u00b7 Issue #1336 \u00b7 debezium/dbz \u00b7 GitHub",
+      "url": "https://github.com/debezium/dbz/issues/1336",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P018"
+    },
+    {
+      "ref": "turn30search3",
+      "aliases": [
+        "turn30search3"
+      ],
+      "title": "airbyte/docs/platform/using-airbyte/core-concepts/sync-modes/incremental-append-deduped.md at master \u00b7 airbytehq/airbyte \u00b7 GitHub",
+      "url": "https://github.com/airbytehq/airbyte/blob/master/docs/platform/using-airbyte/core-concepts/sync-modes/incremental-append-deduped.md",
+      "host": "github.com",
+      "kind": "official-technical-documentation",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P019"
+    },
+    {
+      "ref": "turn30search4",
+      "aliases": [
+        "turn30search4",
+        "turn37view8"
+      ],
+      "title": "[destination-mssql] Case-Insensitive Collation Causes Incorrect Deduplication of Case-Sensitive IDs \u00b7 Issue #60828 \u00b7 airbytehq/airbyte \u00b7 GitHub",
+      "url": "https://github.com/airbytehq/airbyte/issues/60828",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P020"
+    },
+    {
+      "ref": "turn30search5",
+      "aliases": [
+        "turn30search5",
+        "turn37view9"
+      ],
+      "title": "MSSQL Bulk Loader De-duplication Bug: Duplicate Records with Identical _airbyte_raw_id Values \u00b7 Issue #65938 \u00b7 airbytehq/airbyte \u00b7 GitHub",
+      "url": "https://github.com/airbytehq/airbyte/issues/65938",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P021"
+    },
+    {
+      "ref": "turn30search7",
+      "aliases": [
+        "turn30search7"
+      ],
+      "title": "The Vitess Docs | VDiff",
+      "url": "https://vitess.io/docs/archive/14.0/reference/vreplication/vdiff/",
+      "host": "vitess.io",
+      "kind": "vendor-or-project-publication",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P022"
+    },
+    {
+      "ref": "turn30search8",
+      "aliases": [
+        "turn30search8"
+      ],
+      "title": "migrations: Support AWS DMS as a source \u00b7 Issue #84505 \u00b7 cockroachdb/cockroach \u00b7 GitHub",
+      "url": "https://github.com/cockroachdb/cockroach/issues/84505",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P023"
+    },
+    {
+      "ref": "turn32search0",
+      "aliases": [
+        "turn32search0",
+        "turn39view8"
+      ],
+      "title": "Azure Data Studios Azure SQL Migration hangs with Restoring Migration Status - Microsoft Q&A",
+      "url": "https://learn.microsoft.com/en-us/answers/questions/1188523/azure-data-studios-azure-sql-migration-hangs-with",
+      "host": "learn.microsoft.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P024"
+    },
+    {
+      "ref": "turn32search1",
+      "aliases": [
+        "turn32search1"
+      ],
+      "title": "During database migration in online mode using Azure data studio status is restoring only on sqlmi. - Microsoft Q&A",
+      "url": "https://learn.microsoft.com/en-us/answers/questions/1388527/during-database-migration-in-online-mode-using-azu",
+      "host": "learn.microsoft.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P025"
+    },
+    {
+      "ref": "turn32search2",
+      "aliases": [
+        "turn32search2"
+      ],
+      "title": "Tutorial: Migrate SQL Server to SQL Server on an Azure Virtual Machine with Azure DMS (Online) - Azure Database Migration Service | Microsoft Learn",
+      "url": "https://learn.microsoft.com/en-us/data-migration/sql-server/virtual-machines/database-migration-service-online",
+      "host": "learn.microsoft.com",
+      "kind": "vendor-or-project-publication",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P026"
+    },
+    {
+      "ref": "turn32search3",
+      "aliases": [
+        "turn32search3"
+      ],
+      "title": "Tutorial: Migrate SQL Server to SQL Server on an Azure Virtual Machine with Azure DMS (Offline) - Azure Database Migration Service | Microsoft Learn",
+      "url": "https://learn.microsoft.com/en-us/data-migration/sql-server/virtual-machines/database-migration-service-offline",
+      "host": "learn.microsoft.com",
+      "kind": "vendor-or-project-publication",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P027"
+    },
+    {
+      "ref": "turn32search4",
+      "aliases": [
+        "turn32search4",
+        "turn38view7"
+      ],
+      "title": "DMS MySQL migration fails with \"waitid: no child processes\" \u2014 recurring across different configs - Database - Google Developer forums",
+      "url": "https://discuss.google.dev/t/dms-mysql-migration-fails-with-waitid-no-child-processes-recurring-across-different-configs/390779",
+      "host": "discuss.google.dev",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P028"
+    },
+    {
+      "ref": "turn32search5",
+      "aliases": [
+        "turn32search5",
+        "turn38view8"
+      ],
+      "title": "Error during migrate to Cloud SQL for PostgreSQL from Oracle using Data Migration Service (DMS) - Database - Google Developer forums",
+      "url": "https://discuss.google.dev/t/error-during-migrate-to-cloud-sql-for-postgresql-from-oracle-using-data-migration-service-dms/163387",
+      "host": "discuss.google.dev",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P029"
+    },
+    {
+      "ref": "turn32search6",
+      "aliases": [
+        "turn32search6"
+      ],
+      "title": "Troubleshoot data mismatch between AWS DMS source and target databases | AWS re:Post",
+      "url": "https://www.repost.aws/knowledge-center/dms-source-target-data-mismatch",
+      "host": "www.repost.aws",
+      "kind": "official-technical-documentation",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P030"
+    },
+    {
+      "ref": "turn32search7",
+      "aliases": [
+        "turn32search7"
+      ],
+      "title": "DMS serverless replication stuck on single small table with LOBs | AWS re:Post",
+      "url": "https://repost.aws/questions/QU_9nRuyEDQfGO5W6xgfXUxw/dms-serverless-replication-stuck-on-single-small-table-with-lobs",
+      "host": "repost.aws",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P031"
+    },
+    {
+      "ref": "turn32search8",
+      "aliases": [
+        "turn32search8",
+        "turn39view13"
+      ],
+      "title": "Setting LOB support for source databases in an AWS DMS task - AWS Database Migration Service",
+      "url": "https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Tasks.LOBSupport.html",
+      "host": "docs.aws.amazon.com",
+      "kind": "official-technical-documentation",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P032"
+    },
+    {
+      "ref": "turn32search9",
+      "aliases": [
+        "turn32search9",
+        "turn38view0"
+      ],
+      "title": "Row validation failing for TD DECIMAL(15,2) and BQ NUMERIC(15,2) \u00b7 Issue #1134 \u00b7 GoogleCloudPlatform/professional-services-data-validator",
+      "url": "https://github.com/GoogleCloudPlatform/professional-services-data-validator/issues/1134",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P033"
+    },
+    {
+      "ref": "turn32search10",
+      "aliases": [
+        "turn32search10"
+      ],
+      "title": "professional-services-data-validator/CHANGELOG.md at develop \u00b7 GoogleCloudPlatform/professional-services-data-validator \u00b7 GitHub",
+      "url": "https://github.com/GoogleCloudPlatform/professional-services-data-validator/blob/develop/CHANGELOG.md",
+      "host": "github.com",
+      "kind": "official-technical-documentation",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P034"
+    },
+    {
+      "ref": "turn36search0",
+      "aliases": [
+        "turn36search0"
+      ],
+      "title": "Sqlite to postgres load killed \u00b7 Issue #1237 \u00b7 dimitri/pgloader \u00b7 GitHub",
+      "url": "https://github.com/dimitri/pgloader/issues/1237",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P035"
+    },
+    {
+      "ref": "turn36search1",
+      "aliases": [
+        "turn36search1"
+      ],
+      "title": "Couldn't write to #<SB-SYS:FD-STREAM Broken pipe \u00b7 Issue #371 \u00b7 dimitri/pgloader \u00b7 GitHub",
+      "url": "https://github.com/dimitri/pgloader/issues/371",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P036"
+    },
+    {
+      "ref": "turn36search2",
+      "aliases": [
+        "turn36search2"
+      ],
+      "title": "pgloader consumes memory until it gets killed \u00b7 Issue #64 \u00b7 dimitri/pgloader \u00b7 GitHub",
+      "url": "https://github.com/dimitri/pgloader/issues/64",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P037"
+    },
+    {
+      "ref": "turn36search3",
+      "aliases": [
+        "turn36search3"
+      ],
+      "title": "Heap exhausted migrating using docker \u00b7 Issue #399 \u00b7 dimitri/pgloader \u00b7 GitHub",
+      "url": "https://github.com/dimitri/pgloader/issues/399",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P038"
+    },
+    {
+      "ref": "turn36search4",
+      "aliases": [
+        "turn36search4"
+      ],
+      "title": "pgloader/INSTALL.md at main \u00b7 dimitri/pgloader \u00b7 GitHub",
+      "url": "https://github.com/dimitri/pgloader/blob/main/INSTALL.md",
+      "host": "github.com",
+      "kind": "official-technical-documentation",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P039"
+    },
+    {
+      "ref": "turn36search5",
+      "aliases": [
+        "turn36search5",
+        "turn38view4"
+      ],
+      "title": "pgcopydb_v0.15 resume ERRORS with copy follow --split-tables-larger-than --resume \u00b7 Issue #659 \u00b7 dimitri/pgcopydb \u00b7 GitHub",
+      "url": "https://github.com/dimitri/pgcopydb/issues/659",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P040"
+    },
+    {
+      "ref": "turn36search6",
+      "aliases": [
+        "turn36search6",
+        "turn38view5"
+      ],
+      "title": "Missing data when copying the DB in the \"manual\" 2-steps mode \u00b7 Issue #263 \u00b7 dimitri/pgcopydb \u00b7 GitHub",
+      "url": "https://github.com/dimitri/pgcopydb/issues/263",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P041"
+    },
+    {
+      "ref": "turn36search7",
+      "aliases": [
+        "turn36search7",
+        "turn38view6"
+      ],
+      "title": "Connector cannot handle uncompressed transaction payloads beyond 2GB \u00b7 Issue #1503 \u00b7 debezium/dbz \u00b7 GitHub",
+      "url": "https://github.com/debezium/dbz/issues/1503",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P042"
+    },
+    {
+      "ref": "turn36search8",
+      "aliases": [
+        "turn36search8"
+      ],
+      "title": "airbyte/docs/integrations/sources/postgres.md at master \u00b7 airbytehq/airbyte \u00b7 GitHub",
+      "url": "https://github.com/airbytehq/airbyte/blob/master/docs/integrations/sources/postgres.md?plain=1",
+      "host": "github.com",
+      "kind": "official-technical-documentation",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P043"
+    },
+    {
+      "ref": "turn35reddit6",
+      "aliases": [
+        "turn35reddit6"
+      ],
+      "title": "Best practices for very large databases ?",
+      "url": "https://www.reddit.com/r/PostgreSQL/comments/145y391",
+      "host": "www.reddit.com",
+      "kind": "community-anecdote",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P044"
+    },
+    {
+      "ref": "turn35reddit7",
+      "aliases": [
+        "turn35reddit7"
+      ],
+      "title": "DB migrations at scale",
+      "url": "https://www.reddit.com/r/PostgreSQL/comments/1grykyv",
+      "host": "www.reddit.com",
+      "kind": "community-anecdote",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P045"
+    },
+    {
+      "ref": "turn35reddit8",
+      "aliases": [
+        "turn35reddit8",
+        "turn39view5"
+      ],
+      "title": "What is the most painful data migration project that you ever faced?",
+      "url": "https://www.reddit.com/r/dataengineering/comments/1mwvz6p/what_is_the_most_painful_data_migration_project/",
+      "host": "www.reddit.com",
+      "kind": "community-anecdote",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P046"
+    },
+    {
+      "ref": "turn35reddit9",
+      "aliases": [
+        "turn35reddit9"
+      ],
+      "title": "SQL Parsing and Data Lineage",
+      "url": "https://www.reddit.com/r/dataengineering/comments/pmecrp",
+      "host": "www.reddit.com",
+      "kind": "community-anecdote",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P047"
+    },
+    {
+      "ref": "turn35reddit10",
+      "aliases": [
+        "turn35reddit10"
+      ],
+      "title": "We took production down for 20 minutes because of a DB migration, how do you prevent this?",
+      "url": "https://www.reddit.com/r/devops/comments/1swbj6e/we_took_production_down_for_20_minutes_because_of/",
+      "host": "www.reddit.com",
+      "kind": "community-anecdote",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P048"
+    },
+    {
+      "ref": "turn35reddit11",
+      "aliases": [
+        "turn35reddit11"
+      ],
+      "title": "How do you handle schema migrations on a live production database without downtime?",
+      "url": "https://www.reddit.com/r/SQL/comments/1whl5jc/how_do_you_handle_schema_migrations_on_a_live/",
+      "host": "www.reddit.com",
+      "kind": "community-anecdote",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P049"
+    },
+    {
+      "ref": "turn35search0",
+      "aliases": [
+        "turn35search0"
+      ],
+      "title": "yugabyte-db/architecture/design/online-schema-migrations.md at master \u00b7 yugabyte/yugabyte-db \u00b7 GitHub",
+      "url": "https://github.com/yugabyte/yugabyte-db/blob/master/architecture/design/online-schema-migrations.md",
+      "host": "github.com",
+      "kind": "official-technical-documentation",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P050"
+    },
+    {
+      "ref": "turn35search2",
+      "aliases": [
+        "turn35search2"
+      ],
+      "title": "Pull requests \u00b7 yugabyte/yb-voyager \u00b7 GitHub",
+      "url": "https://github.com/yugabyte/yb-voyager/pulls",
+      "host": "github.com",
+      "kind": "vendor-or-project-publication",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P051"
+    },
+    {
+      "ref": "turn35search3",
+      "aliases": [
+        "turn35search3",
+        "turn38view9"
+      ],
+      "title": "Version specific detection for PG extension in assessment phase \u00b7 Issue #2420 \u00b7 yugabyte/yb-voyager \u00b7 GitHub",
+      "url": "https://github.com/yugabyte/yb-voyager/issues/2420",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P052"
+    },
+    {
+      "ref": "turn35search5",
+      "aliases": [
+        "turn35search5",
+        "turn39view14"
+      ],
+      "title": "Mask PII data using AWS DMS and Amazon Macie during migration | AWS Database Blog",
+      "url": "https://aws.amazon.com/blogs/database/mask-pii-data-using-aws-dms-and-amazon-macie-during-migration/",
+      "host": "aws.amazon.com",
+      "kind": "vendor-or-project-publication",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P053"
+    },
+    {
+      "ref": "turn34search0",
+      "aliases": [
+        "turn34search0"
+      ],
+      "title": "Rollback removes changeset with target tag \u00b7 Issue #6728 \u00b7 liquibase/liquibase \u00b7 GitHub",
+      "url": "https://github.com/liquibase/liquibase/issues/6728",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P054"
+    },
+    {
+      "ref": "turn34search1",
+      "aliases": [
+        "turn34search1",
+        "turn38view1"
+      ],
+      "title": "DB is left in an inconsitent state after connection to database is lost \u00b7 Issue #1498 \u00b7 liquibase/liquibase \u00b7 GitHub",
+      "url": "https://github.com/liquibase/liquibase/issues/1498",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P055"
+    },
+    {
+      "ref": "turn34search2",
+      "aliases": [
+        "turn34search2",
+        "turn39view10"
+      ],
+      "title": "Secure 5.1: What are targeted rollbacks?",
+      "url": "https://docs.liquibase.com/secure/user-guide-5-1/what-are-targeted-rollbacks",
+      "host": "docs.liquibase.com",
+      "kind": "official-technical-documentation",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P056"
+    },
+    {
+      "ref": "turn34search3",
+      "aliases": [
+        "turn34search3",
+        "turn39view11"
+      ],
+      "title": "Drift analysis - Redgate Flyway - Product Documentation",
+      "url": "https://documentation.red-gate.com/flyway/flyway-concepts/drift-analysis",
+      "host": "documentation.red-gate.com",
+      "kind": "official-technical-documentation",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P057"
+    },
+    {
+      "ref": "turn34search4",
+      "aliases": [
+        "turn34search4"
+      ],
+      "title": "Got Drift? Redgate Flyway now helps you resolve it quicker - Redgate Flyway - Product Documentation",
+      "url": "https://documentation.red-gate.com/flyway/flyway-blog/got-drift-redgate-flyway-now-helps-you-resolve-it-quicker",
+      "host": "documentation.red-gate.com",
+      "kind": "official-technical-documentation",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P058"
+    },
+    {
+      "ref": "turn34search5",
+      "aliases": [
+        "turn34search5"
+      ],
+      "title": "Overcoming Pitfalls of Postgres Logical Decoding",
+      "url": "https://blog.peerdb.io/overcoming-pitfalls-of-postgres-logical-decoding",
+      "host": "blog.peerdb.io",
+      "kind": "vendor-or-project-publication",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P059"
+    },
+    {
+      "ref": "turn34search6",
+      "aliases": [
+        "turn34search6",
+        "turn38view2"
+      ],
+      "title": "abctl: silent migration failure from v0.14.1 -> v0.30.4 \u00b7 Issue #80770 \u00b7 airbytehq/airbyte \u00b7 GitHub",
+      "url": "https://github.com/airbytehq/airbyte/issues/80770",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P060"
+    },
+    {
+      "ref": "turn34search7",
+      "aliases": [
+        "turn34search7"
+      ],
+      "title": "Issues \u00b7 liquibase/liquibase \u00b7 GitHub",
+      "url": "https://github.com/liquibase/liquibase/issues",
+      "host": "github.com",
+      "kind": "vendor-or-project-publication",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P061"
+    },
+    {
+      "ref": "turn34search8",
+      "aliases": [
+        "turn34search8",
+        "turn39view12"
+      ],
+      "title": "Community 5.0: What are rollback commands?",
+      "url": "https://docs.liquibase.com/community/reference-guide-5-0/init-update-and-rollback-commands/what-are-rollback-commands",
+      "host": "docs.liquibase.com",
+      "kind": "official-technical-documentation",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P062"
+    },
+    {
+      "ref": "turn34search9",
+      "aliases": [
+        "turn34search9",
+        "turn38view3"
+      ],
+      "title": "Flyway CLI does not seem to work with Postgres Aurora Limitless database \u00b7 Issue #4022 \u00b7 flyway/flyway",
+      "url": "https://github.com/flyway/flyway/issues/4022",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P063"
+    },
+    {
+      "ref": "turn34search10",
+      "aliases": [
+        "turn34search10"
+      ],
+      "title": "Introducing Airbyte Destinations V2 - Typing & Deduping | Airbyte",
+      "url": "https://airbyte.com/blog/introducing-airbyte-destinations-v2-typing-deduping",
+      "host": "airbyte.com",
+      "kind": "vendor-or-project-publication",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P064"
+    },
+    {
+      "ref": "turn37view0",
+      "aliases": [
+        "turn37view0",
+        "turn29search0"
+      ],
+      "title": "Pending incremental snapshot is silently discarded when a boot-time snapshot runs (snapshot.mode=always/configuration_based) \u00b7 Issue #2325 \u00b7 debezium/dbz \u00b7 GitHub",
+      "url": "https://github.com/debezium/dbz/issues/2325",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P065"
+    },
+    {
+      "ref": "turn37view1",
+      "aliases": [
+        "turn37view1",
+        "turn29search1"
+      ],
+      "title": "Invalid incremental snapshot leave Connectors stuck; stop-snapshot ineffective and requires manual offset modification \u00b7 Issue #1533 \u00b7 debezium/dbz \u00b7 GitHub",
+      "url": "https://github.com/debezium/dbz/issues/1533",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P066"
+    },
+    {
+      "ref": "turn37view2",
+      "aliases": [
+        "turn37view2",
+        "turn29search3"
+      ],
+      "title": "MongoDB conditional incremental snapshot state lost on interruption \u00b7 Issue #1807 \u00b7 debezium/dbz \u00b7 GitHub",
+      "url": "https://github.com/debezium/dbz/issues/1807",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P067"
+    },
+    {
+      "ref": "turn37view3",
+      "aliases": [
+        "turn37view3",
+        "turn29search4"
+      ],
+      "title": "[source-postgres] CDC sync loses backfilled values for newly added columns if the backfill occurs before schema refresh \u00b7 Issue #80920 \u00b7 airbytehq/airbyte \u00b7 GitHub",
+      "url": "https://github.com/airbytehq/airbyte/issues/80920",
+      "host": "github.com",
+      "kind": "first-person-issue-or-forum-report",
+      "evidence": "page-retrieved",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P068"
+    },
+    {
+      "ref": "turn29reddit8",
+      "aliases": [
+        "turn29reddit8"
+      ],
+      "title": "Database Migration: post-migration schema/data validation question",
+      "url": "https://www.reddit.com/r/SQL/comments/1qk44yi/database_migration/",
+      "host": "www.reddit.com",
+      "kind": "community-anecdote",
+      "evidence": "search-excerpt",
+      "retrieved": "2026-10-17 Asia/Bangkok",
+      "id": "P069"
+    }
+  ],
+  "failed_retrievals": [
+    {
+      "ref": "turn39view1",
+      "original": "turn33reddit7",
+      "status": "retrieval-failed"
+    },
+    {
+      "ref": "turn39view3",
+      "original": "turn33reddit10",
+      "status": "retrieval-failed"
+    },
+    {
+      "ref": "turn39view4",
+      "original": "turn35reddit6",
+      "status": "retrieval-failed"
+    },
+    {
+      "ref": "turn39view6",
+      "original": "turn35reddit9",
+      "status": "retrieval-failed"
+    },
+    {
+      "ref": "turn39view7",
+      "original": "turn35reddit11",
+      "status": "retrieval-failed"
+    },
+    {
+      "ref": "turn39view9",
+      "original": "turn32search7",
+      "status": "retrieval-failed"
+    }
+  ],
+  "note": "Issue/closed status is not confirmation of a current bug or a fix; community anecdotes are qualitative demand evidence, not prevalence estimates."
+}

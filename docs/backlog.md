@@ -11757,3 +11757,1210 @@ Not done: the move's copy-way choice itself (`physical.choose`, unowned this wav
 * AUD-Z.rungs-outside-owed (W21A-D merged by the lead 2026-10-16): 332 of 337 outside rungs held and refused; the 5 left are the 4 rung defects of row 558 AUD-Z.rung-defects (cli `_bulk_or_copier`, `SpannerEngine.native_bulk`, scenarios `topology_case`, ship `_Loader.relink`).
 - `AUD-Z.rungs-outside-owed` (row 553, W22A 2026-10-16): DONE W22A 2026-10-16: the 337 outside rungs are 336 (ship `_Loader.relink`'s `spool` is no rung now, row 558), every one held and refused under `tests.rung_branches.watched()` in the test module declaring it; the last five - cli `_bulk_or_copier` `<v>`, `SpannerEngine` `restore`/`tables`, scenarios `topology_case` `topology-unknown` - in tests/test_the_rung_defects_are_fixed.py; `OWED_OUTSIDE` is `{}` in tests/test_every_decide_rung_is_reached.py and the guard green.
 - `AUD-Z.rung-defects` (row 558, W22A 2026-10-16): DONE W22A 2026-10-16: cli `_bulk_or_copier`'s bulk way needs each program it runs installed here (`{program: version, "" where it prints none, None where not installed}`), refused naming the ones missing so the copier is taken from the start; `SpannerEngine.native_bulk` hands `decide.Facts({"unfit": unfit})`, so a Spanner database copy with `go` no longer raises TypeError - the restore held where a backup restores the database, refused with why where not, the tables way held; `topology_case` decides the kind first by `topology-unknown`, whose need reads the kind (held for one migkit knows, refused naming the known ones), before the kind's ladder; `_Loader.relink` labels its spool carrier with no rung, as no choice stands behind it; each held and refused on fakes in tests/test_the_rung_defects_are_fixed.py, the bulk-switch case of tests/test_a_failed_way_switches_by_itself.py given its programs installed; `OWED_OUTSIDE` empty.
+
+
+## Integrated research, review and user needs — 2026-10-17
+
+Owner request: put ALL proposed review/research work into backlog. This section integrates **100 stable work IDs**: 5 baseline defect reviews, 2 test/coverage debts, 25 decision-engine proposals, 40 product-mechanism extensions and 28 user-need acceptance children. It preserves existing status and unrelated edits at HEAD d333f5fb plus the observed working tree. This is an implementation queue, not a claim that every capability is absent or implemented. Baseline findings must be revalidated after concurrent fixes.
+
+Read docs/research/migration-mechanisms-and-roadmap-2026-10-17.md and docs/research/user-needs-and-acceptance-2026-10-17.md; corresponding source JSON files retain evidence grades and unavailable pages. External issue/community claims are version-bounded and qualitative; closed does not imply fixed or current. Direction forecasts are marked inference. Existing RCH/SMART/SUPER/AUTO parents are linked to prevent duplicate systems. Each task includes a proposed mechanism and acceptance proof.
+
+### REV-D1.limit-gate — Enforce hard limits at the execution boundary
+
+**OPEN — P1; bug; size S; index row 577.** Historical 750b38a5 reproduction; revalidate against current code before fixing/closing.
+
+Observed: jointplan._meets sets meets=False for deadline/money violations, but cli._joint_for_move (review baseline line 3966) rejects only not jp.admitted. Reproduced with a Plan(meets=False, admitted=True): the function returns it for execution. Fix: admission must require the contract's limits as well as correctness; a missing model or failed probe must not silently waive hard limits. Distinguish forecast infeasibility from enforceable runtime ceilings. Proof: unit regression plus installed-command sandbox tests that an over-budget/deadline move writes nothing, while an admissible within-limit move completes. Runtime money/byte counters must stop at safe boundaries before overspending, including fallback/retries.
+
+### REV-D2.strategy-guarantees — Preserve the selected strategy guarantee vector
+
+**OPEN — P2; bug; size S; index row 578.** Historical 750b38a5 reproduction; revalidate against current code before fixing/closing.
+
+Observed: decide.space unpacks combo, lv, total, overwrites lv while explaining a weaker alternative (line 2093), and exports that vector as the winner's guarantees (2109). Reproduced with weak/unproved then strong/proved: strong selected but unproved reported. Two existing test_every_way_is_weighed.py tests fail. Fix: immutable winner vector and separate explanation variable. Proof: both existing regressions green; best.guarantees equals guarantees.of(best.parts.values()) across property-generated alternatives, including ties and failed proofs.
+
+### REV-D3.failed-runners — Keep failed proofs out of executable alternatives
+
+**OPEN — P2; bug; size S; index row 579.** Historical 750b38a5 reproduction; revalidate against current code before fixing/closing.
+
+Observed: space.best.runners contains combinations whose prove already failed; jointplan.ways_of_space turns them into scheduler ways. Reproduced: bad/1s returns not available from prove; good/2s passes; good selected but bad is a runner and scheduler way. Only test callers of this adapter found, not production callers. Fix: separate rejected, unprobed and proved runnable alternatives; never schedule a known-refused combination. Proof: adapter excludes failed candidates, retains their refusal evidence and explicitly probes any unprobed candidate before trusting it.
+
+### REV-D4.billed-bytes — Preserve byte budgets independently of prices
+
+**OPEN — P2; bug; size M; index row 580.** Historical 750b38a5 reproduction; revalidate against current code before fixing/closing.
+
+Observed: jointplan.limits_of converts limits.bytes_billed to money only with a truthy transfer_price_per_gb (line 932). bytes_billed=1GB alone yields money=None and no independent byte field in Limits. Fix: track billed bytes as a distinct resource, with pricing only for monetary budgets. Count actual billable paths, compression and retry overhead. Proof: absent, zero and nonzero prices never erase the cap; multi-hop budgets cannot be double-spent; rollback/retry accounting is explicit.
+
+### REV-D5.proof-facts — Record facts read by all proof attempts
+
+**OPEN — P2; bug; size S; index row 581.** Historical 750b38a5 reproduction; revalidate against current code before fixing/closing.
+
+Observed: decide.climb snapshots Facts.asked before rung.prove (line 1289). A proof-only lazy reader appears in facts.asked but Choice.asked is empty. Fix: collect after proofs, including refused proofs, without executing readers twice; retain per-attempt attribution where needed. Proof: winner-only and failed-proof-only reads present, deterministic order, one lazy read, secret-safe evidence.
+
+### REV-T1.shape-declarations — Close or honestly declare 27 engine-shape holes
+
+**OPEN — P2; test debt; size M; index row 582.** Historical 750b38a5 reproduction; revalidate against current code before fixing/closing.
+
+Observed: test_ranked_movers_and_rungs::test_coverage_has_no_unhandled_cells fails on 27 undeclared cells: keyless/no unique index/wide key for qdrant, neo4j, netezza, saphana, informix, progress, vertica, exasol, databricks. Link to existing implementation plus real-engine proof, or an owned not-yet/not-applicable entry with a reason; do not mark yes from a method name alone. Proof: guard green and engine-lane evidence for yes. Link existing P0-DECISION-ALL.gaps rather than duplicate implementation work.
+
+### REV-T2.tableway-fixtures — Update table-way fixtures for packet/row-width decisions
+
+**OPEN — P2; test debt; size S; index row 583.** Historical 750b38a5 reproduction; revalidate against current code before fixing/closing.
+
+Observed: eight tests/test_one_table_ladder.py cases fail after writes_in_pieces sees packet/row-size facts unknown and requires the pieces-capable rows rung. Fixtures simulate costs/programs but do not supply the new probes. Fix fixtures with explicit packet and row-size facts, retain unknown/oversized conservative cases, then investigate any remaining ranking failures. These eight are not yet asserted to be runtime cost-ranking defects. Proof: normal, oversized, unavailable-probe and restart paths tested without weakening safety.
+
+### SMART-N1.contract — Compile intent into one checked execution contract
+
+**OPEN — P1; proposal; size L; index row 584.**
+
+Extend existing guarantees, need and admission. Compile goal/scope into required proof coverage, snapshot/fence/ordering, idempotence, restartability, source impact, outage, byte and money bounds. Bind facts/model/plan versions and target identity. Carry the contract through bulk/table/range/native paths, runtime fallback, resume, cutover and rollback. Existing guarantee ordering is lexicographic: explicit minimums must hold componentwise before ranking; incompatible minimums are a refusal. Proof: adversarial alternatives and failures cannot drop a required dimension; independent admission checks run before irreversible boundaries. No new CLI modes or implicit authorization.
+
+### SMART-N2.fact-validity — Make facts and decisions valid for a bounded context
+
+**OPEN — P2; proposal; size M; index row 585.**
+
+Extend Facts/factbook with provenance, observation time, server/config/schema epoch, confidence and validity scope. Build a dependency map to invalidate only decisions whose inputs changed after failover, DDL, permission, packet, quota or network changes. Re-read critical inputs before irreversible steps, deduplicate concurrent probes, and redact values. Current lazy readers are cached; this proposes contextual invalidation, not another fact registry. Proof: stale facts cannot count as current proof; unrelated work is not restarted; probe time/source load are bounded.
+
+### SMART-N3.context-learning — Transfer measurements without false confidence
+
+**OPEN — P2; proposal; size L; index row 586.**
+
+Current Knowledge cost fits use rung|pair; failure outcomes additionally carry version/service. Extend with context-relevant version/service/hardware/topology/type mix, hierarchical pooling, out-of-distribution detection, time decay and robust residual handling. Avoid rigid buckets and premature neural-model replacement. Keep prior/measurement lineage; calibrate predictive intervals against held-out real workloads. Proof: p50/p90 empirical coverage, forecast error/regret and drift recovery after hardware/version/network changes; evidence from a different context never becomes falsely precise local measurement.
+
+### SMART-N4.information-budget — Choose what to measure by its decision value
+
+**OPEN — P2; proposal; size M; index row 587.**
+
+Extend rank_priority and safe Trials. Estimate which uncertain fact could change feasibility or the winning plan, then compare expected reduction of decision loss with probe time, source CPU/I/O/locks, money and deadline slack. Combine compatible reads through scanplan and stop probing when uncertainty cannot change a choice materially. Preserve conservative baseline and bounded exploration; unknown is never assumed support. Proof: bounded cold-start source impact, fewer unhelpful probes, lower verified completion time and no quality downgrade.
+
+### SMART-N5.live-replan — Replan remaining work with priced state transitions
+
+**OPEN — P2; proposal; size L; index row 588.**
+
+Current Trials re-climbs after surprise and autonomous.replan responds to throttle/isolate. Extend to safe checkpoint replanning of the remaining phase/table/range DAG on changing throughput, CDC arrivals, load, capacity or quota. Include setup/cleanup, cache warming, snapshot age, reconnect, undo/replay and validation costs. Switch only if conservative remaining-work savings exceed transition cost and hysteresis; preserve committed checkpoints. Proof: oscillating load does not thrash, old work is not replayed blindly, and sustained changes produce measured end-to-end improvement.
+
+### SMART-N6.complete-path — Optimize verified completion across the full path
+
+**OPEN — P2; proposal; size L; index row 589.**
+
+Extend jointplan/legs/topology and existing SUPER DAG/store-forward work. Jointly consider seed, encoding/compression, transport/staging, ingestion, indexes/constraints, CDC drain, verification, repair, cutover and rollback. A faster copy is not preferred when its downstream proof/index tail is slower. Include multi-database/hop contention, CPU/disk/network/service quotas, streaming backpressure and skew-aware split/merge. Bound optimizer CPU/memory/time; retain a safe baseline when search is interrupted. Proof: real-server crossover scenarios and thousands-of-table planning scalability; report distance to a valid lower bound where available, not a global-optimum claim.
+
+### SMART-N7.proof-planning — Plan the deepest required proof with explicit coverage
+
+**OPEN — P1; proposal; size L; index row 590.**
+
+Extend verdict/delta/scanplan and SUPER.merkle-fold. Build a proof dependency/coverage DAG for values, schema, sequences, grants, constraints, stored code and application-visible semantics under explicit epochs/fences. Reuse only evidence with a valid dependency certificate; recheck changed ranges and affected objects. Independent readers need compatible canonicalization and documented correlated blind spots. Sampling alone stays incomplete; keyless multisets preserve multiplicity. Proof: injected omissions, RLS, DDL, canonicalization defects and concurrent writes cannot produce false same; measure source reads and cost to complete the same proof contract.
+
+### SMART-N8.robust-scheduling — Plan for correlated tail risk and conflicting objectives
+
+**OPEN — P2; proposal; size L; index row 591.**
+
+Extend current expected-risk cost and p90 simulation. Model shared-resource and outage correlations, bursty CDC arrivals, recovery work and calibrated deadline probability; do not assume a single nominal rate is stable. Filter by hard correctness minimums and source-impact limits, retain nondominated feasible alternatives and optimize verified completion time under explicit cost/risk preferences. Proof: correlated throttling/outages and impossible catch-up are diagnosed, budgets held and false confidence measured. No universal best or guaranteed fastest claim; compare against current jointplan and safe baselines.
+
+### SMART-N9.capability-discovery — Grow engine breadth through proved capability contracts
+
+**OPEN — P2; proposal; size L; index row 592.**
+
+Extend per-pair capability/depth registry, PROVES and installed-tool inventory. Probe actual version/grants/service/type support instead of relying on brand labels; earn a capability through bounded sandbox/rehearsal tests. Compose only registered trusted methods/components, with declared limits and recovery semantics. Unknown support stays an owned gap; an LLM claim or generated SQL is never proof. Proof: pair/version/type matrices cover unsupported branches as well as successful ones, with finite planning/probe budgets and no source mutation outside existing explicit authorization.
+
+### SMART-N10.closed-loop-proof — Measure and replay decision quality end to end
+
+**OPEN — P1; proposal; size L; index row 593.**
+
+Record contract, facts, model versions, alternatives/refusals and unknowns for deterministic replay. Add small-space exhaustive oracles, property/metamorphic cases, fault/crash injection at switches and installed-command real-engine lanes. Measure verified completion p50/p95, source impact, calibrated forecast intervals, regret where a comparator is actually measured, retry waste and lost/duplicate changes. Shadow alternatives use sandbox/offline replay or authorized bounded probes, never duplicate live writes. Report simulation separately from real runs; fake proof, code presence and test declaration do not equal engine-lane proof. Required regression: D1-D5 and the missing coverage/fixtures above.
+
+### SMART-N11.connection-only — Complete endpoint-only operation with reusable intent
+
+**OPEN — P1; proposal; size L; index row 594.**
+
+Extend guide.run/survey, engineat and P0-MINIMAL-INPUT. Persist one goal/scope/authorization policy, so later runs need only endpoints and credential references. Discover all technical choices without asking about tools/workers/batches. Endpoint credentials do not determine whether to replace existing target rows or when to switch applications. Acceptance: clean installed run completes within saved policy with zero repeated technical questions; unknown business intent is not guessed; credentials never appear in logs/evidence. Reuse migrate, not a duplicate autopilot command.
+
+### SMART-N12.discovery-closure — Discover transitive dependencies within authorized scope
+
+**OPEN — P2; proposal; size L; index row 595.**
+
+Extend guide.survey and dependency catalogues. Inspect selected tables, partitions, FKs, views, routines, extensions, sequences, jobs, principals, collation/timezone/encoding, replication and target conflicts; distinguish required/optional/absent/unreadable/out-of-scope. Do not expand network or data scope automatically. Acceptance: hidden/inaccessible objects cannot look complete; dependency cycles and external references get explicit dispositions; metadata probes are bounded and optional missing facts do not force full scans.
+
+### SMART-N13.action-compiler — Compile typed actions into a causally complete plan
+
+**OPEN — P2; proposal; size L; index row 596.**
+
+Extend Rung/Part/Phase and existing workflow contracts. Each registered action declares typed inputs/outputs, prerequisites, durable postconditions, effects, resources and compensation. Compose supported prerequisite actions and transformations, not merely whole prewritten paths. Independent validation prunes contradictions before costing. Acceptance: missing schema or a required supported transform generates a complete schema/transform/verify subplan; bounded search returns a validated incumbent or honest refusal, never a plan invented from text.
+
+### SMART-N14.semantic-negotiation — Negotiate cross-engine semantics before ranking fast paths
+
+**OPEN — P1; proposal; size L; index row 597.**
+
+Extend hetero/canon/storedcode and depth contracts. Establish representability for decimal/unsigned boundaries, timestamp/timezone/DST, collation/Unicode, JSON, NULL, uniqueness, generated columns, counters, isolation and DDL effects. Targeted boundary-value/metamorphic tests use isolated targets. Distinguish bytes from approved semantic equivalence. Acceptance: row equality cannot pass broken constraints, rounding or transaction effects; lossy mappings require an explicit approved rule; no-PK multiplicity and cross-table commit semantics are preserved.
+
+### SMART-N15.causal-diagnosis — Diagnose compound causes through discriminating evidence
+
+**OPEN — P2; proposal; size L; index row 598.**
+
+Extend existing hypothesis investigation, faults.CATALOGUE and ledger reconciliation. Keep supported competing causes and disconfirming observations for target pressure, WAN loss, source locks, stale auth, drift, conversion defects and delayed replication. Select bounded probes for discriminatory value; apply a remedy only with its preconditions, then verify its effect. Acceptance: simultaneous WAN slowdown and throttling are not flattened to one code; retries cannot hide unrelated persistent corruption; unknown causes isolate affected dependencies without infinite retry.
+
+### SMART-N16.continuous-scope — Maintain exact scope and proof while objects and data change
+
+**OPEN — P1; proposal; size L; index row 599.**
+
+Extend P0-SCOPE, schema guard, delta generations and fences. Track create/drop/rename, partitions, key skew, hot writes and source restart. In-scope new objects join the dependency/proof DAG; out-of-scope objects remain excluded. Bound WAL retention, snapshot lifetime and backlog. Acceptance: DDL plus writes plus crash does not omit an object, double-count a range or reuse stale proof; the snapshot-to-CDC handoff covers committed changes under the contract.
+
+### SMART-N17.uncertain-effects — Reconcile effects at every external execution boundary
+
+**OPEN — P1; proposal; size L; index row 600.**
+
+Extend attempts.Ledger, faults.landed, fencing and identity checks to every registered external program, provider operation, DDL, bulk loader and checkpoint. Stable operation identity and observed postconditions distinguish not started/applied/partial/unknown. Use provider idempotency tokens where supported; otherwise inspect before retrying. Acceptance: kill after effect but before acknowledgement on each adapter; no blind replay or duplicate side effects; irreconcilable irreversible operations block their dependency chain. Do not claim global exactly-once where endpoints cannot establish it.
+
+### SMART-N18.application-readiness — Prove application-visible readiness beyond data equality
+
+**OPEN — P1; proposal; size L; index row 601.**
+
+Extend storedcode/appscan/readiness and SUPER.query-guard. Separate value equality, object/security parity and application behavior. Use approved representative reads and isolated write fixtures under the application role, checking results, constraints, sequences, routines and latency regressions. EXPLAIN ANALYZE executes SQL: external effects require isolated authorized environments. Acceptance: equal rows with a broken trigger, missing sequence grant or wrong search_path block the switch; unavailable workload evidence stays explicitly unavailable.
+
+### SMART-N19.time-aware-control — Plan around expiring resources and changing windows
+
+**OPEN — P2; proposal; size L; index row 602.**
+
+Extend jointplan, catch-up/session forecasts and credential renewal. Model maintenance windows, traffic cycles, burst credits, quota reset, token/certificate lifetime, log retention, snapshot expiry and cutover slack. Schedule supported prerequisite renewals/staging from observed forecasts with uncertainty. Acceptance: no phase starts optimistically beyond a nonrenewable lease or log-retention window; missed windows trigger a fresh admissible plan without guessing switch consent.
+
+### SMART-N20.work-granularity — Optimize work units and encoding jointly for distributions
+
+**OPEN — P2; proposal; size L; index row 603.**
+
+Extend batch_rows/cursor_rows, tuning, ranges/pieces and native request caps. Decide batch bytes/rows, key boundaries, split/merge, compression and serialization from row-width tails, skew, compressibility, CPU/network pressure and retry cost. Preserve keyless multiplicity and LOB integrity. Acceptance: tiny rows mixed with extreme LOBs stay memory-bounded; service caps are never exceeded; improvement is measured in verified completion rather than isolated throughput.
+
+### SMART-N21.progress-liveness — Detect impossible progress and terminate intelligently
+
+**OPEN — P1; proposal; size M; index row 604.**
+
+Extend catch_up_sum, retries, blockers and autonomous outcomes. Track progress certificates and per-resource/fault retry budgets. Detect nonconvergent arrival/apply rates, dependency deadlocks, hung programs and repairs whose drift does not shrink. Choose an admissible alternative or isolate/stop with the smallest missing prerequisite. Acceptance: no infinite recovery loops; slow but progressing work differs from deadlock; one noisy observation cannot establish impossibility.
+
+### SMART-N22.resource-ownership — Own temporary resources and restore observed state
+
+**OPEN — P1; proposal; size L; index row 605.**
+
+Extend leftovers, process records, tuning and existing SUPER/AUTO lifecycle items. Assign durable owners and cleanup/restore obligations to temporary tables/files, spools, readers, slots, subscriptions, credential leases, tunnels, settings and index windows. Budget disk/WAL/descriptors/memory/connections. Acceptance: interruption at every acquisition/restore point resumes or cleans up deterministically; shared resources remain untouched, original settings restored, sole copies of change/undo data never prematurely removed.
+
+### SMART-N23.fleet-coordination — Coordinate hops sharing physical capacity
+
+**OPEN — P2; proposal; size L; index row 606.**
+
+Extend topology/jointplan and leases. Identify logical endpoints sharing hosts, storage, network paths, quotas and replicas so each hop cannot independently spend the same capacity. Fair admission and feedback prioritize critical catch-up/proof; steal only compatible movable units. Acceptance: concurrent migrations and application load stay inside global constraints without starvation/double ownership; coordinator failure reconciles leases before takeover.
+
+### SMART-N24.decision-compute — Budget the optimizer and certify solution quality
+
+**OPEN — P2; proposal; size M; index row 607.**
+
+Extend local search, space pruning and exhaustive small-space oracles. Spend planning/probing time according to potential completion-time benefit: cheap baseline for tiny jobs, bounded search normally, deeper exact/beam search only where worth its cost. Keep a validated incumbent and support cancellation. Acceptance: bounded planner CPU/memory/time on huge estates; interrupting search cannot return an invalid candidate; optimal is reported only with a certificate, otherwise a valid bound/gap or unknown.
+
+### SMART-N25.operation-experiments — Earn autonomy with adversarial endpoint-only whole runs
+
+**OPEN — P1; proposal; size L; index row 608.**
+
+Extend P0-MINIMAL-INPUT.acceptance, autonomous comparison/rehearsal and SMART-N10. Reproducible installed-command real-engine scenarios combine target conflicts, missing grants, no PK, LOB/RLS, DDL, continuous writes, quotas/packet limits, auth renewal, crashes, partitions, failover and rollback; include simultaneous faults and restart. Acceptance: no unexplained loss/duplication, required proof coverage, bounded source impact, measured verified completion and counted manual technical interventions. Zero interventions is a tested result within a pre-authorized feasible contract, never a universal claim.
+
+### RCH01.provider-path — Differentiate provider-native and generic paths
+
+**OPEN — P1; research-derived extension; size M; index row 609.**
+
+Existing parent/dependencies: SMART-N6, P0-CLOUDS. Code surfaces: movers, managed, cloudapi, decide.
+
+Research trigger: AWS classic versus homogeneous; Azure LRS versus logical copy. Sources: [S142](https://docs.aws.amazon.com/dms/latest/userguide/data-migrations.html), [S091](https://learn.microsoft.com/th-th/Azure/Azure-sql/managed-instance/log-replay-service-overview?view=azuresql).
+
+Proposed deeper mechanism: Choose native backup/log restore, logical replication, dump/restore or generic CDC from actual source/target/version/network/privilege support. Build a per-path coverage and secondary-object contract; add independent validation when the provider-native path lacks it. Include provider resource lifecycle and completion semantics.
+
+Acceptance evidence: Prove both native and generic paths for a pair, inject an omitted view/sequence/grant, and ensure native speed never earns unsupported coverage.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH02.lob-policy — Choose LOB policy without truncation
+
+**OPEN — P1; research-derived extension; size M; index row 610.**
+
+Existing parent/dependencies: SMART-N20, READ.chunk-loops. Code surfaces: decide, pieces, engines, tuning.
+
+Research trigger: AWS LOB limits; Qlik modes; MySQL pieces. Sources: [S109](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_ReleaseNotes.html), [S007](https://help.qlik.com/en-US/replicate/November2024/Content/Global_Common/Content/SharedEMReplicate/Customize%20Tasks/tasks_applychangtunestab.htm).
+
+Proposed deeper mechanism: Make inline, streamed, locator, chunked and separately fetched LOB paths candidates under value-size/packet/memory/consistency facts. Reject truncating or stale-locator paths under exact contracts; size probes are bounded and unknown maxima stay conservative.
+
+Acceptance evidence: Mixed NULL/empty/binary/multibyte/extreme LOBs plus concurrent updates and failures produce exact final bytes, bounded memory and no premature checkpoint.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH03.transaction-dag — Parallelize changes with explicit dependency guarantees
+
+**OPEN — P1; research-derived extension; size L; index row 611.**
+
+Existing parent/dependencies: SUPER.dag-barrier, SMART-N8. Code surfaces: barriers, tail_apply, guarantees, jointplan.
+
+Research trigger: GoldenGate parallel apply and barriers. Sources: [S001](https://docs.oracle.com/en/database/goldengate/core/26/coredoc/replicat-integrated-replicat.html), [S002](https://docs.oracle.com/en/middleware/goldengate/core/21.3/oracle-db/configuring-oracle-goldengate-apply.html).
+
+Proposed deeper mechanism: Extend existing transaction DAG work with row/unique/FK dependency edges, barriers for DDL/sequence/cutover and explicit handling of huge transactions. Independent transactions may reorder only within the consistency contract. Schedule by measured downstream contention, not fixed worker count.
+
+Acceptance evidence: Cross-table FK cascades, unique-key swaps, DDL and kill/restart preserve source transaction atomicity; committed-prefix proof blocks cutover on holes.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH04.apply-contract — Cost transactional and batch apply under different contracts
+
+**OPEN — P1; research-derived extension; size M; index row 612.**
+
+Existing parent/dependencies: SMART-N1, SMART-N6. Code surfaces: decide, guarantees, tableway.
+
+Research trigger: Qlik transactional/batch and IBM optimization tradeoffs. Sources: [S007](https://help.qlik.com/en-US/replicate/November2024/Content/Global_Common/Content/SharedEMReplicate/Customize%20Tasks/tasks_applychangtunestab.htm), [S106](https://www.ibm.com/support/pages/node/1102497).
+
+Proposed deeper mechanism: Declare the integrity, ordering, key and trigger assumptions of each apply mode. Rank batch merging only when required guarantees can be maintained or restored before exposure; keyless/native endpoints need their own contract. Include batch recovery/validation cost.
+
+Acceptance evidence: No-PK duplicates, cross-table transactions and a target without unique enforcement cannot silently inherit transactional guarantees from a batch path.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH05.repair-fence — Schedule repair against CDC without stale overwrite
+
+**OPEN — P1; research-derived extension; size M; index row 613.**
+
+Existing parent/dependencies: repairways existing, SMART-N7. Code surfaces: repairways, tailtables, fencing.
+
+Research trigger: AWS resync and HVR refresh exclusion. Sources: [S143](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Validating.DataResync.html), [S006](https://fivetran.com/docs/hvr6/getting-started/concepts/refresh).
+
+Proposed deeper mechanism: Extend existing rows/spans/reload repair to establish a repair epoch and drain/hold affected apply work, preserve newer target writes under conflict policy, then reconcile buffered changes and reverify. Choose row/range/table scope by total cost and bounded outage.
+
+Acceptance evidence: Delay a repair write while a later CDC update arrives; newest committed source value wins, replay is gap-free, and interrupted repair can undo or reconcile safely.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH06.online-confirmation — Classify transient versus persistent divergence by positions
+
+**OPEN — P1; research-derived extension; size M; index row 614.**
+
+Existing parent/dependencies: existing convergence checks, SMART-N7. Code surfaces: verifiers, delta, planner.
+
+Research trigger: Veridata MOOS/COOS; HVR online compare. Sources: [S098](https://docs.oracle.com/en/database/goldengate/core/26/gvdug/how-oracle-goldengate-veridata-works.html), [S005](https://fivetran.com/docs/hvr6/getting-started/concepts/compare).
+
+Proposed deeper mechanism: Extend existing delta/generation/fence logic with position-based confirmation where possible; uncertain rows stay pending, not repaired automatically after an arbitrary sleep. Count all selected proof units and track expiry of online comparison evidence.
+
+Acceptance evidence: Continuously changing rows, deleted-on-both rows and delayed transactions settle correctly; lag does not create false corruption and persistent drift is not suppressed.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH07.keyless-proof — Prove keyless multisets at scale
+
+**OPEN — P1; research-derived extension; size L; index row 615.**
+
+Existing parent/dependencies: SMART-N7, REV-T1. Code surfaces: canon, verifiers, engines.
+
+Research trigger: DTS thresholds; Validata duplicate limitation. Sources: [S010](https://www.alibabacloud.com/help/en/dts/user-guide/enable-data-verification), [S073](https://www.striim.com/docs/validata/en/validation-types.html).
+
+Proposed deeper mechanism: Use duplicate-sensitive multiset fingerprints with exact escalation/external sorting and a deterministic row-identity strategy where CDC needs it. Avoid XOR-only acceptance, sample-only same or synthetic-key source mutation. Include count/multiplicity and canonicalization contracts.
+
+Acceptance evidence: Perfect duplicates with even-count cancellation, reorder, NULL/empty, equal-count corruption and billion-row spill scenarios cannot falsely pass.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH08.effect-checkpoint — Bind keyless writes and dedup state atomically
+
+**OPEN — P1; research-derived extension; size L; index row 616.**
+
+Existing parent/dependencies: SMART-N17, existing fencing. Code surfaces: attempts, durable, engines, tail_apply.
+
+Research trigger: Alibaba exactly-once metadata tables. Sources: [S011](https://www.alibabacloud.com/help/en/dts/user-guide/synchronize-tables-without-primary-keys-and-unique-constraints-from-the-source-database), [S025](https://docs.informatica.com/content/dam/source/GUID-5/GUID-564A497D-5045-4D3A-92A2-F1C5D0D1B030/50/en/CMI_November2024_DatabaseIngestionAndReplication_en.pdf).
+
+Proposed deeper mechanism: Per engine, choose atomic target transaction plus position/dedup identity when supported; otherwise reconcile and declare weaker semantics. Metadata ownership and retention are part of the plan. Reconstruct checkpoints without treating absence as a fresh start.
+
+Acceptance evidence: Crash after target effect/before ack and after checkpoint boundaries for keyless duplicate rows; no duplicated or missing effects under the declared contract.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH09.schema-epoch — Propagate compatible DDL through a fenced dependency plan
+
+**OPEN — P1; research-derived extension; size L; index row 617.**
+
+Existing parent/dependencies: SUPER.ddl-mutation, AUTO.schema-drift. Code surfaces: schema_guard, tailtables, hetero.
+
+Research trigger: Google manual refresh; connector-specific drift support. Sources: [S110](https://docs.cloud.google.com/database-migration/docs/oracle-to-postgresql/known-limitations), [S148](https://docs.cloud.google.com/database-migration/docs/sqlserver-to-csql-pgsql/known-limitations), [S101](https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/faq).
+
+Proposed deeper mechanism: Extend schema drift support with typed compatibility classification, schema-versioned change decoding and dependent invalidation. Include default backfill, rename identity, constraint changes and transition state. Refuse unrepresentable changes rather than make silent lossy fixes.
+
+Acceptance evidence: ADD default, rename/drop/re-add same name, changed PK and DDL during snapshot/restart leave a coherent target and invalidate exactly affected evidence.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH10.shadow-resync — Resnapshot affected objects while keeping validated live state
+
+**OPEN — P1; research-derived extension; size L; index row 618.**
+
+Existing parent/dependencies: SMART-N16, SMART-N22. Code surfaces: tailtables, ship, ownership.
+
+Research trigger: ClickPipes lifecycle; Airbyte refresh; HVR refresh. Sources: [S056](https://github.com/ClickHouse/clickhouse-docs/blob/main/docs/integrations/data-ingestion/clickpipes/postgres/lifecycle.md), [S107](https://docs.airbyte.com/platform/understanding-airbyte/cdc), [S006](https://fivetran.com/docs/hvr6/getting-started/concepts/refresh).
+
+Proposed deeper mechanism: Choose fenced range repair, shadow-table resnapshot or whole reload. Buffer changes from a known position, reconcile tombstones, catch up shadow state, validate then atomically swap only where the engine can. Account for temporary disk and old table rollback retention.
+
+Acceptance evidence: Delete/update during snapshot, new columns and crash at swap yield one complete version with no duplicated/lost changes; foreign references and application bindings remain valid.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH11.snapshot-watermark — Choose consistent snapshot-to-stream handoff mechanisms
+
+**OPEN — P1; research-derived extension; size L; index row 619.**
+
+Existing parent/dependencies: SMART-N16, existing shared snapshot. Code surfaces: planner, movers, snapshot, tailtables.
+
+Research trigger: PeerDB exported snapshots; Debezium incremental snapshots. Sources: [S058](https://clickhouse.com/blog/practical-postgres-migrations-at-scale-peerdb), [S086](https://debezium.io/documentation/reference/3.0/connectors/postgresql.html).
+
+Proposed deeper mechanism: Register shared snapshot, range watermark and engine-native handoff as explicit alternatives. Price snapshot lifetime/WAL retention/source impact; declare where signaling writes are required and respect read-only source intent. Detect missing log intervals before accepting copy coverage.
+
+Acceptance evidence: Concurrent range mutation, long snapshot and restart across failover demonstrate complete handoff; unavailable watermark support refuses that path rather than faking an epoch.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH12.reverse-contract — Preflight reversibility before claiming failback
+
+**OPEN — P1; research-derived extension; size L; index row 620.**
+
+Existing parent/dependencies: AUTO.reverse-failback, SMART-N14. Code surfaces: reverse, cutover, transforms.
+
+Research trigger: Google failback Preview; Voyager fallback/fall-forward. Sources: [S146](https://docs.cloud.google.com/database-migration/docs/sqlserver-to-csql-pgsql/failback-migration), [S048](https://docs.yugabyte.com/stable/yugabyte-voyager/migrate/live-fall-back/), [S049](https://docs.yugabyte.com/stable/yugabyte-voyager/migrate/live-fall-forward/).
+
+Proposed deeper mechanism: Build a reverse-capability contract for types, mappings, keys, DDL and commit ordering. Prepare reverse capture at the forward fence before new target writes; refuse zero-loss claims if any write interval/type/object lacks reverse representation. Choose original-source fallback or third-target fall-forward where authorized.
+
+Acceptance evidence: Writes immediately after promotion, transformed values, new objects, keyless updates and schema changes are either preserved in reverse or explicitly block failback readiness.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH13.traffic-state — Make cutover a durable client-and-database state machine
+
+**OPEN — P1; research-derived extension; size M; index row 621.**
+
+Existing parent/dependencies: AUTO.proxy-shift, SMART-N17. Code surfaces: proxy, cutover, session.
+
+Research trigger: Vitess traffic workflow; Confluent offsets; Redis routing limits. Sources: [S054](https://vitess.io/docs/24.0/reference/vreplication/movetables/), [S083](https://docs.confluent.io/cloud/current/multi-cloud/cluster-linking/migrate-cc.html), [S045](https://redis.io/docs/latest/operate/rc/databases/active-active/).
+
+Proposed deeper mechanism: Track pause/drain/fence/proof/counter adjustment/routing/resume and client acknowledgment separately. Observe outstanding sessions, stale DNS/connection pools and read/write routing. API success or database promotion alone is not application cutover completion.
+
+Acceptance evidence: Clients with cached connections plus network failure after routing update cannot split writes; restart reconciles the actual active writer before continuing.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH14.conflict-semantics — Choose conflict rules by data semantics and evidence
+
+**OPEN — P1; research-derived extension; size L; index row 622.**
+
+Existing parent/dependencies: SMART-N14, existing two-way. Code surfaces: twoway, canon, guarantees.
+
+Research trigger: GoldenGate ACDR; SharePlex CDR; Redis CRDT. Sources: [S003](https://docs.oracle.com/en/database/goldengate/core/26/coredoc/administer-automatic-cdr.html?source=%3Aso%3Ach%3Aor%3Aawr%3A%3A%3A), [S023](https://support.quest.com/technical-documents/doc1629965), [S045](https://redis.io/docs/latest/operate/rc/databases/active-active/).
+
+Proposed deeper mechanism: Describe policies by origin identity, before image, version vector/timestamp assumptions, tombstone horizon and permissible merge algebra. Restrict commutative merging to types where it is defined; preserve audit trails and unresolved conflicts. Never infer business precedence from server names.
+
+Acceptance evidence: Clock skew, delete/reinsert, concurrent increments, out-of-order delivery and cyclic replication converge only under supported semantics; conflicting noncommutative writes remain visible.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH15.source-role — Use replicas only when their snapshots and positions are valid
+
+**OPEN — P1; research-derived extension; size M; index row 623.**
+
+Existing parent/dependencies: SMART-N2, SMART-N9. Code surfaces: engines, model, scenarios.
+
+Research trigger: AWS PostgreSQL16 replica CDC; Databricks AG resume. Sources: [S109](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_ReleaseNotes.html), [S036](https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/sql-server-limits).
+
+Proposed deeper mechanism: Discover primary/replica role and lineage, portable positions, slot failover support and replay lag. Decide where assessment, snapshot, CDC and verification read. Include replica failover/lag in proof freshness and cost, not a blanket source-load optimization.
+
+Acceptance evidence: Replica lag and primary failover between snapshot and tail cannot skip changes or compare incompatible timelines; role changes invalidate affected decisions.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH16.retention-controller — Prevent unbounded WAL and spool risk proactively
+
+**OPEN — P1; research-derived extension; size M; index row 624.**
+
+Existing parent/dependencies: SUPER.store-forward, SMART-N19. Code surfaces: model, tailtables, sizing, leftovers.
+
+Research trigger: PeerDB initial-load slots; Striim checkpoints. Sources: [S056](https://github.com/ClickHouse/clickhouse-docs/blob/main/docs/integrations/data-ingestion/clickpipes/postgres/lifecycle.md), [S075](https://striim.com/docs/platform/en/recovering-applications.html).
+
+Proposed deeper mechanism: Forecast retained log/spool growth from arrival minus durable-consumption rates, free disk, snapshot age and recovery windows. Speed copy, throttle safe stages, add authorized capacity or stop/reseed from a valid point before irreversible log loss. Finite spool is not a guarantee against unlimited outage.
+
+Acceptance evidence: Slow target plus multi-hour outage and snapshot restart stay inside disk limits or stop truthfully without acknowledging unretained source changes.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH17.mapping-proof — Verify composed mappings in both load and CDC
+
+**OPEN — P1; research-derived extension; size M; index row 625.**
+
+Existing parent/dependencies: SMART-N14, existing transformed verification. Code surfaces: transforms, canon, engines/hetero.
+
+Research trigger: HVR directional coercion; Mongo relational-to-document verification. Sources: [S005](https://fivetran.com/docs/hvr6/getting-started/concepts/compare), [S042](https://www.mongodb.com/docs/relational-migrator/jobs/data-verification/).
+
+Proposed deeper mechanism: Represent mapping/filter/mask/embedding as a versioned dataflow with coverage lineage. Verify expected mapped source output against target, preserving one-to-many/many-to-one identity, multiplicity and update/delete semantics. Compare lossiness explicitly rather than silently normalizing differences away.
+
+Acceptance evidence: Mask+filter+rename and normalized/embedded documents remain correct after updates/deletes and restart; raw equal counts do not substitute for mapped-value proof.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH18.conversion-ledger — Keep submitted, parsed, converted and executed scope distinct
+
+**OPEN — P1; research-derived extension; size M; index row 626.**
+
+Existing parent/dependencies: SMART-N7, existing storedcode PROVES. Code surfaces: storedcode, capabilities, verdict.
+
+Research trigger: SnowConvert scope accounting. Sources: [S034](https://docs.snowflake.com/en/migrations/snowconvert-docs/general/getting-started/running-snowconvert/review-results/snowconvert-scopes), [S031](https://docs.snowflake.com/en/migrations/snowconvert-docs/general/getting-started/running-snowconvert/validation/README).
+
+Proposed deeper mechanism: For code/ETL/app artefacts keep stable identities and separate submitted/extracted/parsed/converted/deployed/executed/covered counts. Unsupported encodings, encrypted code and dynamic SQL stay explicit debt. Report every denominator; no conversion percentage can hide excluded objects.
+
+Acceptance evidence: One unparsed critical routine blocks complete readiness even when 100 percent of parsed code converted; scope survives rename/restart.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH19.ai-proof-loop — Propose with AI and accept only independent executable evidence
+
+**OPEN — P1; research-derived extension; size L; index row 627.**
+
+Existing parent/dependencies: SMART-N10, existing storedcode proof/mutation. Code surfaces: storedcode/translate, prove, mutants.
+
+Research trigger: Google Gemini quality; Datafold align/diff; SnowConvert skills. Sources: [S147](https://docs.cloud.google.com/database-migration/docs/sqlserver-to-csql-pgsql/code-conversion-with-gemini), [S099](https://www.datafold.com/blog/what-is-the-datafold-migration-agent/), [S103](https://docs.snowflake.com/ja/migrations/snowconvert-docs/general/user-guide/snowconvert/migration-skill/skill).
+
+Proposed deeper mechanism: Extend deterministic conversion with bounded candidate synthesis only where authorized. Freeze aligned inputs, run source and target in isolated sandboxes, compare observable effects and minimize counterexamples; mutation tests assess weakness of fixtures. AI explanations/scores are annotations, not proof; retain provenance and regression fixtures.
+
+Acceptance evidence: Plausible wrong NULL/exception/timezone/transaction conversions are rejected; retry budgets terminate; no source/application code or data sent to unapproved model destinations.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH20.rule-generalization — Learn conversion rules without propagating a one-off wrong fix
+
+**OPEN — P2; research-derived extension; size M; index row 628.**
+
+Existing parent/dependencies: SMART-N3, SMART-N19 equivalent proof pipeline. Code surfaces: storedcode/learn, translate, inputs.
+
+Research trigger: Google pattern propagation; Snowflake reusable fixes. Sources: [S147](https://docs.cloud.google.com/database-migration/docs/sqlserver-to-csql-pgsql/code-conversion-with-gemini), [S103](https://docs.snowflake.com/ja/migrations/snowconvert-docs/general/user-guide/snowconvert/migration-skill/skill).
+
+Proposed deeper mechanism: Learn narrowly scoped rewrite rules with preconditions, dialect/version constraints and proof obligations. Apply in shadow, test withheld object families, keep conflicting-rule resolution and rollback. Preserve deterministic baseline and rule provenance.
+
+Acceptance evidence: A correction for one decimal/NULL pattern cannot alter unrelated routines; cross-project reuse earns proof before activation and can be revoked independently.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH21.dynamic-sql — Trace dynamic SQL and external application dependencies
+
+**OPEN — P1; research-derived extension; size L; index row 629.**
+
+Existing parent/dependencies: SMART-N12, SMART-N18. Code surfaces: storedcode/appscan, inputs, guide.
+
+Research trigger: Ispirer assessment; SnowConvert ETL/BI scope; Hyper-Q. Sources: [S063](https://www.ispirer.com/products/database-migration), [S103](https://docs.snowflake.com/ja/migrations/snowconvert-docs/general/user-guide/snowconvert/migration-skill/skill), [S071](https://gcp.docs.datometry.com/en/7086-about-hyper-q.html).
+
+Proposed deeper mechanism: Extend AST scanning with bounded configuration-aware constant propagation and sandbox/runtime traces where approved. Track queries from ORM mappings, prepared statements, generated SQL, report definitions and external jobs as unresolved or discovered dependencies. Never treat heuristic absence as proof of no use.
+
+Acceptance evidence: Parameterized SQL, generated identifiers and encrypted/unavailable code are reflected in readiness coverage; migration waves cannot cut over a dependency whose consumer still points at the old shape.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH22.etl-bi-waves — Plan database, ETL and report migration waves together
+
+**OPEN — P2; research-derived extension; size L; index row 630.**
+
+Existing parent/dependencies: SMART-N13, SMART-N18. Code surfaces: planner, storedcode, scope.
+
+Research trigger: Snowflake ETL conversion/report repointing. Sources: [S103](https://docs.snowflake.com/ja/migrations/snowconvert-docs/general/user-guide/snowconvert/migration-skill/skill), [S028](https://www.enterprisedb.com/docs/migrating/oracle/edb_migration_tools/).
+
+Proposed deeper mechanism: Add registered parsers/adapters for selected ETL and BI artefacts under explicit scope, compile lineage and wave prerequisites, validate transformed results on aligned inputs and coordinate connection repointing. Keep external deployments separately authorized. Start with one concrete artefact family, not universal format support.
+
+Acceptance evidence: A database table used by an ETL job and dashboard cannot be marked whole-workload ready while either dependency is unconverted or unverified.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH23.query-regression — Gate app readiness on behavioral and performance envelopes
+
+**OPEN — P1; research-derived extension; size L; index row 631.**
+
+Existing parent/dependencies: SUPER.query-guard, SMART-N18. Code surfaces: storedcode/bench, model, readiness.
+
+Research trigger: Datafold aligned inputs; EDB testing; Qlik target modes. Sources: [S099](https://www.datafold.com/blog/what-is-the-datafold-migration-agent/), [S028](https://www.enterprisedb.com/docs/migrating/oracle/edb_migration_tools/).
+
+Proposed deeper mechanism: Use representative approved workloads, parameter distributions, concurrency and app roles on a target sandbox. Compare result semantics plus p50/p95 latency, throughput and contention, separating cold-cache effects and noisy resource changes. Candidate index/statistics fixes must be verified and priced.
+
+Acceptance evidence: Identical rows with a changed collation, missing index or regressed execution plan cannot receive an unconditional app-ready verdict; no synthetic benchmark is labelled production performance.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH24.principal-migration — Migrate security semantics without indiscriminate grant copying
+
+**OPEN — P1; research-derived extension; size M; index row 632.**
+
+Existing parent/dependencies: SMART-N12, existing privilege checks. Code surfaces: users, ownership, managed, guide.
+
+Research trigger: Tencent account conflict policies; Azure DEFINER limitations. Sources: [S112](https://proxy-hk.tencentcloud.com/ind/document/product/571/42597), [S151](https://learn.microsoft.com/en-us/azure/dms/tutorial-mysql-azure-external-to-flex-online-portal), [S148](https://docs.cloud.google.com/database-migration/docs/sqlserver-to-csql-pgsql/known-limitations).
+
+Proposed deeper mechanism: Model user/role/grant/ownership/default privilege and DEFINER/INVOKER semantics separately from credentials and provider-managed principals. Map identities and approved conflict policy explicitly; test with the application role. Unsupported server logins/certificates become scoped prerequisites.
+
+Acceptance evidence: Missing sequence privileges, RLS, definer changes and duplicate account names are discovered and resolved within policy; no unintended privilege widening or silent use of migrator ownership.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH25.target-tuning-contract — Treat ingest tuning as a temporary durability contract
+
+**OPEN — P1; research-derived extension; size M; index row 633.**
+
+Existing parent/dependencies: AUTO.target-tune, AUTO.deferred-index. Code surfaces: tune, indexes, managed, guarantees.
+
+Research trigger: HVR load windows; SQLines constraints; AUTO.target-tune. Sources: [S006](https://fivetran.com/docs/hvr6/getting-started/concepts/refresh), [S067](https://www.sqlines.com/sqldata_cfg).
+
+Proposed deeper mechanism: Extend current tuning implementation with approved durability bounds, observed original settings and restart-safe restore. Price index/constraint/ANALYZE tails and crash recovery, and never publish app-ready while checks are disabled or constraints unvalidated. Do not globally turn off protections merely because a faster mode exists.
+
+Acceptance evidence: Crash during load and restoration cannot leave production with weakened durability/disabled constraints; overall measured completion justifies each tuning change.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH26.history-contract — Distinguish current-state migration from complete change history
+
+**OPEN — P1; research-derived extension; size M; index row 634.**
+
+Existing parent/dependencies: SMART-N1, SMART-N7. Code surfaces: scope, tailtables, verdict.
+
+Research trigger: Fivetran SCD2; SQL Server CT versus CDC. Sources: [S039](https://fivetran.com/docs/core-concepts/sync-modes/history-mode), [S100](https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/sql-server-overview).
+
+Proposed deeper mechanism: Declare whether the goal requires current final state or every intermediate version/event. Choose CDC, CT, polling or historical snapshots only when their information content satisfies that goal. Carry history cutoffs, deletion/tombstone semantics and retention into proof.
+
+Acceptance evidence: Insert-and-delete between polls and multiple updates between syncs cannot be falsely declared complete historical capture; final-state and history verdicts use separate coverage.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH27.stream-metadata — Move event consumers and schemas with stream bytes
+
+**OPEN — P1; research-derived extension; size L; index row 635.**
+
+Existing parent/dependencies: SMART-N12, SMART-N13 traffic. Code surfaces: engines/kafka, topology, cutover.
+
+Research trigger: Confluent Cluster Linking. Sources: [S083](https://docs.confluent.io/cloud/current/multi-cloud/cluster-linking/migrate-cc.html), [S085](https://docs.confluent.io/cloud/current/multi-cloud/cluster-linking/cluster-links-cc.html), [S038](https://docs.confluent.io/platform/current/multi-dc-deployments/cluster-linking/mirror-topics-cp.html).
+
+Proposed deeper mechanism: Extend Kafka migration proof to topic configs/partition identity, retained ranges, consumer group offsets, ACL policy and schema-registry compatibility. Offset-preserving versus remapped paths are different capabilities; coordinate promotion with fences and active consumers.
+
+Acceptance evidence: Consumer restart after promotion has no unaccounted replay/gap, offsets outside retention are refused and topic data equality cannot hide incompatible schema/auth state.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH28.document-model — Verify normalized-to-document transformations after updates
+
+**OPEN — P1; research-derived extension; size L; index row 636.**
+
+Existing parent/dependencies: RCH17, SMART-N14. Code surfaces: engines/hetero, canon, transforms.
+
+Research trigger: MongoDB relational verification. Sources: [S042](https://www.mongodb.com/docs/relational-migrator/jobs/data-verification/), [S043](https://www.mongodb.com/docs/relational-migrator/jobs/creating-jobs/).
+
+Proposed deeper mechanism: Extend mapping-aware verification for embedding, arrays, path identity, type conversion, ordering and multiplicity. Select indexed lookup/batched fetch/stream compare from measured target shape; verify update/delete propagation for embedded references separately from snapshot equivalence.
+
+Acceptance evidence: Equal collection counts with wrong nested paths, missing embedded child or reordered semantically ordered arrays fails; concurrent-source assumptions are explicit.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH29.cache-semantics — Preserve expiry and eviction behavior across cache migrations
+
+**OPEN — P1; research-derived extension; size M; index row 637.**
+
+Existing parent/dependencies: existing Redis ladders, SMART-N14. Code surfaces: engines/redis, decide, cutover.
+
+Research trigger: Redis Replica Of and CRDT. Sources: [S047](https://redis.io/docs/latest/operate/rs/7.8/databases/import-export/replica-of/), [S045](https://redis.io/docs/latest/operate/rc/databases/active-active/), [S046](https://redis.io/docs/latest/integrate/redis-data-integration/).
+
+Proposed deeper mechanism: Carry TTL as relative/absolute policy with elapsed-time compensation, types, eviction/LFU/LRU metadata where supported and active-active conflict behavior. Separate data sync from client routing. Forbid late full-resync from overwriting a promoted writable target.
+
+Acceptance evidence: Near-expiry keys, clock skew, memory pressure and reconnect after cutover preserve approved semantics or declare unavailable fidelity; reverse direction does not flush new writes.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH30.shard-ddl — Coordinate sharded schema evolution with explicit convergence
+
+**OPEN — P1; research-derived extension; size L; index row 638.**
+
+Existing parent/dependencies: SMART-N23, existing reshard. Code surfaces: reshard, schema_guard, topology.
+
+Research trigger: TiDB optimistic/pessimistic DDL. Sources: [S051](https://docs.pingcap.com/tidb/v7.5/feature-shard-merge-optimistic/), [S054](https://vitess.io/docs/24.0/reference/vreplication/movetables/).
+
+Proposed deeper mechanism: Extend topology-aware movement with per-shard schema versions, combined target compatibility and barriers. Choose optimistic progress only when target schema and concurrent writes remain representable; otherwise wait/serialize only affected shards. Validate aggregate keyspace placement.
+
+Acceptance evidence: Different shard DDL order, duplicate keys, shard split and coordinator restart neither lose columns nor deadlock silently; every row placed exactly once under the declared rule.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH31.placement-advice — Connect assessment to measured target topology and sizing
+
+**OPEN — P2; research-derived extension; size L; index row 639.**
+
+Existing parent/dependencies: SMART-N6, SMART-N18. Code surfaces: machine, model, managed, scenarios.
+
+Research trigger: Voyager workload/IOPS assessment. Sources: [S149](https://docs.yugabyte.com/stable/yugabyte-voyager/migrate/assess-migration/), [S028](https://www.enterprisedb.com/docs/migrating/oracle/edb_migration_tools/).
+
+Proposed deeper mechanism: Extend machine advice with table/index access patterns, skew, distributed locality and transaction fanout. Recommend candidate colocated/distributed/partitioned target designs and resource sizes from evidence; rehearse alternatives rather than use brand-specific static classes.
+
+Acceptance evidence: A design that makes bulk import fast but causes hot shards or expensive cross-partition transactions loses against a better end-to-end workload plan.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH32.connector-capability — Model schema drift and limitations per connector version
+
+**OPEN — P1; research-derived extension; size M; index row 640.**
+
+Existing parent/dependencies: SMART-N9, RCH09. Code surfaces: capabilities, tools, guide.
+
+Research trigger: Lakeflow feature matrices; Airbyte policies; Hevo. Sources: [S100](https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/sql-server-overview), [S101](https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/faq), [S108](https://docs.airbyte.com/platform/using-airbyte/schema-change-management), [S040](https://docs.hevodata.com/edge/pipelines/object-and-schema-management/pipeline-schema-management/).
+
+Proposed deeper mechanism: Snapshot feature matrices by engine/service/version/connector/mode and distinguish added/deleted/renamed/type-changed columns, old-row backfill and new-table discovery. Unknown or contradictory docs trigger bounded probes and owned debt, not inferred yes.
+
+Acceptance evidence: A connector that supports add-column but needs full refresh for rename cannot auto-admit rename; stale connector/version metadata invalidates the decision.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH33.agent-control — Expose resumable constrained migration operations to agents
+
+**OPEN — P1; research-derived extension; size M; index row 641.**
+
+Existing parent/dependencies: SMART-N11, existing tooluse. Code surfaces: tooluse, session, autonomous.
+
+Research trigger: Google DMS MCP; AWS APIs; Snowflake skills. Sources: [S016](https://docs.cloud.google.com/database-migration/docs/release-notes), [S145](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_SchemaConversion.html), [S103](https://docs.snowflake.com/ja/migrations/snowconvert-docs/general/user-guide/snowconvert/migration-skill/skill).
+
+Proposed deeper mechanism: Build a versioned structured read/plan/execute/reconcile interface over the existing engine, with operation IDs, scope and authorization references. Agents request goals/inspect evidence; deterministic admission and effect tracking remain authoritative. Avoid a second orchestration state machine.
+
+Acceptance evidence: Duplicated agent calls, process restart and untrusted database text cannot duplicate writes, widen scope or bypass a refused contract; all outputs map to the same verdict semantics.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH34.release-intelligence — Keep support and competitor knowledge versioned and falsifiable
+
+**OPEN — P2; research-derived extension; size M; index row 642.**
+
+Existing parent/dependencies: SMART-N9, source registry. Code surfaces: tools, capabilities, research metadata.
+
+Research trigger: Provider release notes. Sources: [S109](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_ReleaseNotes.html), [S016](https://docs.cloud.google.com/database-migration/docs/release-notes), [S112](https://proxy-hk.tencentcloud.com/ind/document/product/571/42597), [S080](https://help.qlik.com/en-US/replicate/May2026/Content/Replicate/Main/Release_Notes/features.htm).
+
+Proposed deeper mechanism: Keep official URL/version/date/status and changed capability predicates. Documentation updates produce reviewable contract/probe tasks, not automatic installs or production changes. Retain conflicting regional/legacy docs and invalidate unsupported broad claims. Separate GA/Preview/roadmap/marketing/inference.
+
+Acceptance evidence: A preview feature never turns into unconditional supported capability, and a vendor rename or redirected documentation does not create fabricated coverage.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH35.incumbent-switch — Include transition and rollback costs when replanning
+
+**OPEN — P1; research-derived extension; size M; index row 643.**
+
+Existing parent/dependencies: SMART-N5, SMART-N24. Code surfaces: decide, jointplan, costmodel.
+
+Research trigger: Striim recovery/parallelism tradeoffs; HVR refresh. Sources: [S075](https://striim.com/docs/platform/en/recovering-applications.html), [S006](https://fivetran.com/docs/hvr6/getting-started/concepts/refresh).
+
+Proposed deeper mechanism: Extend current transition pricing with checkpoint granularity, spool drains, transaction barriers, process setup, resource restore and proof regeneration. Keep hysteresis and a validated incumbent; assess p90 savings over remaining work rather than local throughput.
+
+Acceptance evidence: A marginally faster path with expensive replay never steals the job; sustained changes cross a reproducible break-even threshold without oscillation.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH36.verify-method — Select validation methods by what each can actually prove
+
+**OPEN — P1; research-derived extension; size M; index row 644.**
+
+Existing parent/dependencies: SMART-N7, existing second readers. Code surfaces: verifiers, scanplan, decide.
+
+Research trigger: Validata vectors/record hashes; DVT; SQLines. Sources: [S073](https://www.striim.com/docs/validata/en/validation-types.html), [S088](https://github.com/GoogleCloudPlatform/professional-services-data-validator), [S066](https://www.sqlines.com/sqldata_validation), [S070](https://streams.dbconvert.com/docs/streams/verify-load).
+
+Proposed deeper mechanism: Give count/aggregate/vector/hash/key-row/external-sort/custom-query methods explicit proof strength, collision/duplicate assumptions, canonicalization and source-cost models. Fast signatures can rule in differences or prioritize exact work; cannot certify stronger claims than their contract.
+
+Acceptance evidence: Perfect duplicates, equal-count value changes, floating rounding and hash ambiguity either fail or escalate; count-only unchanged totals cannot produce same.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH37.failure-budget — Allocate recovery effort by progress and deadline value
+
+**OPEN — P1; research-derived extension; size M; index row 645.**
+
+Existing parent/dependencies: SMART-N15, SMART-N21. Code surfaces: faults, attempts, autonomous.
+
+Research trigger: Striim checkpoint costs; IBM apply tradeoffs. Sources: [S075](https://striim.com/docs/platform/en/recovering-applications.html), [S106](https://www.ibm.com/support/pages/node/1102497).
+
+Proposed deeper mechanism: Extend classified recovery to allocate retry/probe/reconcile/repair budgets by remaining deadline, irreversibility, progress rate and uncertainty. Treat repeated same-state repairs as a diagnosis failure, not success. Compound faults may invalidate prior cost data.
+
+Acceptance evidence: Credential expiry plus WAN partition plus schema drift terminates or recovers with explainable state and bounded waste; no retry loop can outlive all resource validity windows.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH38.storage-protocol — Validate warehouse and lakehouse commit semantics
+
+**OPEN — P1; research-derived extension; size L; index row 646.**
+
+Existing parent/dependencies: SMART-N6, existing warehouse feed. Code surfaces: ship, engines/warehouse, durable.
+
+Research trigger: Snowflake Openflow journals; Matillion staging; Lakeflow. Sources: [S087](https://docs.snowflake.com/en/en/user-guide/data-integration/openflow/connectors/postgres/about), [S078](https://docs.matillion.com/data-productivity-cloud/cdc/docs/cdc-shared-jobs/), [S101](https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/faq).
+
+Proposed deeper mechanism: Model data-file completeness, journal/manifest positions, atomic publish, partition/schema evolution, tombstones and downstream visibility. Choose staged bulk versus streaming by measured billable work and consistent commit behavior; files present are not committed table state.
+
+Acceptance evidence: Crash between object upload, metadata commit and ack yields no orphan visibility or duplicated effects; queryable target coverage matches the source fence.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH39.anti-corruption — Test the verifier against its own blind spots
+
+**OPEN — P1; research-derived extension; size L; index row 647.**
+
+Existing parent/dependencies: SMART-N10, existing mutation infrastructure. Code surfaces: canon, storedcode/mutants, tests.
+
+Research trigger: Datafold aligned inputs; Mongo mapping verification; Veridata. Sources: [S099](https://www.datafold.com/blog/what-is-the-datafold-migration-agent/), [S042](https://www.mongodb.com/docs/relational-migrator/jobs/data-verification/), [S098](https://docs.oracle.com/en/database/goldengate/core/26/gvdug/how-oracle-goldengate-veridata-works.html).
+
+Proposed deeper mechanism: Extend mutation testing beyond stored code: intentionally remove a filter, duplicate a keyless row, alter canonicalization, reset statistics, truncate a table or omit grants. Independently assert that every claimed coverage class detects its defects. Share no bug-prone parser between test oracle and production path.
+
+Acceptance evidence: Mutation score reported per coverage class and engine; surviving mutants are explicit proof debt, not passed tests; false-same regressions block releases.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### RCH40.end-to-end-bar — Gate superiority claims on reproducible complete migrations
+
+**OPEN — P1; research-derived extension; size L; index row 648.**
+
+Existing parent/dependencies: P0-VALIDATE.unattended.proof, SMART-N25. Code surfaces: autonomous comparison, rehearsal, capabilities.
+
+Research trigger: Cross-vendor synthesis. Sources: [S142](https://docs.aws.amazon.com/dms/latest/userguide/data-migrations.html), [S019](https://learn.microsoft.com/en-us/azure/postgresql/migrate/migration-service/best-practices-migration-service-postgresql), [S099](https://www.datafold.com/blog/what-is-the-datafold-migration-agent/).
+
+Proposed deeper mechanism: Extend existing endpoint-only acceptance with provider-native/tool baselines under equal proof/scope/load/durability contracts. Record install/setup/manual steps, verified completion p50/p95, source reads, downtime, reverse readiness, actual money/bytes, loss/duplication and forecast calibration. Label simulated/fake/lane/managed-provider evidence separately.
+
+Acceptance evidence: At least PG-PG, MySQL-MySQL, PG-MySQL and MySQL-PG whole paths plus compound failure/restart; broader pair claims remain owned gaps until tested. No all-products/all-engines/fastest claims from a feature count.
+
+Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+
+### NEED01.resume-scope — Persist filter and mapping identity across every restart
+
+**OPEN — P1; user-need acceptance extension; size L; index row 649.**
+
+Parent/dependencies and code: SMART-N16, RCH17, attempts, tailtables.
+
+Reported need/evidence: A version-specific MongoDB incremental-snapshot report says resumed chunk queries lost additional-conditions; the issue is closed, not proof of a current defect.
+
+Design extension: Keep scope/filter/mapping/tenant predicates in durable unit identity; reject incompatible checkpoint reuse. Current tailtables already checks changed scope, so extend this to every adapter and boot-snapshot path.
+
+Acceptance test: Crash at each chunk with a nontrivial row filter; no out-of-scope row is read/written and skipped in-scope work remains pending.
+
+Sources: [P067](https://github.com/debezium/dbz/issues/1807).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED02.snapshot-state — Preserve pending incremental work through boot snapshots
+
+**OPEN — P1; user-need acceptance extension; size L; index row 650.**
+
+Parent/dependencies and code: RCH11, SMART-N17, autonomous, checkpoint.
+
+Reported need/evidence: An issue reports that a boot-time snapshot can replace a restored offset context and discard pending incremental work silently.
+
+Design extension: Represent full snapshot, incremental snapshot and CDC state as separate durable sub-workflows with explicit transfer invariants; a phase may not reset another phase's obligations.
+
+Acceptance test: Restart all supported snapshot modes at 30 percent completion; pending units remain accounted for and coverage totals never silently shrink.
+
+Sources: [P065](https://github.com/debezium/dbz/issues/2325).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED03.cancel-recovery — Make invalid snapshot requests and cancellation recoverable
+
+**OPEN — P1; user-need acceptance extension; size L; index row 651.**
+
+Parent/dependencies and code: SMART-N21, RCH37, attempts.
+
+Reported need/evidence: A user reports invalid snapshot metadata blocking subsequent requests and requiring manual offset edits.
+
+Design extension: Validate initialization before publishing live state; transactional initialize/commit/cancel states retain diagnostic evidence while removing only owned invalid work.
+
+Acceptance test: Invalid key/filter, cancellation and process death cannot strand the workflow or require destructive global offset reset.
+
+Sources: [P066](https://github.com/debezium/dbz/issues/1533).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED04.ack-lattice — Distinguish read, durably retained, applied and proved positions
+
+**OPEN — P1; user-need acceptance extension; size L; index row 652.**
+
+Parent/dependencies and code: RCH08, RCH16, postgres.applied_lsn, pipeline.
+
+Reported need/evidence: A historical closed issue describes source LSN acknowledgement preceding successful destination loading.
+
+Design extension: Maintain separate monotone positions and use each only for the guarantee it establishes; source log release requires durable reconstructability, cutover requires target committed-prefix plus required proof. Existing applied_lsn already distinguishes target application from source ack; extend shared contracts.
+
+Acceptance test: Crash after read/spool/apply/ack independently; retained data reconstructs every released change, and ack alone cannot authorize cutover.
+
+Sources: [P002](https://github.com/airbytehq/airbyte/issues/15214).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED05.quiet-source — Manage WAL on low-volume or heavily filtered sources
+
+**OPEN — P1; user-need acceptance extension; size L; index row 653.**
+
+Parent/dependencies and code: RCH16, SMART-N19, postgres, model.
+
+Reported need/evidence: Troubleshooting and issue reports describe retained WAL when few selected events flow or acknowledgements lag.
+
+Design extension: Model safe keepalive/heartbeat and progress for filtered intervals separately from business events; select source-read-only methods first and make any heartbeat write an explicit source effect.
+
+Acceptance test: A quiet database plus noisy excluded tables advances safe retention state without falsely claiming target-applied business writes or unbounded disk growth.
+
+Sources: [P001](https://github.com/airbytehq/airbyte/blob/master/docs/integrations/sources/postgres/postgres-troubleshooting.md), [P003](https://github.com/airbytehq/airbyte/issues/15040), [P004](https://github.com/airbytehq/airbyte/issues/70887).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED06.offset-disagreement — Diagnose offset-store versus slot disagreement without silent skipping
+
+**OPEN — P1; user-need acceptance extension; size L; index row 654.**
+
+Parent/dependencies and code: SMART-N17, RCH15, reconciliation.
+
+Reported need/evidence: A closed enhancement request asks for flexible recovery when offset and replication-slot LSNs disagree.
+
+Design extension: Classify missing-log, already-retained, already-applied and unknown intervals from evidence; automatic recovery needs an interval reconstruction certificate, not a choose-larger-LSN rule.
+
+Acceptance test: Offset ahead/behind slot, failover and stale backup combinations either reconstruct every interval or explicitly require bounded reseed.
+
+Sources: [P006](https://github.com/debezium/dbz/issues/1146).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED07.handoff-overlap — Prove gap-free snapshot and CDC composition after interruptions
+
+**OPEN — P1; user-need acceptance extension; size L; index row 655.**
+
+Parent/dependencies and code: RCH11, RCH08, movers.
+
+Reported need/evidence: Historical pgcopydb and SQL Server CDC reports describe resume-phase confusion, copy-to-follow gaps or overlapping snapshot/stream events.
+
+Design extension: Persist the snapshot lifetime, lower/upper capture fences and dedup identity as one handoff contract; no manual two-step path can omit an interval.
+
+Acceptance test: Writers run throughout seed, handoff and crash/restart; compare every source commit and duplicate multiplicity, not only final keyed upserts.
+
+Sources: [P040](https://github.com/dimitri/pgcopydb/issues/659), [P041](https://github.com/dimitri/pgcopydb/issues/263), [P018](https://github.com/debezium/dbz/issues/1336).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED08.identity-semantics — Preserve distinct keys across target collation and bulk dedup
+
+**OPEN — P1; user-need acceptance extension; size L; index row 656.**
+
+Parent/dependencies and code: SMART-N14, RCH07, canon, hetero.
+
+Reported need/evidence: Closed destination reports describe case-sensitive identifiers merging under case-insensitive collation and duplicates during bulk loading.
+
+Design extension: Define identity equivalence before mapping or dedup; detect non-injective target key representation and choose a supported lossless key strategy or refuse. Bulk and row paths share the same identity contract.
+
+Acceptance test: Case-only IDs, Unicode normalization variants and replayed bulk batches never merge distinct source entities or duplicate one effect.
+
+Sources: [P020](https://github.com/airbytehq/airbyte/issues/60828), [P021](https://github.com/airbytehq/airbyte/issues/65938).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED09.backfill-race — Catch column backfills that precede schema discovery
+
+**OPEN — P1; user-need acceptance extension; size L; index row 657.**
+
+Parent/dependencies and code: RCH09, RCH10, schema_drift, tailtables.
+
+Reported need/evidence: A 2026 user report asks for targeted repair when backfill events occur before the connector refreshes schema.
+
+Design extension: Record relation/schema epochs and observed gaps; a newly accepted column has an explicit historical-coverage obligation. Choose selective backfill or shadow resnapshot and reconcile buffered events.
+
+Acceptance test: ADD COLUMN -> UPDATE old rows -> delayed schema discovery -> restart converges without an unnecessary whole-database reload.
+
+Sources: [P068](https://github.com/airbytehq/airbyte/issues/80920).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED10.partial-images — Treat absent unchanged LOB/TOAST fields differently from NULL
+
+**OPEN — P1; user-need acceptance extension; size L; index row 658.**
+
+Parent/dependencies and code: RCH02, RCH17, engines/postgres, canon.
+
+Reported need/evidence: Vendor engineering describes logical-decoding schema and unchanged-TOAST pitfalls.
+
+Design extension: Use a typed absent/unchanged/null/value representation; choose before-image lookup/cache/re-fetch only with a valid row version. Never overwrite an unchanged large value with a placeholder.
+
+Acceptance test: UPDATE only a small column, concurrent LOB updates and reconnect preserve exact LOB bytes and SQL NULL semantics.
+
+Sources: [P059](https://blog.peerdb.io/overcoming-pitfalls-of-postgres-logical-decoding).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED11.lob-transaction — Keep LOB fetching compatible with constraints and commit semantics
+
+**OPEN — P1; user-need acceptance extension; size L; index row 659.**
+
+Parent/dependencies and code: RCH02, RCH03, pieces.
+
+Reported need/evidence: A Google forum user reports a non-null CLOB apply failure; its proposed root cause is only a hypothesis. AWS docs separately explain LOB size/memory constraints.
+
+Design extension: Probe the actual adapter's LOB materialization and constraint behavior, price inline/streamed paths and retain transaction identity through delayed fetching. Do not relax NOT NULL silently.
+
+Acceptance test: Non-null empty/large/mutating CLOBs and failure between row/LOB steps either commit valid state atomically or remain unexposed and recoverable.
+
+Sources: [P029](https://discuss.google.dev/t/error-during-migrate-to-cloud-sql-for-postgresql-from-oracle-using-data-migration-service-dms/163387), [P032](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Tasks.LOBSupport.html).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED12.decompression-budget — Budget uncompressed transaction size and streaming decode
+
+**OPEN — P1; user-need acceptance extension; size L; index row 660.**
+
+Parent/dependencies and code: SMART-N20, RCH03, tuning, spool.
+
+Reported need/evidence: A version-specific report describes inability to decode compressed transaction payloads above 2GB uncompressed.
+
+Design extension: Track compressed bytes, expanded bytes, nested allocations, transaction spill and decoder limits; select bounded streaming/spill paths while preserving transaction atomicity.
+
+Acceptance test: Highly compressible huge transactions stay within process budgets or are refused/reseeded safely without acknowledging partial effects.
+
+Sources: [P042](https://github.com/debezium/dbz/issues/1503).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED13.process-memory — Bound total memory across migkit, drivers and external movers
+
+**OPEN — P1; user-need acceptance extension; size L; index row 661.**
+
+Parent/dependencies and code: SMART-N23, RCH35, sizing, runner.
+
+Reported need/evidence: Historical pgloader reports and build guidance show that row batches alone do not capture runtime/heap limits.
+
+Design extension: Budget child-process heaps, decoder buffers, driver prefetch, compression, queues and concurrent proofs; distinguish OS kill, driver error and throughput stall. Reconcile target state before changing mover.
+
+Acceptance test: Constrained-memory installed run with large rows and concurrent phases cannot exceed the global budget indefinitely or restart from an unverified position.
+
+Sources: [P035](https://github.com/dimitri/pgloader/issues/1237), [P037](https://github.com/dimitri/pgloader/issues/64), [P038](https://github.com/dimitri/pgloader/issues/399), [P039](https://github.com/dimitri/pgloader/blob/main/INSTALL.md).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED14.progress-cause — Explain blocked progress and name the actual prerequisite
+
+**OPEN — P2; user-need acceptance extension; size M; index row 662.**
+
+Parent/dependencies and code: SMART-N15, SMART-N21, guide, session.
+
+Reported need/evidence: Users report migrations remaining at restoring or failing with opaque process errors; these are specific reports, not established current provider defects.
+
+Design extension: Expose causal phase states: waiting backup, lock, snapshot, log drain, network route, permission or child process. Use observed checkpoints for liveness and separate ETA uncertainty from a hidden required user action.
+
+Acceptance test: Stalled restore and failed child-process scenarios identify the blocking operation and a precise safe next step; no generic increasing percent pretends progress.
+
+Sources: [P024](https://learn.microsoft.com/en-us/answers/questions/1188523/azure-data-studios-azure-sql-migration-hangs-with), [P025](https://learn.microsoft.com/en-us/answers/questions/1388527/during-database-migration-in-online-mode-using-azu), [P028](https://discuss.google.dev/t/dms-mysql-migration-fails-with-waitid-no-child-processes-recurring-across-different-configs/390779).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED15.lock-impact — Predict and enforce a live workload lock budget
+
+**OPEN — P1; user-need acceptance extension; size L; index row 663.**
+
+Parent/dependencies and code: AUTO.deferred-index, RCH25, schema, locks.
+
+Reported need/evidence: Community questions seek safe large-table schema evolution under running queries; technical design documents discuss online DDL.
+
+Design extension: Probe lock/rewrite behavior per operation/version; schedule short lock acquisition, cancellation and expand/backfill/contract alternatives within the authorized scope.
+
+Acceptance test: Long-lived transaction plus index/type/constraint change cannot exceed the lock budget or publish partially restored constraints; practice on representative concurrency.
+
+Sources: [P045](https://www.reddit.com/r/PostgreSQL/comments/1grykyv), [P049](https://www.reddit.com/r/SQL/comments/1whl5jc/how_do_you_handle_schema_migrations_on_a_live/), [P050](https://github.com/yugabyte/yugabyte-db/blob/master/architecture/design/online-schema-migrations.md).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED16.control-upgrade — Upgrade migkit state without forcing data resync
+
+**OPEN — P1; user-need acceptance extension; size L; index row 664.**
+
+Parent/dependencies and code: SMART-N22, durable, config, packaging.
+
+Reported need/evidence: A control-plane upgrade report asks to avoid wiping configuration and resyncing every connection; vendor upgrade guidance emphasizes retaining history.
+
+Design extension: Version durable state and adapter checkpoint formats; stage migrations on a copy, validate invariants, atomic swap and supported downgrade/export. Data-plane state survives an interrupted control-plane upgrade.
+
+Acceptance test: Upgrade/kill/downgrade tests preserve hop definitions, pending work and exact resume positions without full resync unless incompatibility is explicitly established.
+
+Sources: [P060](https://github.com/airbytehq/airbyte/issues/80770), [P064](https://airbyte.com/blog/introducing-airbyte-destinations-v2-typing-deduping).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED17.lock-capability — Probe coordination primitives on compatible-looking services
+
+**OPEN — P1; user-need acceptance extension; size L; index row 665.**
+
+Parent/dependencies and code: SMART-N9, RCH15, fencing, capabilities.
+
+Reported need/evidence: Issue reports show PG-compatible endpoints missing advisory-lock/catalog/protocol features expected by migration tools.
+
+Design extension: Discover required lock/catalog/replication primitives by safe behavioral probe; choose an equivalent fenced lease where supported, not a brand-name fallback.
+
+Acceptance test: A PG-wire endpoint without advisory locks cannot accidentally run two migrators; stale-owner takeover is fenced and missing primitive support stays explicit.
+
+Sources: [P063](https://github.com/flyway/flyway/issues/4022), [P023](https://github.com/cockroachdb/cockroach/issues/84505).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED18.cost-envelope — Forecast and enforce complete migration operating cost
+
+**OPEN — P2; user-need acceptance extension; size M; index row 666.**
+
+Parent/dependencies and code: REV-D4, SMART-N6, machine, jointplan.
+
+Reported need/evidence: Anecdotal discussions ask for predictable billing and less connector-maintenance burden; they do not establish current list prices or representative market prevalence.
+
+Design extension: Account for source/target compute, egress, staging, scans, changed-row billing, resyncs, verification and post-migration idle resources. Use timestamped user/provider rates with uncertainty; price unknowns remain unknown.
+
+Acceptance test: A targeted-refresh plan can be compared to full reload under the same proof contract; actual spend and forecast error recorded, no stale community price treated as current pricing.
+
+Sources: [P011](https://www.reddit.com/r/dataengineering/comments/1u81nqa/evaluating_dlt_vs_fivetran_for_a_small_team_that/), [P012](https://www.reddit.com/r/dataengineering/comments/1ii4ry5), [P013](https://www.reddit.com/r/dataengineering/comments/1jwrfit/thinking_of_migrating_from_fivetran_to_hevo_would/), [P014](https://www.reddit.com/r/dataengineering/comments/1uk2cl7/portable_vs_fivetran_anyone_make_the_swap/).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED19.private-proof — Verify masked/restricted data without exposing source values
+
+**OPEN — P1; user-need acceptance extension; size L; index row 667.**
+
+Parent/dependencies and code: RCH17, RCH19, transforms, evidence.
+
+Reported need/evidence: A first-person migration story describes owner-only PII and inaccessible data; AWS documents migration masking workflows.
+
+Design extension: Use owner-executed collectors, local type-aware proof/masking and privacy-preserving evidence where supported. Preserve FK-consistent masking and exact authorized scope; do not claim equivalence when transforms are unverifiable.
+
+Acceptance test: Secrets/PII stay out of logs, counterexamples, remote model requests and support bundles; missing access yields explicit proof debt rather than inferred success.
+
+Sources: [P046](https://www.reddit.com/r/dataengineering/comments/1mwvz6p/what_is_the_most_painful_data_migration_project/), [P053](https://aws.amazon.com/blogs/database/mask-pii-data-using-aws-dms-and-amazon-macie-during-migration/).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED20.exit-portability — Keep output mappings and checkpoints portable
+
+**OPEN — P2; user-need acceptance extension; size M; index row 668.**
+
+Parent/dependencies and code: SMART-N11, SMART-N22, config, manifests.
+
+Reported need/evidence: Historical user complaints cite renamed fields, forced object selection and costly reprocessing; these remain anecdotes, not general product facts.
+
+Design extension: Export machine-readable schema/mapping lineage, configuration, tool versions, data manifests and supported checkpoint semantics. Preserve original names with collision-aware mappings; compatible engine upgrade avoids forced history reload.
+
+Acceptance test: A clean migkit installation can inspect/export the project and resume compatible supported state without proprietary hidden metadata or indiscriminate source rescan.
+
+Sources: [P017](https://www.reddit.com/r/dataengineering/comments/11xbpjy), [P064](https://airbyte.com/blog/introducing-airbyte-destinations-v2-typing-deduping).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED21.app-rollback — Coordinate application versions with reversible schema evolution
+
+**OPEN — P1; user-need acceptance extension; size L; index row 669.**
+
+Parent/dependencies and code: RCH12, RCH13, SMART-N18.
+
+Reported need/evidence: A release-management discussion asks how to roll back app/schema when a git revert removes down-migration files; rollback docs warn about evolving data.
+
+Design extension: Keep immutable operation/recovery artefacts independent of the application commit; model old/new app compatibility, expand-contract windows and irreversible data changes. Choose forward-fix versus reverse migration from current writes, not git state.
+
+Acceptance test: Rollback after new-version writes either preserves them through a proved reverse path or refuses incompatible app rollback before traffic shifts.
+
+Sources: [P015](https://github.com/werf/werf/discussions/5749), [P062](https://docs.liquibase.com/community/reference-guide-5-0/init-update-and-rollback-commands/what-are-rollback-commands).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED22.rollback-set — Define targeted rollback by effect identity and dependencies
+
+**OPEN — P1; user-need acceptance extension; size L; index row 670.**
+
+Parent/dependencies and code: RCH17, repairlog, attempts.
+
+Reported need/evidence: A version-specific issue reports changed tag-boundary behavior; current docs describe targeted rollback with retained history.
+
+Design extension: Resolve a rollback to an immutable set of owned effects and dependency constraints, not a mutable tag or file ordering alone. Check target postconditions before undo.
+
+Acceptance test: Changes before/at/after a tag, unrelated later work and concurrent target edits are handled deterministically without removing the wrong operation.
+
+Sources: [P054](https://github.com/liquibase/liquibase/issues/6728), [P056](https://docs.liquibase.com/secure/user-guide-5-1/what-are-targeted-rollbacks).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED23.support-reproducer — Generate bounded secret-safe diagnostic reproductions
+
+**OPEN — P2; user-need acceptance extension; size M; index row 671.**
+
+Parent/dependencies and code: RCH34, RCH39, diagnostics, evidence.
+
+Reported need/evidence: An old issue was closed for insufficient reproduction data; opaque provider-process failures show why configuration alone is insufficient.
+
+Design extension: Capture tool/engine versions, contract/model/fact epochs, phase timing, redacted logs and minimal synthetic failure fixtures. Preserve all effect/position relations but no original credentials or sensitive rows.
+
+Acceptance test: A support bundle reproduces selected failure classes offline and passes a secrets/PII scan; unknown proprietary internals remain explicitly unknown.
+
+Sources: [P036](https://github.com/dimitri/pgloader/issues/371), [P028](https://discuss.google.dev/t/dms-mysql-migration-fails-with-waitid-no-child-processes-recurring-across-different-configs/390779).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED24.partial-access — Handle restricted or nonstandard exports with honest coverage
+
+**OPEN — P1; user-need acceptance extension; size L; index row 672.**
+
+Parent/dependencies and code: SMART-N12, SMART-N14, saas, scope.
+
+Reported need/evidence: A user describes a SaaS migration without a public API and data accessible only to owners; this is one scenario, not support for arbitrary extraction.
+
+Design extension: Accept explicitly provided approved export/manifests or registered authorized collectors, validate completeness/version/schema and retain source lineage. Do not broaden account/network access or invent records to fill inaccessible data.
+
+Acceptance test: Partial exports cannot produce a whole-source same verdict; normalized target mappings preserve records and reconciliation identifies absent source evidence.
+
+Sources: [P046](https://www.reddit.com/r/dataengineering/comments/1mwvz6p/what_is_the_most_painful_data_migration_project/).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED25.adaptive-bounds — Validate adaptive limits and routing across iterative cutovers
+
+**OPEN — P1; user-need acceptance extension; size L; index row 673.**
+
+Parent/dependencies and code: SMART-N20, RCH30, sizing, topology.
+
+Reported need/evidence: Voyager release notes describe corrected hangs with inconsistent parallelism bounds and lost custom CDC routing across iterations.
+
+Design extension: Validate min/start/max as one feasible envelope; persist routing/partition rules across every iteration and recheck after topology changes. Settings cannot be silently defaulted after restart.
+
+Acceptance test: max below start refuses clearly; tablet/shard split and repeated cutover preserve routing, progress and worker budgets.
+
+Sources: [P008](https://docs.yugabyte.com/stable/yugabyte-voyager/release-notes/).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED26.canonical-oracle — Prove canonicalization independently of rendered strings
+
+**OPEN — P1; user-need acceptance extension; size L; index row 674.**
+
+Parent/dependencies and code: RCH07, RCH36, canon.
+
+Reported need/evidence: A DVT issue demonstrates decimal-to-string differences; changelog documents later normalization fixes. VDiff docs describe collation-induced comparison ordering.
+
+Design extension: Use type/version-aware canonical semantics with exact scale/precision policy and independent test vectors. Separate display, identity sorting and equality; broad trimming/lowercasing is not automatically valid.
+
+Acceptance test: Decimal leading zeros/scale, signed zero, trailing spaces, Unicode/collation and reordered keys detect real drift without hiding semantic differences.
+
+Sources: [P033](https://github.com/GoogleCloudPlatform/professional-services-data-validator/issues/1134), [P034](https://github.com/GoogleCloudPlatform/professional-services-data-validator/blob/develop/CHANGELOG.md), [P022](https://vitess.io/docs/archive/14.0/reference/vreplication/vdiff/).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED27.lineage-evidence — Expose unknown dynamic lineage instead of inferring completeness
+
+**OPEN — P2; user-need acceptance extension; size M; index row 675.**
+
+Parent/dependencies and code: RCH18, RCH21, storedcode/appscan, capabilities.
+
+Reported need/evidence: Community questions seek SQL lineage; a Voyager request asks for target-version-specific extension checks.
+
+Design extension: Combine syntax-level references, approved runtime traces and versioned catalogues with explicit unresolved dynamic SQL/extension behavior. Scope percentages must include unavailable dependencies.
+
+Acceptance test: A routine with dynamic identifier construction or unsupported extension cannot appear fully assessed just because static parsing succeeded.
+
+Sources: [P047](https://www.reddit.com/r/dataengineering/comments/pmecrp), [P052](https://github.com/yugabyte/yb-voyager/issues/2420).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+
+### NEED28.demand-benchmark — Evaluate endpoint-only migration against real pain scenarios
+
+**OPEN — P1; user-need acceptance extension; size L; index row 676.**
+
+Parent/dependencies and code: RCH40, SMART-N25, autonomous comparison.
+
+Reported need/evidence: Users ask how to validate migrations, reduce operator skill burden and deal with access/normalization constraints; these are qualitative demand signals.
+
+Design extension: Add the failure scenarios above to installed-command tests under stored intent and authorization policies. Measure manual technical interventions, verified completion, source impact, waste, cost and honest blockers; separate schema deployment from database relocation.
+
+Acceptance test: Publish reproducible results per pair with injected compound faults; neither feature count nor sampled anecdotes establishes best-in-market or universally zero-intervention operation.
+
+Sources: [P069](https://www.reddit.com/r/SQL/comments/1qk44yi/database_migration/), [P011](https://www.reddit.com/r/dataengineering/comments/1u81nqa/evaluating_dlt_vs_fivetran_for_a_small_team_that/), [P046](https://www.reddit.com/r/dataengineering/comments/1mwvz6p/what_is_the_most_painful_data_migration_project/).
+
+Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
