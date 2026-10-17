@@ -26,20 +26,24 @@ A package imports its own rank and the ranks below it, never one above. A rank o
 
 Outside the rule: `tools` (the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them); `data` (the files migkit ships as resources).
 
-## Upward imports still listed: 444
+## Upward imports still listed: 451
 
 ### (not listed)
 
 - `migkit/__init__.py:3` configuration -> execution (`ack_lattice`)
 - `migkit/__init__.py:3` configuration -> decision (`adaptive_bounds`)
+- `migkit/__init__.py:3` configuration -> workflows (`ai_proof_loop`)
 - `migkit/__init__.py:3` configuration -> workflows (`backfill_race`)
 - `migkit/__init__.py:3` configuration -> execution (`cancel_recovery`)
 - `migkit/__init__.py:3` configuration -> workflows (`conflict_semantics`)
 - `migkit/__init__.py:3` configuration -> persistence (`control_upgrade`)
+- `migkit/__init__.py:3` configuration -> workflows (`conversion_ledger`)
 - `migkit/__init__.py:3` configuration -> decision (`cost_envelope`)
 - `migkit/__init__.py:3` configuration -> execution (`decomp_budget`)
 - `migkit/__init__.py:3` configuration -> reporting (`demand_benchmark`)
+- `migkit/__init__.py:3` configuration -> workflows (`dynamic_sql_tracer`)
 - `migkit/__init__.py:3` configuration -> persistence (`effect_checkpoint`)
+- `migkit/__init__.py:3` configuration -> workflows (`etl_bi_waves`)
 - `migkit/__init__.py:3` configuration -> conversion (`grants`)
 - `migkit/__init__.py:3` configuration -> workflows (`handoff_overlap`)
 - `migkit/__init__.py:3` configuration -> conversion (`identity_semantics`)
@@ -51,10 +55,12 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/__init__.py:3` configuration -> decision (`offset_diag`)
 - `migkit/__init__.py:3` configuration -> scope (`partial_access`)
 - `migkit/__init__.py:3` configuration -> conversion (`partial_images`)
+- `migkit/__init__.py:3` configuration -> workflows (`principal_migration`)
 - `migkit/__init__.py:3` configuration -> conversion (`private_proof`)
 - `migkit/__init__.py:3` configuration -> execution (`process_memory`)
 - `migkit/__init__.py:3` configuration -> reporting (`progress_cause`)
 - `migkit/__init__.py:3` configuration -> reporting (`query_guard`)
+- `migkit/__init__.py:3` configuration -> workflows (`query_regression`)
 - `migkit/__init__.py:3` configuration -> engines (`quiet_source`)
 - `migkit/__init__.py:3` configuration -> scope (`resume_scope`)
 - `migkit/__init__.py:3` configuration -> workflows (`retention_controller`)
@@ -62,6 +68,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/__init__.py:3` configuration -> workflows (`ring_buffer`)
 - `migkit/__init__.py:3` configuration -> workflows (`rollback`)
 - `migkit/__init__.py:3` configuration -> workflows (`rollback_set`)
+- `migkit/__init__.py:3` configuration -> workflows (`rule_generalization`)
 - `migkit/__init__.py:3` configuration -> conversion (`schema_drift`)
 - `migkit/__init__.py:3` configuration -> conversion (`schema_epoch_plan`)
 - `migkit/__init__.py:3` configuration -> workflows (`shadow_resync`)

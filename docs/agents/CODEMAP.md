@@ -22,13 +22,14 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - [`docs/agents/INVENTORY.md`](INVENTORY.md) - every file of `migkit/` and `tools/`: its responsibility package, owner domain, size, importers, the packages it reaches, the programs it wraps and the tests that reach it
 - [`docs/agents/LAYERS.md`](LAYERS.md) - the layering rule (a package imports its own rank and below) and every upward import still listed, with its reason
 
-## `migkit/` (232 modules)
+## `migkit/` (239 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/ack_lattice.py` - (no docstring) Classes: PipelineStage, MonotoneRegressionError, SourceAckRefusedError, CutoverRefusedError, CutoverAuthorization, PositionLattice.
 - `migkit/adaptive_bounds.py` - (no docstring) Classes: AdaptiveBoundsError, InfeasibleBoundsError, CutoverStatus, AdaptiveBoundsEnvelope, ClusterNode, ShardInfo.
 - `migkit/addresses.py` - A hop from two addresses (backlog R21).
 - `migkit/advisors.py` - (no docstring)
+- `migkit/ai_proof_loop.py` - AI Proof Loop with independent executable evidence (RCH19.ai-proof-loop). Classes: CareBadge, ProofStatus, SemanticFaultType, TransactionState, AiAnnotation, CandidateProvenance.
 - `migkit/anchor.py` - Signed checkpoints of the audit record, kept in a bucket that cannot be rewritten (backlog R5.anchor). Classes: Refused, Blocked.
 - `migkit/applyway.py` - How a batch of changes is applied (backlog W9): collapsed change by change, or its keys collapsed as columns and each table's net rows hande Classes: Pace, Plan.
 - `migkit/approvals.py` - A step the hop says needs approval waits for it: approvers sign the step's request with their own SSH keys, and migkit checks each signature
@@ -70,6 +71,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/conflict_semantics.py` - (no docstring) Classes: CareBadge, MergeAlgebraKind, ConflictType, OriginIdentity, VersionVector, HybridLogicalClock.
 - `migkit/consolidate.py` - Many databases or tenants into one (backlog P0-SCENARIOS): each source's rows carried into one target under a column the hop names, filled w Classes: Source, TablePlan, SliceVerdict.
 - `migkit/control_upgrade.py` - (no docstring) Classes: StateSchemaVersion, InvariantViolationError, UpgradeRollbackError, HopDefinition, AdapterCheckpoint, DurableControlState.
+- `migkit/conversion_ledger.py` - Scope-distinct conversion ledger (RCH18.conversion-ledger). Classes: CareBadge, ArtefactKind, ArtefactCriticality, LifecycleStage, DebtType, DebtRecord.
 - `migkit/copybook.py` - COBOL copybooks, and the records they describe, read and written exactly. Classes: CopybookError, Unreadable, Figurative, Item, Picture, Leaf.
 - `migkit/cost_envelope.py` - (no docstring) Classes: CostEnvelopeError, BudgetExceededAction, RateSource, CostDimension, PlanType, CostUnknown.
 - `migkit/costmodel.py` - What a way costs, as a function of the work, with how sure that is (backlog P0-SMART, items 1, 2, 6 and learning across hops). Classes: Estimate, Fit, Knowledge, CostModel.
@@ -90,12 +92,14 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/drift.py` - Did the source's shape change while it was being moved.
 - `migkit/dsbulk.py` - A Cassandra or ScyllaDB table copied by the bulk loader (backlog F7.dsbulk), beside migkit's own copier by token ranges.
 - `migkit/durable.py` - State that survives a crash and a power loss, written one way. Classes: Torn.
+- `migkit/dynamic_sql_tracer.py` - Trace dynamic SQL and external application dependencies (backlog RCH21, row 629). Classes: CareBadge, DependencySourceKind, ResolutionState, CallSite, RuntimeTrace, TableShape.
 - `migkit/editions.py` - An edition change: the same engine, sold or built as another edition (backlog P0-SCENARIOS - "SQL Server Web edition to Datacenter (Enterpri Classes: Edition, Feature, Use.
 - `migkit/effect_checkpoint.py` - (no docstring) Classes: EngineSemantics, EffectCheckpointError, CheckpointReconstructionError, OwnershipViolationError, RetentionExpiredError, AtomicTransactionError.
 - `migkit/egress.py` - What leaves the machine, and the one gate it goes through (audit 2026-10-01, SEC12, SEC20, W8).
 - `migkit/engineat.py` - Which engine answers at an address that names none (backlog P0-MINIMAL-INPUT). Classes: Knock.
 - `migkit/envkeys.py` - Every environment variable migkit reads, in one place, and one way of reading each kind (audit 2026-10-01, K13). Classes: Var, Bad.
 - `migkit/estate.py` - The estate, not the hop (backlog W2): every database a machine or an account can reach, what moving each would take by migkit's own measurem Classes: Found.
+- `migkit/etl_bi_waves.py` - Integrated Database, ETL, and BI Migration Wave Planner (backlog RCH22, row 630). Classes: LineageNode, ArtefactParser, DbtModelParser, AirflowDagParser, MetabaseModelParser, LookerModelParser.
 - `migkit/evidence.py` - The files migkit writes that hold the application's values, kept encrypted where the hop asks (backlog R17b): Classes: EvidencePath.
 - `migkit/exit_portability.py` - (no docstring) Classes: PortabilityValidationError, NeutralType, NeutralSchema, CollisionStrategy, PortableManifestExporter, PortableStateImporter.
 - `migkit/export.py` - The evidence of a migration, exported: what migkit did on a hop and what it measured, in the forms audit and change processes take - HTML an
@@ -159,11 +163,13 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/physical.py` - Physical where the source allows it, logical everywhere else (backlog R19 lever 1): the target seeded from a copy of the source's pages, the Classes: Unread, Facts, PgFacts, MyFacts.
 - `migkit/pieces.py` - Large values: one way for every engine to size, read, write and hash them (backlog P0-PARITY; R10 and R22 did it for PostgreSQL, MySQL and O Classes: Limit, Sizing, Hashed, hashing, Way, Sql.
 - `migkit/planner.py` - Which way each table goes, decided from facts about it, and why. Classes: Decision, Phase, Ewma, CatchUp, Overlap, TopologyRun.
+- `migkit/principal_migration.py` - Principal security semantics migration (Row 632: RCH24.principal-migration). Classes: CareBadge, EngineDialect, PrincipalType, SecurityType, ConflictAction, DuplicateAccountResolution.
 - `migkit/private_proof.py` - (no docstring) Classes: PrivateProofError, DebtSeverity, DebtCategory, VerificationStatus, SaltEpoch, SaltRotationManager.
 - `migkit/process_memory.py` - (no docstring) Classes: ProcessMemoryError, MemoryBudgetExceededError, ReconciliationRequiredError, UnverifiedResumeRefusedError, MemoryCategory, FailureClassification.
 - `migkit/progress_cause.py` - (no docstring) Classes: CausalPhase, EtaStatus, Checkpoint, RequiredUserAction, ProgressDiagnosis, RestoreDiagnostic.
 - `migkit/proxy.py` - Pooler and proxy coordinators and seamless cutover traffic shifting. Classes: ProxyShiftResult, BaseProxyCoordinator, PgBouncerCoordinator, ProxySQLCoordinator, EnvoyXdsCoordinator.
 - `migkit/query_guard.py` - (no docstring) Classes: QueryPattern, ExecutionPlan, ParityIssue, IndexRecommendation, QueryParityReport, QueryOptimizerParityGuard.
+- `migkit/query_regression.py` - Continuous query regression and behavioral performance envelope gating (RCH23, row 631). Classes: QueryRegressionError, UnsafeEndpointError, SyntheticBenchmarkLabelError, WorkloadNotApprovedError, ParameterDistribution, WorkloadQuery.
 - `migkit/quiet_source.py` - (no docstring) Classes: SourceEvent, HeartbeatAuditRecord, QuietSourceProgress, AdvanceResult, QuietSourceManager.
 - `migkit/ranges.py` - A large table copied as ranges of its key, side by side. Classes: ReadPool, Slots, WorkerGone, Pending, Keyless, Stats.
 - `migkit/ratchet.py` - (no docstring) Classes: RatchetError, SlotMissingError, SnapshotAuthorizationError, HeadroomDeficitError, RatchetItem, HeadroomRatchetPlan.
@@ -189,6 +195,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/rollback_set.py` - (no docstring) Classes: CyclicDependencyError, EffectNotFoundError, RollbackResolutionError, PostconditionStatus, CompensatingActionType, ForwardSafetyStatus.
 - `migkit/rowfilter.py` - A hop's row filter, read one way and said in every engine's own words (backlog P0-SCOPE.7).
 - `migkit/rowtext.py` - How a row becomes one string before it is hashed.
+- `migkit/rule_generalization.py` - Rule generalization with narrow scoping and proof obligations (RCH20.rule-generalization). Classes: CareBadge, RuleStatus, ObjectFamily, ProofObligationKind, DialectKind, RuleGeneralizationError.
 - `migkit/rules.py` - Business-rule checks: the operator's own questions, asked of both sides.
 - `migkit/runlog.py` - The run log: every event of a run as one JSON line, in migkit's words (audit 2026-10-01, LG5, LG12, LG13). Classes: RunLog.
 - `migkit/runner.py` - Every program migkit runs is started, watched, stopped and said one way. Classes: Failed, Transient, Blocked, Refused, Proc.
