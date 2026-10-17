@@ -602,7 +602,9 @@ _BY_NAME = {
                  " execution_contract complete_path proof_planning"
                  " fact_validity context_learning information_budget live_replan"
                  " robust_scheduling capability_discovery closed_loop_proof connection_only"
-                 " discovery_closure action_compiler semantic_negotiation",
+                 " discovery_closure action_compiler semantic_negotiation"
+                 " causal_diagnosis continuous_scope uncertain_effects"
+                 " application_readiness time_aware_control work_granularity progress_liveness",
     "cli": "cli guide ui estate",
 }
 #: a subpackage, whole

@@ -11921,43 +11921,43 @@ Status: REVIEW 2026-10-17 (tests/test_semantic_negotiation_cross_engine.py 10/10
 
 ### SMART-N15.causal-diagnosis — Diagnose compound causes through discriminating evidence
 
-**OPEN — P2; proposal; size L; index row 598.**
+**REVIEW 2026-10-17 (causal_diagnosis.py decide rungs for compound cause discrimination, bounded probes, remedy preconditions, and attempts ledger reconciliation; tests/test_causal_diagnosis_discriminating_evidence.py) — P2; proposal; size L; index row 598.**
 
 Extend existing hypothesis investigation, faults.CATALOGUE and ledger reconciliation. Keep supported competing causes and disconfirming observations for target pressure, WAN loss, source locks, stale auth, drift, conversion defects and delayed replication. Select bounded probes for discriminatory value; apply a remedy only with its preconditions, then verify its effect. Acceptance: simultaneous WAN slowdown and throttling are not flattened to one code; retries cannot hide unrelated persistent corruption; unknown causes isolate affected dependencies without infinite retry.
 
 ### SMART-N16.continuous-scope — Maintain exact scope and proof while objects and data change
 
-**OPEN — P1; proposal; size L; index row 599.**
+**REVIEW 2026-10-17 (continuous_scope.py decide rungs for object lifecycle evolution, proof invalidation fences, snapshot-to-CDC handoff, and restart recovery; tests/test_continuous_scope_lifecycle.py) — P1; proposal; size L; index row 599.**
 
 Extend P0-SCOPE, schema guard, delta generations and fences. Track create/drop/rename, partitions, key skew, hot writes and source restart. In-scope new objects join the dependency/proof DAG; out-of-scope objects remain excluded. Bound WAL retention, snapshot lifetime and backlog. Acceptance: DDL plus writes plus crash does not omit an object, double-count a range or reuse stale proof; the snapshot-to-CDC handoff covers committed changes under the contract.
 
 ### SMART-N17.uncertain-effects — Reconcile effects at every external execution boundary
 
-**OPEN — P1; proposal; size L; index row 600.**
+**REVIEW 2026-10-17 (uncertain_effects.py decide rungs for 5 external boundaries, operation identity, landed postcondition discrimination, and dependency blocking; tests/test_uncertain_effects_reconciliation.py) — P1; proposal; size L; index row 600.**
 
 Extend attempts.Ledger, faults.landed, fencing and identity checks to every registered external program, provider operation, DDL, bulk loader and checkpoint. Stable operation identity and observed postconditions distinguish not started/applied/partial/unknown. Use provider idempotency tokens where supported; otherwise inspect before retrying. Acceptance: kill after effect but before acknowledgement on each adapter; no blind replay or duplicate side effects; irreconcilable irreversible operations block their dependency chain. Do not claim global exactly-once where endpoints cannot establish it.
 
 ### SMART-N18.application-readiness — Prove application-visible readiness beyond data equality
 
-**OPEN — P1; proposal; size L; index row 601.**
+**REVIEW 2026-10-17 (application_readiness.py decide rungs for 3-tier readiness separation, EXPLAIN ANALYZE execution safety, and application behavioral proof; tests/test_application_readiness_behavioral.py) — P1; proposal; size L; index row 601.**
 
 Extend storedcode/appscan/readiness and SUPER.query-guard. Separate value equality, object/security parity and application behavior. Use approved representative reads and isolated write fixtures under the application role, checking results, constraints, sequences, routines and latency regressions. EXPLAIN ANALYZE executes SQL: external effects require isolated authorized environments. Acceptance: equal rows with a broken trigger, missing sequence grant or wrong search_path block the switch; unavailable workload evidence stays explicitly unavailable.
 
 ### SMART-N19.time-aware-control — Plan around expiring resources and changing windows
 
-**OPEN — P2; proposal; size L; index row 602.**
+**REVIEW 2026-10-17 (time_aware_control.py decide rungs for maintenance/blackout windows, resource lease renewal horizons, burst/quota pacing, and cutover slack; tests/test_time_aware_control_windows.py) — P2; proposal; size L; index row 602.**
 
 Extend jointplan, catch-up/session forecasts and credential renewal. Model maintenance windows, traffic cycles, burst credits, quota reset, token/certificate lifetime, log retention, snapshot expiry and cutover slack. Schedule supported prerequisite renewals/staging from observed forecasts with uncertainty. Acceptance: no phase starts optimistically beyond a nonrenewable lease or log-retention window; missed windows trigger a fresh admissible plan without guessing switch consent.
 
 ### SMART-N20.work-granularity — Optimize work units and encoding jointly for distributions
 
-**OPEN — P2; proposal; size L; index row 603.**
+**REVIEW 2026-10-17 (work_granularity.py decide rungs for adaptive LOB tail batching, split/merge ranges, compression encoding, and keyless representation integrity; tests/test_work_granularity_distributions.py) — P2; proposal; size L; index row 603.**
 
 Extend batch_rows/cursor_rows, tuning, ranges/pieces and native request caps. Decide batch bytes/rows, key boundaries, split/merge, compression and serialization from row-width tails, skew, compressibility, CPU/network pressure and retry cost. Preserve keyless multiplicity and LOB integrity. Acceptance: tiny rows mixed with extreme LOBs stay memory-bounded; service caps are never exceeded; improvement is measured in verified completion rather than isolated throughput.
 
 ### SMART-N21.progress-liveness — Detect impossible progress and terminate intelligently
 
-**OPEN — P1; proposal; size M; index row 604.**
+**REVIEW 2026-10-17 (progress_liveness.py decide rungs for progress certificates, multi-window noise rejection, deadlock vs slow progress, and non-shrinking drift termination; tests/test_progress_liveness_detection.py) — P1; proposal; size M; index row 604.**
 
 Extend catch_up_sum, retries, blockers and autonomous outcomes. Track progress certificates and per-resource/fault retry budgets. Detect nonconvergent arrival/apply rates, dependency deadlocks, hung programs and repairs whose drift does not shrink. Choose an admissible alternative or isolate/stop with the smallest missing prerequisite. Acceptance: no infinite recovery loops; slow but progressing work differs from deadlock; one noisy observation cannot establish impossibility.
 
