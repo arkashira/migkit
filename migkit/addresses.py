@@ -399,7 +399,7 @@ def render(engine, endpoint, dbs=(), default_port=0):
         return None
     user = str(ep.pop("user", "") or "")
     host = ep.pop("host", "")
-    port = ep.pop("port", 0) or 0
+    port = ep.pop("port", None)
     auth = ""
     if user or password:
         auth = quote(user, safe="") + (
@@ -466,12 +466,14 @@ def render(engine, endpoint, dbs=(), default_port=0):
         if not host:
             return None
         where = f"[{host}]" if ":" in str(host) else str(host)
-        if not port and default_port:
-            # a side the long form left at port 0 - which an address,
-            # given the engine's own port, cannot say
-            return None
-        if port and int(port) != int(default_port or 0):
-            where += f":{int(port)}"
+        if port is not None:
+            port = int(port or 0)
+            if not port and default_port:
+                # a side the long form left at port 0 - which an address,
+                # given the engine's own port, cannot say
+                return None
+            if port and port != int(default_port or 0):
+                where += f":{port}"
     if engine in CONNECTS_TO:
         first = ep.pop(CONNECTS_TO[engine], "")
         if first:

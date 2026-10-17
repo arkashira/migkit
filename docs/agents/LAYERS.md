@@ -630,7 +630,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a wrapper reports through `tailtables`, the workflow that drives it; the shared piece moves below both
 
-- `migkit/imports.py:784` integrations -> workflows (`tailtables`)
+- `migkit/imports.py:792` integrations -> workflows (`tailtables`)
 
 ### a wrapper reports through `upgrade`, the workflow that drives it; the shared piece moves below both
 

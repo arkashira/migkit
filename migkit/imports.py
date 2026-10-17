@@ -91,7 +91,7 @@ def read(path):
             return from_dms(data, stem)
         if _is_connector(data):
             return from_connector(data, stem)
-        raise SystemExit(f"{p}: JSON, but not a replication task (it"
+        raise SystemExit(f"{p}: JSON, but neither a replication task (it"
                          " has no TableMappings), a DTS job (no"
                          " MigrateOption, Objects, ObjectItems or"
                          " DbObject), a DRS job (no base_info or"
@@ -359,6 +359,14 @@ def _quoting(engine):
     so zero rows on both sides and "same" over nothing - `order` a syntax
     error, and `'C:\\new'` read by MySQL with a newline in it (audit
     2026-10-01, DU4)."""
+    if engine is None:
+        def _q(name):
+            return '"' + str(name).replace('"', '""') + '"'
+
+        def _lit(val):
+            return "'" + str(val).replace("'", "''") + "'"
+
+        return _q, _lit
     from .engines import _class_for, canonical
     cls = _class_for(canonical(engine) or str(engine))
     if cls is None:
@@ -3323,6 +3331,7 @@ def left_out(imported, ids):
     pattern takes, and those an exclude regex does."""
     from fnmatch import fnmatch
     out = []
+    has_include = bool(imported.include or imported.raw.get("include"))
     for ident in ids:
         ident = str(ident)
         leaf = ident.rsplit(".", 1)[-1]
@@ -3333,8 +3342,14 @@ def left_out(imported, ids):
             if kind == "regex":
                 return re.fullmatch(pat, ident) is not None
             return re.search(pat, leaf) is not None
-        if imported.include and not any(takes(k, p)
-                                        for k, p in imported.include):
+
+        taken = False
+        if imported.include:
+            taken = any(takes(k, p) for k, p in imported.include)
+        elif imported.raw.get("include"):
+            taken = any(fnmatch(ident, p) or fnmatch(leaf, p)
+                        for p in imported.raw["include"])
+        if has_include and not taken:
             out.append(ident)
         elif any(re.fullmatch(r, ident) for r in imported.exclude_re):
             out.append(ident)

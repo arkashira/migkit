@@ -10,7 +10,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 
 | package | rank | files | lines | responsibility |
 |---|---|---|---|---|
-| configuration | 1 | 9 | 9627 | what a hop says: its keys, the environment, the endpoints and the addresses it is built from |
+| configuration | 1 | 9 | 9629 | what a hop says: its keys, the environment, the endpoints and the addresses it is built from |
 | scope | 2 | 3 | 1626 | which objects and rows a hop carries |
 | persistence | 3 | 15 | 6880 | state that outlives a process: checkpoints, the audit record, the run's own files, the undo |
 | safety | 4 | 11 | 11417 | who may write, what must not leak, what keeps a mover from writing twice |
@@ -19,7 +19,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 | reporting | 7 | 11 | 8378 | what the operator reads: the verdict, the result shape, the log, the metrics, the notices |
 | decision | 8 | 32 | 33781 | choosing: the rungs, the cost model, the joint plan, what each engine can do |
 | engines | 9 | 79 | 127855 | the contract every engine fills and each engine's own adapter |
-| integrations | 9 | 23 | 24353 | the programs, libraries and provider APIs migkit wraps, and the other tools it meets |
+| integrations | 9 | 23 | 24368 | the programs, libraries and provider APIs migkit wraps, and the other tools it meets |
 | workflows | 10 | 42 | 53230 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
 | cli | 11 | 4 | 10377 | the command line and the guide that asks for two addresses |
 | web | 11 | 30 | 6451 | the web view and its API |
@@ -31,7 +31,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 | file | owner | lines | imported by | reaches | wraps | tests |
 |---|---|---|---|---|---|---|
 | `migkit/__init__.py` | - | 1 | 47: avrostream, barriers, binlog_marks, capabilities, cli (+42) | - | - | 799: conftest.py, holdkit.py, large_values_rig.py (+796) |
-| `migkit/addresses.py` | - | 527 | 10: config, diagnostics, engineat, guide, hopkeys (+5) | configuration 2, engines 4 | - | 5: a_hop_file_is_checked_whole_at_load, a_hop_from_two_addresses, copybook_files_as_a_side_of_a_pair (+2) |
+| `migkit/addresses.py` | - | 529 | 10: config, diagnostics, engineat, guide, hopkeys (+5) | configuration 2, engines 4 | - | 5: a_hop_file_is_checked_whole_at_load, a_hop_from_two_addresses, copybook_files_as_a_side_of_a_pair (+2) |
 | `migkit/clouds.py` | - | 337 | 13: case, cli, cloudseed, engines.kafka, engines.mysql (+8) | configuration 3 | - | 11: a_hop_from_two_addresses, a_managed_mysql_says_how_long_its_log_is_kept, a_managed_side_is_read_and_held_by_what_its_admin_may_do (+8) |
 | `migkit/config.py` | scope: Hop.excluded, Hop.carries, Hop.target_table_in | 2456 | 61: approvals, backupseed, carriers, changetopic, cli (+56) | configuration 14, conversion 1, engines 1, execution 9, integrations 4, persistence 3, reporting 1, safety 4 | - | 836: bigquery_fake.py, cosmos_fake.py, dynamodb_on_moto.py (+833) |
 | `migkit/engineat.py` | - | 648 | 2: estate, guide | configuration 5, decision 3, engines 6 | - | 3: init_reads_the_engine_off_the_server, the_engine_finding_rungs_hold_and_refuse, the_estate_is_discovered_sized_and_priced |
@@ -320,7 +320,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 | `migkit/dsbulk.py` | - | 358 | 2: engines.cassandra, tooluse | execution 2, integrations 4 | dsbulk | 2: cassandra_copied_by_the_bulk_loader, the_non_sql_tools_are_used_whole |
 | `migkit/fromsnapshot.py` | - | 338 | 2: engines.opensearch, tooluse | execution 3, integrations 4 | reindex-from-snapshot | 2: opensearch_copied_from_a_snapshot, the_wrapped_programs_run_one_way |
 | `migkit/huawei_sdk.py` | - | 122 | 0 | - | - | 2: each_cloud_is_asked_through_its_own_api, every_module_is_reached |
-| `migkit/imports.py` | - | 3341 | 1: guide | configuration 2, engines 3, reporting 1, workflows 1 | - | 5: a_hop_from_a_dts_job, a_hop_from_another_clouds_job, a_hop_from_another_tools_task (+2) |
+| `migkit/imports.py` | - | 3356 | 1: guide | configuration 2, engines 3, reporting 1, workflows 1 | - | 5: a_hop_from_a_dts_job, a_hop_from_another_clouds_job, a_hop_from_another_tools_task (+2) |
 | `migkit/integrations.py` | - | 245 | 0 | cli 1, configuration 1, execution 1, integrations 1, persistence 1, reporting 2 | - | 4: every_module_is_reached, migkit_works_inside_the_teams_tools, one_verdict_one_exit_code (+1) |
 | `migkit/kafkaclient.py` | - | 906 | 1: engines.kafka | decision 5 | - | 2: the_kafka_client_and_keyspace_copy_rungs_hold_and_refuse, the_stream_client_and_codec_are_chosen_by_facts |
 | `migkit/mirror.py` | - | 699 | 4: bulkways, engines.kafka, movers, tooluse | configuration 1, decision 1, engines 2, execution 7, integrations 6, persistence 1, reporting 3 | connect-mirror-maker.sh | 4: a_kafka_cluster_copied_through_the_cluster_mirror, the_non_sql_tools_are_used_whole, the_stream_client_and_codec_are_chosen_by_facts (+1) |

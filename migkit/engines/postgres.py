@@ -5107,7 +5107,7 @@ select json_build_object(
         return _ident(name)
 
     def _quote_literal(self, value):
-        return _literal(value)
+        return "'" + str(value).replace("'", "''") + "'"
 
     def _qualified(self, side, db, table):
         sch, tbl = self._split(table)

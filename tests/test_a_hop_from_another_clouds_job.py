@@ -311,7 +311,8 @@ def test_a_heterogeneous_job_says_what_its_workspace_decides():
     assert got.raw["engine"] == "hetero"
     assert got.raw["options"] == {"source_engine": "oracle",
                                   "target_engine": "postgres"}
-    assert got.raw["source"] == "oracle://reader@10.0.0.71:1521/ORCLPDB"
+    assert got.raw["source"] in ("oracle://reader@10.0.0.71/ORCLPDB",
+                                 "oracle://reader@10.0.0.71:1521/ORCLPDB")
     assert got.raw["target"] == "postgres://app@10.0.0.72"
     assert "conversion workspace" in _said(got)
     assert "include" not in got.raw

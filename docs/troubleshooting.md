@@ -103,7 +103,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: not a file migkit reads a hop from - a replication task's JSON, a connector's configuration, or a LOAD DATABASE command file
 
-* <...>: JSON, but not a replication task (it has no TableMappings), a DTS job (no MigrateOption, Objects, ObjectItems or DbObject), a DRS job (no base_info or object_info), a migration job or stream (no sourceDatabase or sourceConfig), an Azure migration (no taskType or sourceDatabaseName) or a connector's configuration (no connector.class)
+* <...>: JSON, but neither a replication task (it has no TableMappings), a DTS job (no MigrateOption, Objects, ObjectItems or DbObject), a DRS job (no base_info or object_info), a migration job or stream (no sourceDatabase or sourceConfig), an Azure migration (no taskType or sourceDatabaseName) or a connector's configuration (no connector.class)
 
 * the file holds <...> replication tasks; give it one (a hop is one task)
 
