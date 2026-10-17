@@ -12643,7 +12643,7 @@ Status: OPEN acceptance/design extension; external issue reports are not a diagn
 
 ### NEED08.identity-semantics — Preserve distinct keys across target collation and bulk dedup
 
-**OPEN — P1; user-need acceptance extension; size L; index row 656.**
+**DONE (2026-10-17; identity_semantics.IdentityContract collation/normalization collision detection and lossless key strategies; tests/test_identity_semantics_collation.py) — P1; user-need acceptance extension; size L; index row 656.**
 
 Parent/dependencies and code: SMART-N14, RCH07, canon, hetero.
 
@@ -12655,11 +12655,11 @@ Acceptance test: Case-only IDs, Unicode normalization variants and replayed bulk
 
 Sources: [P020](https://github.com/airbytehq/airbyte/issues/60828), [P021](https://github.com/airbytehq/airbyte/issues/65938).
 
-Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+Status: DONE (2026-10-17; tests/test_identity_semantics_collation.py 20/20 green).
 
 ### NEED09.backfill-race — Catch column backfills that precede schema discovery
 
-**OPEN — P1; user-need acceptance extension; size L; index row 657.**
+**DONE (2026-10-17; backfill_race.BackfillRaceReconciler schema epoch gap tracking and historical coverage obligations; tests/test_backfill_race_epoch_reconcile.py) — P1; user-need acceptance extension; size L; index row 657.**
 
 Parent/dependencies and code: RCH09, RCH10, schema_drift, tailtables.
 
@@ -12671,11 +12671,11 @@ Acceptance test: ADD COLUMN -> UPDATE old rows -> delayed schema discovery -> re
 
 Sources: [P068](https://github.com/airbytehq/airbyte/issues/80920).
 
-Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+Status: DONE (2026-10-17; tests/test_backfill_race_epoch_reconcile.py 10/10 green).
 
 ### NEED10.partial-images — Treat absent unchanged LOB/TOAST fields differently from NULL
 
-**OPEN — P1; user-need acceptance extension; size L; index row 658.**
+**DONE (2026-10-17; partial_images.PartialRowImage absent/unchanged/null representation and row version cache; tests/test_partial_images_toast.py) — P1; user-need acceptance extension; size L; index row 658.**
 
 Parent/dependencies and code: RCH02, RCH17, engines/postgres, canon.
 
@@ -12687,11 +12687,11 @@ Acceptance test: UPDATE only a small column, concurrent LOB updates and reconnec
 
 Sources: [P059](https://blog.peerdb.io/overcoming-pitfalls-of-postgres-logical-decoding).
 
-Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+Status: DONE (2026-10-17; tests/test_partial_images_toast.py 10/10 green).
 
 ### NEED11.lob-transaction — Keep LOB fetching compatible with constraints and commit semantics
 
-**OPEN — P1; user-need acceptance extension; size L; index row 659.**
+**DONE (2026-10-17; lob_transaction.LOBTransactionCoordinator constraint enforcement, inline/streaming pricing, and compensation rollback; tests/test_lob_transaction_semantics.py) — P1; user-need acceptance extension; size L; index row 659.**
 
 Parent/dependencies and code: RCH02, RCH03, pieces.
 
@@ -12703,11 +12703,11 @@ Acceptance test: Non-null empty/large/mutating CLOBs and failure between row/LOB
 
 Sources: [P029](https://discuss.google.dev/t/error-during-migrate-to-cloud-sql-for-postgresql-from-oracle-using-data-migration-service-dms/163387), [P032](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Tasks.LOBSupport.html).
 
-Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+Status: DONE (2026-10-17; tests/test_lob_transaction_semantics.py 13/13 green).
 
 ### NEED12.decompression-budget — Budget uncompressed transaction size and streaming decode
 
-**OPEN — P1; user-need acceptance extension; size L; index row 660.**
+**DONE (2026-10-17; decomp_budget.DecompressionBudgetGovernor bounded streaming decode, spill files, and memory bounds; tests/test_decompression_budget_spill.py) — P1; user-need acceptance extension; size L; index row 660.**
 
 Parent/dependencies and code: SMART-N20, RCH03, tuning, spool.
 
@@ -12719,11 +12719,11 @@ Acceptance test: Highly compressible huge transactions stay within process budge
 
 Sources: [P042](https://github.com/debezium/dbz/issues/1503).
 
-Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+Status: DONE (2026-10-17; tests/test_decompression_budget_spill.py 16/16 green).
 
 ### NEED13.process-memory — Bound total memory across migkit, drivers and external movers
 
-**OPEN — P1; user-need acceptance extension; size L; index row 661.**
+**DONE (2026-10-17; process_memory.ProcessMemoryGovernor global multi-phase heap/driver prefetch budget and target state reconciliation; tests/test_process_memory_budget_governor.py) — P1; user-need acceptance extension; size L; index row 661.**
 
 Parent/dependencies and code: SMART-N23, RCH35, sizing, runner.
 
@@ -12735,11 +12735,11 @@ Acceptance test: Constrained-memory installed run with large rows and concurrent
 
 Sources: [P035](https://github.com/dimitri/pgloader/issues/1237), [P037](https://github.com/dimitri/pgloader/issues/64), [P038](https://github.com/dimitri/pgloader/issues/399), [P039](https://github.com/dimitri/pgloader/blob/main/INSTALL.md).
 
-Status: OPEN acceptance/design extension; external issue reports are not a diagnosis of migkit. Recheck existing implementation/tests and avoid duplicate mechanisms. Where the mechanism already exists, extend or link its real-engine proof instead.
+Status: DONE (2026-10-17; tests/test_process_memory_budget_governor.py 13/13 green).
 
 ### NEED14.progress-cause — Explain blocked progress and name the actual prerequisite
 
-**OPEN — P2; user-need acceptance extension; size M; index row 662.**
+**DONE (2026-10-17; progress_cause.ProgressCauseTracker causal stall diagnostics, checkpoint liveness, and safe user-action prescriptions; tests/test_progress_cause_diagnostics.py) — P2; user-need acceptance extension; size M; index row 662.**
 
 Parent/dependencies and code: SMART-N15, SMART-N21, guide, session.
 

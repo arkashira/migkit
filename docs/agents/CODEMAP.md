@@ -22,7 +22,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - [`docs/agents/INVENTORY.md`](INVENTORY.md) - every file of `migkit/` and `tools/`: its responsibility package, owner domain, size, importers, the packages it reaches, the programs it wraps and the tests that reach it
 - [`docs/agents/LAYERS.md`](LAYERS.md) - the layering rule (a package imports its own rank and below) and every upward import still listed, with its reason
 
-## `migkit/` (204 modules)
+## `migkit/` (211 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/ack_lattice.py` - (no docstring) Classes: PipelineStage, MonotoneRegressionError, SourceAckRefusedError, CutoverRefusedError, CutoverAuthorization, PositionLattice.
@@ -39,6 +39,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/autonomous.py` - `migkit migrate`: two addresses, their access and a goal in; the whole workflow run to a verified outcome (backlog P0-AUTONOMOUS-MIGRATION). Classes: Question, Asked, Unit, Workflow, Plan, Outcome.
 - `migkit/autopilot.py` - (no docstring) Classes: AutopilotPhase, AutopilotStatus, PhaseResult, AutopilotResult, AutopilotOrchestrator.
 - `migkit/avrostream.py` - Changes as Avro messages through a schema registry, in Debezium's envelope: `before`, `after`, `source`, `op` and `ts_ms`, the key a record  Classes: Encoder.
+- `migkit/backfill_race.py` - (no docstring) Classes: CoverageStrategy, ObligationStatus, CDCEvent, SchemaEpoch, ObservedGap, HistoricalCoverageObligation.
 - `migkit/backupseed.py` - SQL Server's own backup, restored on the target: a database's pages carried whole, and its changes followed from the version the restored co Classes: MsFacts.
 - `migkit/barriers.py` - Barriers, tombstones, and neutral write markers across engines (BAR-1, BAR-2, BAR-3, P0-DEPTH.tombstones, P0-DE.3). Classes: Tombstone, TombstoneLedger, NeutralMark, SequenceTag, BatchSequenceLedger, TargetWriteAttribution.
 - `migkit/binlog_marks.py` - The binlog events a two-way tail's marks travel in, as migkit reads them (`marks`): MySQL's tagged GTID, which the binlog reader does not kn
@@ -76,6 +77,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/ddl.py` - Statements migkit generates that should not simply be applied.
 - `migkit/ddl_shield.py` - (no docstring) Classes: DDLShieldError, DDLTranslationError, DDLBarrierError, ShadowTableInfo, ActionInfo, DDLEvent.
 - `migkit/decide.py` - One way of deciding for every choice migkit makes (backlog P0, decided 2026-09-27). Classes: Facts, Need, Rung, Choice, Costs, HopCosts.
+- `migkit/decomp_budget.py` - (no docstring) Classes: DecompressionBudgetError, DecompressionLimitExceeded, DecoderLimitExceeded, TransactionAtomicityError, LimitAction, SpillPolicy.
 - `migkit/described.py` - What a table migkit made on a store that keeps no column types is: its columns' classes and its key, kept beside the store's endpoint on thi
 - `migkit/diagnostics.py` - A bundle to report a problem with, holding nothing to hand over. Classes: Reading, ProbeAccumulator.
 - `migkit/digests.py` - Every table's digest as a check took it, kept so anyone can take it again (backlog R23.1).
@@ -107,6 +109,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/handwork.py` - What the migration will not do for you, counted and named. Classes: Inventory.
 - `migkit/hopkeys.py` - Every key a hop may say, in one place, and the configuration checked against it before anything runs (backlog R21). Classes: Key, Problem.
 - `migkit/huawei_sdk.py` - Huawei Cloud's API for migkit, run in the environment its SDK lives in.
+- `migkit/identity_semantics.py` - (no docstring) Classes: IdentitySemanticsError, IdentityContractViolationError, NonInjectiveKeyError, KeyStrategy, CollationSemantics, BulkApplyResult.
 - `migkit/imports.py` - A hop from another tool's task (backlog R21: switching costs nothing). Classes: Imported.
 - `migkit/indexes.py` - Getting the indexes out of the way of a bulk load, and putting them back. Classes: NotRebuilt, IndexWindow, NotPutBack, ForeignKeyWindow, DeferredIndexLifecycle.
 - `migkit/init.py` - (no docstring)
@@ -125,6 +128,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/leftovers.py` - What a mover added to the source and never took away. Classes: Named.
 - `migkit/legs.py` - The fewest legs the rows can take, and where migkit should stand (backlog R22, item 4). Classes: Footprint.
 - `migkit/loadtext.py` - The source renders the target's load format in SQL (backlog R20.14).
+- `migkit/lob_transaction.py` - (no docstring) Classes: LobTransactionError, NotNullConstraintViolation, StaleTransactionIdentityError, ConcurrentLobMutationError, LobPathRefusedError, ExecutionPath.
 - `migkit/locks.py` - What the repair DDL will lock, said before anyone applies it. Classes: LockContentionError, LockBudgetExceeded, ScopeViolationError, LockBehavior, LockBudget, LockWaitPrediction.
 - `migkit/logddl.py` - A DDL statement as a change log carries it, read for the tables it touches and what it does to each (`canon.ddl`).
 - `migkit/machine.py` - The machine to run on, and the class the target needs (backlog R22, item 6). Classes: Machine, Stages, Advice, Spent.
@@ -139,10 +143,13 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/notify.py` - Telling the team, wherever it is, what a migration is doing (backlog 32, R23.10).
 - `migkit/offset_diag.py` - (no docstring) Classes: Interval, SlotState, OffsetState, LogEvidence, NaiveRuleVerdict, ReconstructionCertificate.
 - `migkit/ownership.py` - Who an object belongs to, and whose privileges it runs with.
+- `migkit/partial_images.py` - (no docstring) Classes: PartialImageError, StaleRowVersionError, MissingBeforeImageError, PlaceholderLeakError, IncompleteRowImageError, FieldState.
 - `migkit/pgslot.py` - Reading what a PostgreSQL logical slot says, when it says it in text. Classes: Stream.
 - `migkit/physical.py` - Physical where the source allows it, logical everywhere else (backlog R19 lever 1): the target seeded from a copy of the source's pages, the Classes: Unread, Facts, PgFacts, MyFacts.
 - `migkit/pieces.py` - Large values: one way for every engine to size, read, write and hash them (backlog P0-PARITY; R10 and R22 did it for PostgreSQL, MySQL and O Classes: Limit, Sizing, Hashed, hashing, Way, Sql.
 - `migkit/planner.py` - Which way each table goes, decided from facts about it, and why. Classes: Decision, Phase, Ewma, CatchUp, Overlap, TopologyRun.
+- `migkit/process_memory.py` - (no docstring) Classes: ProcessMemoryError, MemoryBudgetExceededError, ReconciliationRequiredError, UnverifiedResumeRefusedError, MemoryCategory, FailureClassification.
+- `migkit/progress_cause.py` - (no docstring) Classes: CausalPhase, EtaStatus, Checkpoint, RequiredUserAction, ProgressDiagnosis, RestoreDiagnostic.
 - `migkit/proxy.py` - Pooler and proxy coordinators and seamless cutover traffic shifting. Classes: ProxyShiftResult, BaseProxyCoordinator, PgBouncerCoordinator, ProxySQLCoordinator, EnvoyXdsCoordinator.
 - `migkit/query_guard.py` - (no docstring) Classes: QueryPattern, ExecutionPlan, ParityIssue, IndexRecommendation, QueryParityReport, QueryOptimizerParityGuard.
 - `migkit/quiet_source.py` - (no docstring) Classes: SourceEvent, HeartbeatAuditRecord, QuietSourceProgress, AdvanceResult, QuietSourceManager.

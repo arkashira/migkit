@@ -558,12 +558,15 @@ _BY_NAME = {
     "safety": "redact egress tls approvals interlock fencing ownership"
               " masking freeze leftovers lease",
     "execution": "runner schedule throttle stall attempts ranges util"
-                 " failpoint tunnel locks keepalive ack_lattice cancel_recovery",
+                 " failpoint tunnel locks keepalive ack_lattice cancel_recovery"
+                 " decomp_budget process_memory",
     "conversion": "canon canon_oracle rowtext render transforms nanotime intervals geo"
                   " vectors bsontype charsets commercial zones copybook"
-                  " pieces ddl ddl_shield merkle schema schema_drift loadtext schemaformats described tally grants",
+                  " pieces ddl ddl_shield merkle schema schema_drift loadtext schemaformats described tally grants"
+                  " identity_semantics partial_images",
     "reporting": "verdict report wording diagnostics export"
-                 " troubleshooting telemetry traces notify servicecheck query_guard",
+                 " troubleshooting telemetry traces notify servicecheck query_guard"
+                 " progress_cause",
     "decision": "decide costmodel jointplan factbook guarantees scanplan"
                 " tuning tune capabilities planner tableway repairways userways"
                 " scenarios legs sizing changedepth lacks sourcechange"
@@ -584,6 +587,7 @@ _BY_NAME = {
                  " drainmark applyway replicasum rules leaves unchanged"
                  " streamout changetopic fleet second_reader proxy ring_buffer"
                  " ratchet rollback handoff_overlap"
+                 " backfill_race lob_transaction"
                  " dag_scheduler reverse autopilot",
     "cli": "cli guide ui estate",
 }
