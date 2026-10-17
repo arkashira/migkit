@@ -1494,9 +1494,10 @@ def _decisions_said(hop):
     for e in reversed(decide.recorded(hop)):
         facts = (e.get("detail") or {}).get("facts")
         work = e.get("work") or ""
-        if not isinstance(facts, dict) or work in seen:
+        work_key = tuple(work) if isinstance(work, list) else work
+        if not isinstance(facts, dict) or work_key in seen:
             continue
-        seen.add(work)
+        seen.add(work_key)
         out.append(f"{work}: the last plan ({e.get('at', '')}) stood on"
                    f" {factbook.said(facts)}")
     return out[::-1]

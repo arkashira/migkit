@@ -341,3 +341,11 @@ def test_a_reason_with_no_cells_is_caught(tmp_path):
         'UNPROVED_ITEMS = "scope.deep"\n')
     (tmp_path / "none.py").write_text("X = 1\n")
     assert _said_on_with_no_items(tmp_path) == ["said.py"]
+
+
+def test_resharding_is_in_the_depth_matrix_and_proved_on_postgres():
+    assert "move.reshard" in caps.DEPTH
+    assert caps.depth_has("postgres", "move.reshard")
+    assert caps.depth()["postgres"]["move.reshard"] == "yes"
+    assert caps.depth()["mysql"]["move.reshard"] == caps.NOT_YET
+

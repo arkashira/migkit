@@ -1454,6 +1454,9 @@ def _items():
                              " writes", own("load_window")),
         "move.create-missing": ("a table the target lacks made as the move"
                                 " goes", own("create_missing")),
+        "move.reshard": ("its rows placed across shards by a shard function",
+                         lambda n, c: implemented(n, "table-copy")
+                         and implemented(n, "stream")),
         "cutover.drain": ("the drain proved: everything written before the"
                           " freeze is on the target", _drained),
         "cutover.pause-replication": ("the servers' own replication into"
@@ -2350,6 +2353,7 @@ DEPTH_GAPS = {
         **_as("table-copy", "sapodp saas"),
         **_each(NOT_YET, "P0-PARITY.small", "generic"),
     },
+    "move.reshard": {},
     "cutover.drain": {
         **_each(NOT_YET, "P0-PARITY.all",
                 "db2 ase redshift iceberg "
@@ -2832,6 +2836,13 @@ UNPROVED = {
     "move.spread": "mysql mongodb cassandra",
     "move.sized": "oracle db2i db2zos teradata redshift snowflake cockroachdb dsql cassandra",
     "move.load-window": "clickhouse mssql cassandra mongodb teradata",
+    "move.reshard": (
+        "analyticdb-mysql analyticdb-postgres bigquery bigtable cassandra "
+        "clickhouse cockroachdb cosmosdb couchbase databricks db2 db2i dcdb "
+        "dsql dynamodb exasol firestore gaussdb geminidb-mongo geminidb-redis "
+        "generic hetero informix kafka keyspaces mongodb mssql mysql neo4j "
+        "neptune netezza oceanbase opensearch oracle polardbx progress redis "
+        "saphana singlestore snowflake spanner tidb vertica yugabytedb"),
     "cutover.rollback": "mongodb copybook",
     "cutover.freeze": "oracle couchbase hetero",
     "cutover.read-only-target": "db2i db2zos dsql hetero",
@@ -3665,6 +3676,13 @@ for _engine in (
 # generic engine's gap
 for _engine in _DIALECTS:
     DEPTH_GAPS["tail.quiet"].pop(_engine, None)
+for _engine in (
+        "sqlite parquet db2zos ase teradata redshift"
+        " kinesis pubsub duckdb copybook iceberg delta datastore"
+        " oceanbase-oracle timestream lindorm geminidb-cassandra qdrant"
+        " synapse sapodp saas").split():
+    DEPTH_GAPS["move.reshard"][_engine] = GAPS.get(_engine, {}).get(
+        "stream", (NOT_YET, "W7.lanes"))
 del _engine
 
 
@@ -3794,3 +3812,13 @@ def _merge_declared():
 
 
 _merge_declared()
+
+for _engine in (
+        "analyticdb-mysql analyticdb-postgres bigquery bigtable cassandra "
+        "clickhouse cockroachdb cosmosdb couchbase databricks db2 db2i dcdb "
+        "dsql dynamodb exasol firestore gaussdb geminidb-mongo geminidb-redis "
+        "generic hetero informix kafka keyspaces mongodb mssql mysql neo4j "
+        "neptune netezza oceanbase opensearch oracle polardbx progress redis "
+        "saphana singlestore snowflake spanner tidb vertica yugabytedb").split():
+    _owed(_engine, "move.reshard")
+del _engine

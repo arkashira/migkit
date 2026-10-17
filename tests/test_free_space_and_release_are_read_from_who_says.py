@@ -406,6 +406,39 @@ def test_account_listing_beyond_aws_rds(monkeypatch):
     assert tc.endpoints() == [{
         "id": "cdb1", "engine": "8.0", "host": "10.0.0.2", "port": 3306}]
 
+    ali = cloudapi.Alibaba({"product": "rds", "id": "rm-1", "region": "cn-hangzhou"})
+    monkeypatch.setattr(ali, "_call", lambda action: {"Items": {"DBInstance": [{
+        "DBInstanceId": "rm-1", "ConnectionString": "rm-1.mysql.rds.aliyuncs.com",
+        "Engine": "MySQL"}]}})
+    assert ali.endpoints() == [{
+        "id": "rm-1", "engine": "MySQL", "host": "rm-1.mysql.rds.aliyuncs.com",
+        "port": 3306}]
+
+    hw = cloudapi.Huawei({"product": "rds", "id": "inst-1", "region": "cn-north-4"})
+    monkeypatch.setattr(hw, "_run", lambda *a, **k: {
+        "instances": [{"id": "inst-1", "datastore": {"type": "PostgreSQL"},
+                       "private_ips": ["10.0.0.3"], "port": 5432}]})
+    assert hw.endpoints() == [{
+        "id": "inst-1", "engine": "PostgreSQL", "host": "10.0.0.3", "port": 5432}]
+
+    class OraClient:
+        @staticmethod
+        def list_db_systems(*a, **k):
+            return SimpleNamespace(data=[SimpleNamespace(
+                id="ocid1", endpoints=[SimpleNamespace(ip_address="10.0.0.4", port=3306)])])
+
+    ora = cloudapi.Oracle({"product": "mysql", "id": "ocid1", "region": "us-ashburn-1"})
+    monkeypatch.setattr(ora, "client", lambda *a: OraClient())
+    assert ora.endpoints() == [{
+        "id": "ocid1", "engine": "mysql", "host": "10.0.0.4", "port": 3306}]
+
+    ibm = cloudapi.Ibm({"product": "icd", "id": "crn1", "region": "us-south"})
+    monkeypatch.setattr(ibm, "_send", lambda *a, **k: {
+        "deployments": [{"id": "crn1", "type": "postgres",
+                         "connection": {"host": "10.0.0.5", "port": 5432}}]})
+    assert ibm.endpoints() == [{
+        "id": "crn1", "engine": "postgres", "host": "10.0.0.5", "port": 5432}]
+
 
 def test_every_cloudapi_adapter_has_free_bytes_and_declares_unproved():
     from migkit import capabilities as caps, cloudapi

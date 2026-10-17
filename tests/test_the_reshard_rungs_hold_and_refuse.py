@@ -77,3 +77,102 @@ def test_rows_go_to_their_node_only_where_migkit_can_address_it():
                                decide.Facts({"node address": None}))
     assert [r.name for r in kept] == ["router"]
     assert branch(seen, "router") == [HOLDS]
+
+
+def test_cluster_history_and_slots_read_from_sides():
+    the_lead = type("Lead", (), {"mapping": {"columns": {"t1": {}}}})()
+
+    class FakeReader:
+        hop = the_lead
+
+        def history_tables(self, side, db):
+            return {"alembic_version": "alembic_version"}
+
+        def history_columns(self, side, db, ref):
+            return [("version_num", "varchar(32)")]
+
+        def history_rows(self, side, db, ref, columns, where=""):
+            return [("abc123",)]
+
+        def own_slots(self, db):
+            return [f"slot_{db}"]
+
+    class FakeSource:
+        name = "s1"
+        db = "db1"
+
+    class FakeGroup:
+        db = "db1"
+        kind = "goal"
+        sources = [FakeSource()]
+        targets = [FakeSource()]
+        lead = the_lead
+
+        def reader(self, i):
+            return FakeReader()
+
+        def pair(self, i, j):
+            return type("Pair", (), {
+                "hop": the_lead,
+                "_quote_ident": lambda s, n: f'"{n}"',
+            })()
+
+    g = FakeGroup()
+    cluster = reshard.Cluster(g)
+    assert cluster.history_tables("src", "db1") == {"alembic_version": "alembic_version"}
+    assert cluster.history_columns("src", "db1", "alembic_version") == [("version_num", "varchar(32)")]
+    assert cluster.history_rows("src", "db1", "alembic_version", ["version_num"]) == [("abc123",)]
+    assert cluster.own_slots("db1") == ["slot_db1"]
+    assert cluster._quote_ident("tbl") == '"tbl"'
+    assert "columns of 1 tables" in cluster.own_schema_changes("db1")[0]
+
+
+def test_leg_cleans_up_slots_and_terminates_active_pid(monkeypatch):
+    from migkit import tailctl
+    calls = []
+
+    class FakeReader:
+        def release_changes(self):
+            calls.append("release_changes")
+
+        def own_slots(self, db):
+            return ["test_slot"]
+
+        def _psql(self, side, db, sql):
+            calls.append((side, db, sql))
+
+    class FakeSource:
+        name = "s1"
+        db = "db1"
+
+    class FakeGroup:
+        db = "db1"
+        lead = type("Lead", (), {})()
+        sources = [FakeSource()]
+
+        def report_dir(self):
+            from pathlib import Path
+            return Path("/tmp")
+
+        def reader(self, i):
+            return FakeReader()
+
+    g = FakeGroup()
+    alive_calls = [True, True, False]
+    monkeypatch.setattr(tailctl, "alive", lambda where, lead=None: alive_calls.pop(0) if alive_calls else False)
+    monkeypatch.setattr(tailctl, "stop", lambda where: None)
+    monkeypatch.setattr(tailctl, "resume", lambda where: None)
+    monkeypatch.setattr(reshard.time, "sleep", lambda s: None)
+
+    l = reshard.leg(g, lambda m: None)
+    l.end("db1")
+    assert "release_changes" in calls
+    assert any("pg_drop_replication_slot" in c[2] and "pg_terminate_backend" in c[2]
+               for c in calls if isinstance(c, tuple))
+
+    calls.clear()
+    l.after_flip("db1")
+    assert "release_changes" in calls
+    assert any("pg_drop_replication_slot" in c[2] and "pg_terminate_backend" in c[2]
+               for c in calls if isinstance(c, tuple))
+

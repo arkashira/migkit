@@ -8,192 +8,192 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 | engine | capabilities | shapes | depth owed | not yet |
 |---|---|---|---|---|
-| analyticdb-mysql | 16/16 | 12/12 | 74 | - |
-| analyticdb-postgres | 13/16 | 12/12 | 74 | params, statistics, snapshot |
-| ase | 15/16 | 11/12 | 67 | stream, partitioned |
-| bigquery | 16/16 | 12/12 | 49 | - |
-| bigtable | 16/16 | 11/12 | 41 | large values |
-| cassandra | 16/16 | 12/12 | 29 | - |
-| clickhouse | 16/16 | 12/12 | 45 | - |
-| cockroachdb | 16/16 | 12/12 | 51 | - |
+| analyticdb-mysql | 16/16 | 12/12 | 75 | - |
+| analyticdb-postgres | 13/16 | 12/12 | 75 | params, statistics, snapshot |
+| ase | 15/16 | 11/12 | 68 | stream, partitioned |
+| bigquery | 16/16 | 12/12 | 50 | - |
+| bigtable | 16/16 | 11/12 | 42 | large values |
+| cassandra | 16/16 | 12/12 | 30 | - |
+| clickhouse | 16/16 | 12/12 | 46 | - |
+| cockroachdb | 16/16 | 12/12 | 52 | - |
 | copybook | 16/16 | 12/12 | 31 | - |
-| cosmosdb | 16/16 | 12/12 | 21 | - |
-| couchbase | 16/16 | 12/12 | 49 | - |
-| databricks | 16/16 | 7/12 | 75 | keyless, no unique index, wide key, large values, partitioned |
+| cosmosdb | 16/16 | 12/12 | 22 | - |
+| couchbase | 16/16 | 12/12 | 50 | - |
+| databricks | 16/16 | 7/12 | 76 | keyless, no unique index, wide key, large values, partitioned |
 | datastore | 16/16 | 12/12 | 37 | - |
-| db2 | 16/16 | 12/12 | 67 | - |
-| db2i | 16/16 | 12/12 | 70 | - |
+| db2 | 16/16 | 12/12 | 68 | - |
+| db2i | 16/16 | 12/12 | 71 | - |
 | db2zos | 16/16 | 12/12 | 61 | - |
-| dcdb | 15/16 | 12/12 | 65 | bulk-move |
-| delta | 9/16 | 11/12 | 48 | deep, bulk-move, stream, fence, confirm, delta, snapshot, partitioned |
-| dsql | 16/16 | 12/12 | 28 | - |
+| dcdb | 15/16 | 12/12 | 66 | bulk-move |
+| delta | 9/16 | 11/12 | 49 | deep, bulk-move, stream, fence, confirm, delta, snapshot, partitioned |
+| dsql | 16/16 | 12/12 | 29 | - |
 | duckdb | 16/16 | 12/12 | 46 | - |
-| dynamodb | 16/16 | 12/12 | 8 | - |
-| exasol | 16/16 | 7/12 | 75 | keyless, no unique index, wide key, large values, partitioned |
-| firestore | 16/16 | 12/12 | 43 | - |
-| gaussdb | 16/16 | 12/12 | 68 | - |
+| dynamodb | 16/16 | 12/12 | 9 | - |
+| exasol | 16/16 | 7/12 | 76 | keyless, no unique index, wide key, large values, partitioned |
+| firestore | 16/16 | 12/12 | 44 | - |
+| gaussdb | 16/16 | 12/12 | 69 | - |
 | geminidb-cassandra | 16/16 | 12/12 | 48 | - |
-| geminidb-mongo | 16/16 | 12/12 | 50 | - |
-| geminidb-redis | 16/16 | 12/12 | 36 | - |
-| generic | 16/16 | 12/12 | 58 | - |
-| hetero | 16/16 | 10/12 | 45 | partitioned, missing grant |
-| iceberg | 9/16 | 11/12 | 49 | deep, bulk-move, stream, fence, confirm, delta, snapshot, partitioned |
-| informix | 16/16 | 7/12 | 75 | keyless, no unique index, wide key, large values, partitioned |
-| kafka | 16/16 | 12/12 | 11 | - |
-| keyspaces | 16/16 | 12/12 | 50 | - |
+| geminidb-mongo | 16/16 | 12/12 | 51 | - |
+| geminidb-redis | 16/16 | 12/12 | 37 | - |
+| generic | 16/16 | 12/12 | 59 | - |
+| hetero | 16/16 | 10/12 | 46 | partitioned, missing grant |
+| iceberg | 9/16 | 11/12 | 50 | deep, bulk-move, stream, fence, confirm, delta, snapshot, partitioned |
+| informix | 16/16 | 7/12 | 76 | keyless, no unique index, wide key, large values, partitioned |
+| kafka | 16/16 | 12/12 | 12 | - |
+| keyspaces | 16/16 | 12/12 | 51 | - |
 | kinesis | 16/16 | 12/12 | 4 | - |
-| lindorm | 12/16 | 10/12 | 56 | stream, fence, confirm, delta, large values, partitioned |
-| mongodb | 16/16 | 11/12 | 11 | missing grant |
-| mssql | 16/16 | 12/12 | 34 | - |
-| mysql | 16/16 | 12/12 | 0 | - |
-| neo4j | 13/16 | 10/12 | 55 | bulk-move, confirm, snapshot, large values, partitioned |
-| neptune | 16/16 | 11/12 | 44 | large values |
-| netezza | 16/16 | 7/12 | 75 | keyless, no unique index, wide key, large values, partitioned |
-| oceanbase | 15/16 | 12/12 | 67 | bulk-move |
-| oceanbase-oracle | 11/16 | 12/12 | 70 | bulk-move, stream, fence, confirm, delta |
-| opensearch | 16/16 | 12/12 | 26 | - |
-| oracle | 16/16 | 12/12 | 40 | - |
+| lindorm | 12/16 | 10/12 | 57 | stream, fence, confirm, delta, large values, partitioned |
+| mongodb | 16/16 | 11/12 | 12 | missing grant |
+| mssql | 16/16 | 12/12 | 35 | - |
+| mysql | 16/16 | 12/12 | 1 | - |
+| neo4j | 13/16 | 10/12 | 56 | bulk-move, confirm, snapshot, large values, partitioned |
+| neptune | 16/16 | 11/12 | 45 | large values |
+| netezza | 16/16 | 7/12 | 76 | keyless, no unique index, wide key, large values, partitioned |
+| oceanbase | 15/16 | 12/12 | 68 | bulk-move |
+| oceanbase-oracle | 11/16 | 12/12 | 71 | bulk-move, stream, fence, confirm, delta |
+| opensearch | 16/16 | 12/12 | 27 | - |
+| oracle | 16/16 | 12/12 | 41 | - |
 | parquet | 16/16 | 12/12 | 32 | - |
-| polardbx | 15/16 | 12/12 | 68 | bulk-move |
+| polardbx | 15/16 | 12/12 | 69 | bulk-move |
 | postgres | 16/16 | 12/12 | 0 | - |
-| progress | 16/16 | 7/12 | 75 | keyless, no unique index, wide key, large values, partitioned |
+| progress | 16/16 | 7/12 | 76 | keyless, no unique index, wide key, large values, partitioned |
 | pubsub | 16/16 | 12/12 | 4 | - |
 | qdrant | 14/16 | 10/12 | 36 | bulk-move, snapshot, large values, partitioned |
-| redis | 16/16 | 12/12 | 10 | - |
+| redis | 16/16 | 12/12 | 11 | - |
 | redshift | 16/16 | 12/12 | 52 | - |
 | saas | 16/16 | 12/12 | 22 | - |
-| saphana | 16/16 | 7/12 | 75 | keyless, no unique index, wide key, large values, partitioned |
+| saphana | 16/16 | 7/12 | 76 | keyless, no unique index, wide key, large values, partitioned |
 | sapodp | 16/16 | 12/12 | 22 | - |
-| singlestore | 16/16 | 12/12 | 74 | - |
-| snowflake | 16/16 | 12/12 | 57 | - |
-| spanner | 16/16 | 12/12 | 59 | - |
+| singlestore | 16/16 | 12/12 | 75 | - |
+| snowflake | 16/16 | 12/12 | 58 | - |
+| spanner | 16/16 | 12/12 | 60 | - |
 | sqlite | 16/16 | 12/12 | 43 | - |
 | synapse | 16/16 | 12/12 | 73 | - |
 | teradata | 16/16 | 12/12 | 32 | - |
-| tidb | 16/16 | 12/12 | 16 | - |
+| tidb | 16/16 | 12/12 | 17 | - |
 | timestream | 16/16 | 11/12 | 38 | large values |
-| vertica | 16/16 | 7/12 | 75 | keyless, no unique index, wide key, large values, partitioned |
-| yugabytedb | 13/16 | 12/12 | 74 | params, statistics, snapshot |
+| vertica | 16/16 | 7/12 | 76 | keyless, no unique index, wide key, large values, partitioned |
+| yugabytedb | 13/16 | 12/12 | 75 | params, statistics, snapshot |
 
 ## Depth by engine
 
-89 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: built, unproved 1360, n/a 1492, not yet 1809, test owed 218, yes 995. A cell below is the ways proved of the items that apply.
+90 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: built, unproved 1392, n/a 1508, not yet 1814, test owed 230, yes 996. A cell below is the ways proved of the items that apply.
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| analyticdb-mysql | 0/10 | 0/40 | 0/7 | 0/7 | 0/6 | 0/6 | 0/8 | 0/1 | 1/1 | 0/1 | 1/87 |
-| analyticdb-postgres | 0/10 | 0/40 | 0/7 | 0/7 | 0/6 | 0/6 | 0/8 | 0/1 | 1/1 | 0/1 | 1/87 |
-| ase | 0/10 | 0/35 | 0/7 | 0/7 | 1/6 | 3/7 | 1/7 | 0/1 | 0/1 | 0/1 | 5/82 |
-| bigquery | 5/9 | 1/29 | 0/7 | 1/6 | 1/6 | 1/6 | 1/5 | 1/1 | 1/1 | 0/1 | 12/71 |
-| bigtable | 1/9 | 0/18 | 1/6 | 0/6 | 1/3 | 2/5 | 0/3 | 1/1 | 1/1 | 0/1 | 7/53 |
-| cassandra | 6/9 | 15/24 | 1/6 | 0/7 | 1/3 | 2/6 | 5/5 | 1/1 | 1/1 | 1/1 | 33/63 |
-| clickhouse | 7/9 | 6/30 | 1/7 | 1/7 | 1/5 | 5/7 | 4/6 | 1/1 | 1/1 | 1/1 | 28/74 |
-| cockroachdb | 5/10 | 5/35 | 3/7 | 1/7 | 3/6 | 1/6 | 3/7 | 1/1 | 1/1 | 0/1 | 23/81 |
+| analyticdb-mysql | 0/10 | 0/40 | 0/7 | 0/7 | 0/6 | 0/7 | 0/8 | 0/1 | 1/1 | 0/1 | 1/88 |
+| analyticdb-postgres | 0/10 | 0/40 | 0/7 | 0/7 | 0/6 | 0/7 | 0/8 | 0/1 | 1/1 | 0/1 | 1/88 |
+| ase | 0/10 | 0/35 | 0/7 | 0/7 | 1/6 | 3/8 | 1/7 | 0/1 | 0/1 | 0/1 | 5/83 |
+| bigquery | 5/9 | 1/29 | 0/7 | 1/6 | 1/6 | 1/7 | 1/5 | 1/1 | 1/1 | 0/1 | 12/72 |
+| bigtable | 1/9 | 0/18 | 1/6 | 0/6 | 1/3 | 2/6 | 0/3 | 1/1 | 1/1 | 0/1 | 7/54 |
+| cassandra | 6/9 | 15/24 | 1/6 | 0/7 | 1/3 | 2/7 | 5/5 | 1/1 | 1/1 | 1/1 | 33/64 |
+| clickhouse | 7/9 | 6/30 | 1/7 | 1/7 | 1/5 | 5/8 | 4/6 | 1/1 | 1/1 | 1/1 | 28/75 |
+| cockroachdb | 5/10 | 5/35 | 3/7 | 1/7 | 3/6 | 1/7 | 3/7 | 1/1 | 1/1 | 0/1 | 23/82 |
 | copybook | 0/7 | 0/16 | - | 0/4 | 1/2 | 2/4 | 0/1 | 1/1 | - | 0/1 | 4/36 |
-| cosmosdb | 6/9 | 14/21 | 4/6 | 2/6 | 1/3 | 3/5 | 1/3 | 1/1 | 1/1 | 0/1 | 33/56 |
-| couchbase | 0/9 | 1/23 | 1/6 | 1/7 | 1/4 | 1/6 | 2/6 | 1/1 | 0/1 | 0/1 | 8/64 |
-| databricks | 0/10 | 0/39 | 0/7 | 0/7 | 0/6 | 0/6 | 2/6 | 0/1 | 0/1 | 0/1 | 2/84 |
+| cosmosdb | 6/9 | 14/21 | 4/6 | 2/6 | 1/3 | 3/6 | 1/3 | 1/1 | 1/1 | 0/1 | 33/57 |
+| couchbase | 0/9 | 1/23 | 1/6 | 1/7 | 1/4 | 1/7 | 2/6 | 1/1 | 0/1 | 0/1 | 8/65 |
+| databricks | 0/10 | 0/39 | 0/7 | 0/7 | 0/6 | 0/7 | 2/6 | 0/1 | 0/1 | 0/1 | 2/85 |
 | datastore | 0/8 | 0/17 | - | 0/6 | 0/2 | 2/4 | 0/2 | 1/1 | 1/1 | 0/1 | 4/42 |
-| db2 | 1/10 | 0/37 | 0/7 | 0/7 | 1/6 | 3/7 | 1/7 | 0/1 | 1/1 | 0/1 | 7/84 |
-| db2i | 0/10 | 1/37 | 0/7 | 0/7 | 0/6 | 0/7 | 0/6 | 1/1 | 0/1 | 0/1 | 2/83 |
+| db2 | 1/10 | 0/37 | 0/7 | 0/7 | 1/6 | 3/8 | 1/7 | 0/1 | 1/1 | 0/1 | 7/85 |
+| db2i | 0/10 | 1/37 | 0/7 | 0/7 | 0/6 | 0/8 | 0/6 | 1/1 | 0/1 | 0/1 | 2/84 |
 | db2zos | 0/9 | 0/34 | - | 1/7 | 0/6 | 0/7 | 0/4 | 0/1 | 0/1 | 0/1 | 1/70 |
-| dcdb | 0/10 | 2/35 | 1/7 | 0/7 | 1/6 | 0/7 | 3/7 | 1/1 | 1/1 | 0/1 | 9/82 |
-| delta | 0/9 | 0/24 | 0/7 | 0/5 | 1/2 | 2/6 | 0/3 | 1/1 | 0/1 | 0/1 | 4/59 |
-| dsql | 5/10 | 21/32 | 1/7 | 3/7 | 5/6 | 3/5 | 2/5 | 1/1 | 1/1 | 0/1 | 42/75 |
+| dcdb | 0/10 | 2/35 | 1/7 | 0/7 | 1/6 | 0/8 | 3/7 | 1/1 | 1/1 | 0/1 | 9/83 |
+| delta | 0/9 | 0/24 | 0/7 | 0/5 | 1/2 | 2/7 | 0/3 | 1/1 | 0/1 | 0/1 | 4/60 |
+| dsql | 5/10 | 21/32 | 1/7 | 3/7 | 5/6 | 3/6 | 2/5 | 1/1 | 1/1 | 0/1 | 42/76 |
 | duckdb | 1/9 | 2/24 | - | 0/7 | 1/6 | 4/6 | 2/2 | 1/1 | 0/1 | 0/1 | 11/57 |
-| dynamodb | 6/8 | 12/14 | 4/6 | 5/6 | 2/2 | 4/4 | 4/4 | 1/1 | 1/1 | 0/1 | 39/47 |
-| exasol | 0/10 | 0/39 | 0/7 | 0/7 | 0/6 | 0/6 | 2/6 | 0/1 | 0/1 | 0/1 | 2/84 |
-| firestore | 0/9 | 2/21 | 1/6 | 0/6 | 0/2 | 2/4 | 2/3 | 1/1 | 1/1 | 0/1 | 9/54 |
-| gaussdb | 0/10 | 3/39 | 1/7 | 0/7 | 1/6 | 2/7 | 3/7 | 1/1 | 1/1 | 0/1 | 12/86 |
+| dynamodb | 6/8 | 12/14 | 4/6 | 5/6 | 2/2 | 4/5 | 4/4 | 1/1 | 1/1 | 0/1 | 39/48 |
+| exasol | 0/10 | 0/39 | 0/7 | 0/7 | 0/6 | 0/7 | 2/6 | 0/1 | 0/1 | 0/1 | 2/85 |
+| firestore | 0/9 | 2/21 | 1/6 | 0/6 | 0/2 | 2/5 | 2/3 | 1/1 | 1/1 | 0/1 | 9/55 |
+| gaussdb | 0/10 | 3/39 | 1/7 | 0/7 | 1/6 | 2/8 | 3/7 | 1/1 | 1/1 | 0/1 | 12/87 |
 | geminidb-cassandra | 0/9 | 1/22 | 0/1 | 0/7 | 0/4 | 0/5 | 0/5 | 1/1 | 1/1 | 0/1 | 3/56 |
-| geminidb-mongo | 0/9 | 1/24 | 0/7 | 0/7 | 0/3 | 0/5 | 0/5 | 1/1 | 1/1 | 0/1 | 3/63 |
-| geminidb-redis | 0/8 | 1/12 | 0/7 | 0/7 | 0/1 | 1/3 | 0/5 | 1/1 | 1/1 | 0/1 | 4/46 |
-| generic | 9/10 | 10/39 | 1/7 | 1/7 | 0/6 | 3/6 | 0/4 | 0/1 | 0/1 | 0/1 | 24/82 |
-| hetero | 4/10 | 6/40 | 1/2 | 2/5 | - | 6/8 | 2/5 | - | - | - | 21/70 |
-| iceberg | 0/9 | 0/24 | 0/7 | 0/5 | 1/3 | 2/6 | 0/3 | 1/1 | 0/1 | 0/1 | 4/60 |
-| informix | 0/10 | 0/39 | 0/7 | 0/7 | 0/6 | 0/6 | 2/6 | 0/1 | 0/1 | 0/1 | 2/84 |
-| kafka | 5/9 | 15/17 | 5/6 | 5/7 | 0/1 | 5/6 | 5/5 | 1/1 | 1/1 | 1/1 | 43/54 |
-| keyspaces | 0/9 | 0/24 | 1/6 | 0/7 | 1/3 | 1/5 | 0/3 | 1/1 | 1/1 | 0/1 | 5/60 |
+| geminidb-mongo | 0/9 | 1/24 | 0/7 | 0/7 | 0/3 | 0/6 | 0/5 | 1/1 | 1/1 | 0/1 | 3/64 |
+| geminidb-redis | 0/8 | 1/12 | 0/7 | 0/7 | 0/1 | 1/4 | 0/5 | 1/1 | 1/1 | 0/1 | 4/47 |
+| generic | 9/10 | 10/39 | 1/7 | 1/7 | 0/6 | 3/7 | 0/4 | 0/1 | 0/1 | 0/1 | 24/83 |
+| hetero | 4/10 | 6/40 | 1/2 | 2/5 | - | 6/9 | 2/5 | - | - | - | 21/71 |
+| iceberg | 0/9 | 0/24 | 0/7 | 0/5 | 1/3 | 2/7 | 0/3 | 1/1 | 0/1 | 0/1 | 4/61 |
+| informix | 0/10 | 0/39 | 0/7 | 0/7 | 0/6 | 0/7 | 2/6 | 0/1 | 0/1 | 0/1 | 2/85 |
+| kafka | 5/9 | 15/17 | 5/6 | 5/7 | 0/1 | 5/7 | 5/5 | 1/1 | 1/1 | 1/1 | 43/55 |
+| keyspaces | 0/9 | 0/24 | 1/6 | 0/7 | 1/3 | 1/6 | 0/3 | 1/1 | 1/1 | 0/1 | 5/61 |
 | kinesis | 0/1 | - | - | 0/2 | - | - | - | 1/1 | 1/1 | 0/1 | 2/6 |
-| lindorm | 0/9 | 2/27 | 0/7 | 0/7 | 0/5 | 0/6 | 1/5 | 1/1 | 1/1 | 0/1 | 5/69 |
-| mongodb | 8/9 | 21/24 | 4/7 | 6/7 | 1/3 | 4/6 | 4/5 | 1/1 | 1/1 | 1/1 | 51/64 |
-| mssql | 9/10 | 21/35 | 3/7 | 0/7 | 4/6 | 4/7 | 5/7 | 0/1 | 1/1 | 0/1 | 47/82 |
-| mysql | 10/10 | 32/32 | 7/7 | 7/7 | 6/6 | 7/8 | 8/8 | 1/1 | 1/1 | 1/1 | 80/81 |
-| neo4j | 0/9 | 1/25 | 1/6 | 0/7 | 0/4 | 0/7 | 0/4 | 0/1 | 0/1 | 0/1 | 2/65 |
-| neptune | 0/8 | 0/20 | 1/6 | 0/7 | 0/3 | 2/4 | 0/3 | 1/1 | 1/1 | 0/1 | 5/54 |
-| netezza | 0/10 | 0/39 | 0/7 | 0/7 | 0/6 | 0/6 | 2/6 | 0/1 | 0/1 | 0/1 | 2/84 |
-| oceanbase | 0/10 | 1/36 | 0/7 | 0/7 | 1/6 | 1/7 | 0/7 | 1/1 | 1/1 | 0/1 | 5/83 |
-| oceanbase-oracle | 0/10 | 1/38 | 0/7 | 0/7 | 0/6 | 0/7 | 2/7 | 1/1 | 1/1 | 0/1 | 5/85 |
-| opensearch | 7/9 | 17/25 | 1/7 | 2/7 | 2/4 | 6/6 | 4/6 | 1/1 | 1/1 | 0/1 | 41/67 |
-| oracle | 9/10 | 14/37 | 3/7 | 1/7 | 4/6 | 5/7 | 4/7 | 0/1 | 1/1 | 1/1 | 42/84 |
+| lindorm | 0/9 | 2/27 | 0/7 | 0/7 | 0/5 | 0/7 | 1/5 | 1/1 | 1/1 | 0/1 | 5/70 |
+| mongodb | 8/9 | 21/24 | 4/7 | 6/7 | 1/3 | 4/7 | 4/5 | 1/1 | 1/1 | 1/1 | 51/65 |
+| mssql | 9/10 | 21/35 | 3/7 | 0/7 | 4/6 | 4/8 | 5/7 | 0/1 | 1/1 | 0/1 | 47/83 |
+| mysql | 10/10 | 32/32 | 7/7 | 7/7 | 6/6 | 7/9 | 8/8 | 1/1 | 1/1 | 1/1 | 80/82 |
+| neo4j | 0/9 | 1/25 | 1/6 | 0/7 | 0/4 | 0/8 | 0/4 | 0/1 | 0/1 | 0/1 | 2/66 |
+| neptune | 0/8 | 0/20 | 1/6 | 0/7 | 0/3 | 2/5 | 0/3 | 1/1 | 1/1 | 0/1 | 5/55 |
+| netezza | 0/10 | 0/39 | 0/7 | 0/7 | 0/6 | 0/7 | 2/6 | 0/1 | 0/1 | 0/1 | 2/85 |
+| oceanbase | 0/10 | 1/36 | 0/7 | 0/7 | 1/6 | 1/8 | 0/7 | 1/1 | 1/1 | 0/1 | 5/84 |
+| oceanbase-oracle | 0/10 | 1/38 | 0/7 | 0/7 | 0/6 | 0/8 | 2/7 | 1/1 | 1/1 | 0/1 | 5/86 |
+| opensearch | 7/9 | 17/25 | 1/7 | 2/7 | 2/4 | 6/7 | 4/6 | 1/1 | 1/1 | 0/1 | 41/68 |
+| oracle | 9/10 | 14/37 | 3/7 | 1/7 | 4/6 | 5/8 | 4/7 | 0/1 | 1/1 | 1/1 | 42/85 |
 | parquet | 0/7 | 0/16 | - | 0/4 | 1/2 | 3/6 | 1/1 | 1/1 | 0/1 | 0/1 | 6/39 |
-| polardbx | 0/10 | 1/36 | 0/7 | 0/7 | 0/6 | 0/7 | 1/7 | 1/1 | 1/1 | 0/1 | 4/83 |
-| postgres | 10/10 | 38/38 | 7/7 | 7/7 | 6/6 | 8/8 | 8/8 | 1/1 | 1/1 | 1/1 | 87/87 |
-| progress | 0/10 | 0/39 | 0/7 | 0/7 | 0/6 | 0/6 | 2/6 | 0/1 | 0/1 | 0/1 | 2/84 |
+| polardbx | 0/10 | 1/36 | 0/7 | 0/7 | 0/6 | 0/8 | 1/7 | 1/1 | 1/1 | 0/1 | 4/84 |
+| postgres | 10/10 | 38/38 | 7/7 | 7/7 | 6/6 | 9/9 | 8/8 | 1/1 | 1/1 | 1/1 | 88/88 |
+| progress | 0/10 | 0/39 | 0/7 | 0/7 | 0/6 | 0/7 | 2/6 | 0/1 | 0/1 | 0/1 | 2/85 |
 | pubsub | 0/1 | - | - | 0/2 | - | - | - | 1/1 | 1/1 | 0/1 | 2/6 |
 | qdrant | 0/7 | 1/15 | - | 0/7 | 1/2 | 1/7 | 0/2 | 0/1 | 0/1 | 0/1 | 3/43 |
-| redis | 5/8 | 12/12 | 2/7 | 7/7 | 0/1 | 4/4 | 5/6 | 1/1 | 1/1 | 1/1 | 38/48 |
+| redis | 5/8 | 12/12 | 2/7 | 7/7 | 0/1 | 4/5 | 5/6 | 1/1 | 1/1 | 1/1 | 38/49 |
 | redshift | 5/10 | 0/29 | 0/5 | 3/7 | 1/5 | 1/3 | 2/6 | 1/1 | 1/1 | 0/1 | 14/68 |
 | saas | 0/6 | 0/3 | 0/5 | 1/5 | - | 0/1 | 0/1 | 0/1 | 0/1 | - | 1/23 |
-| saphana | 0/10 | 0/39 | 0/7 | 0/7 | 0/6 | 0/6 | 2/6 | 0/1 | 0/1 | 0/1 | 2/84 |
+| saphana | 0/10 | 0/39 | 0/7 | 0/7 | 0/6 | 0/7 | 2/6 | 0/1 | 0/1 | 0/1 | 2/85 |
 | sapodp | 0/6 | 0/3 | 0/5 | 0/5 | 0/1 | 0/1 | 1/1 | 1/1 | 0/1 | - | 2/24 |
-| singlestore | 0/10 | 0/40 | 0/7 | 0/7 | 0/6 | 0/6 | 0/8 | 0/1 | 1/1 | 0/1 | 1/87 |
-| snowflake | 4/10 | 0/33 | 0/7 | 3/7 | 1/6 | 0/4 | 2/7 | 1/1 | 0/1 | 0/1 | 11/77 |
-| spanner | 0/10 | 2/31 | 1/7 | 0/6 | 1/6 | 2/5 | 3/4 | 1/1 | 1/1 | 0/1 | 11/72 |
+| singlestore | 0/10 | 0/40 | 0/7 | 0/7 | 0/6 | 0/7 | 0/8 | 0/1 | 1/1 | 0/1 | 1/88 |
+| snowflake | 4/10 | 0/33 | 0/7 | 3/7 | 1/6 | 0/5 | 2/7 | 1/1 | 0/1 | 0/1 | 11/78 |
+| spanner | 0/10 | 2/31 | 1/7 | 0/6 | 1/6 | 2/6 | 3/4 | 1/1 | 1/1 | 0/1 | 11/73 |
 | sqlite | 2/9 | 4/28 | - | 2/7 | 2/5 | 4/6 | 2/2 | 1/1 | 0/1 | 0/1 | 17/60 |
 | synapse | 0/10 | 1/37 | 0/5 | 0/7 | 0/6 | 0/6 | 2/7 | 0/1 | 1/1 | 0/1 | 4/81 |
 | teradata | 6/8 | 12/30 | - | 2/7 | 3/6 | 2/6 | 3/4 | 1/1 | 1/1 | 0/1 | 30/64 |
-| tidb | 9/10 | 25/32 | 4/7 | 5/7 | 5/5 | 5/7 | 4/6 | 1/1 | 0/1 | 0/1 | 58/77 |
+| tidb | 9/10 | 25/32 | 4/7 | 5/7 | 5/5 | 5/8 | 4/6 | 1/1 | 0/1 | 0/1 | 58/78 |
 | timestream | 0/7 | 0/19 | - | 0/6 | 0/1 | 1/5 | 1/3 | 1/1 | 1/1 | 0/1 | 4/44 |
-| vertica | 0/10 | 0/39 | 0/7 | 0/7 | 0/6 | 0/6 | 2/6 | 0/1 | 0/1 | 0/1 | 2/84 |
-| yugabytedb | 0/10 | 0/40 | 0/7 | 0/7 | 0/6 | 0/6 | 0/8 | 0/1 | 1/1 | 0/1 | 1/87 |
+| vertica | 0/10 | 0/39 | 0/7 | 0/7 | 0/6 | 0/7 | 2/6 | 0/1 | 0/1 | 0/1 | 2/85 |
+| yugabytedb | 0/10 | 0/40 | 0/7 | 0/7 | 0/6 | 0/7 | 0/8 | 0/1 | 1/1 | 0/1 | 1/88 |
 
 Built, unproved - a way the code has on an engine no sandbox here can run; the engine's module says which server it was not run on (`UNPROVED_ON`):
 
-- analyticdb-mysql: built; not run on a real AnalyticDB for MySQL or AnalyticDB for PostgreSQL instance (66 cells)
-- analyticdb-postgres: built; not run on a real AnalyticDB for MySQL or AnalyticDB for PostgreSQL instance (58 cells)
+- analyticdb-mysql: built; not run on a real AnalyticDB for MySQL or AnalyticDB for PostgreSQL instance (67 cells)
+- analyticdb-postgres: built; not run on a real AnalyticDB for MySQL or AnalyticDB for PostgreSQL instance (59 cells)
 - ase: built; not run on a real SAP ASE server (15 cells)
-- bigquery: built; not run on a real Redshift cluster, Snowflake account or BigQuery project (49 cells)
-- cockroachdb: built; not run on a real CockroachDB cluster, only on its single-node container and on fakes: the accounts, the cluster settings compared, the export and import through a stage, the snapshot's mark and large values read in pieces (45 cells)
-- cosmosdb: built; not run on a real Cosmos DB account, only on its emulator and on fakes: the bulk writes and the snapshot's continuation per feed range (11 cells)
-- couchbase: built; not run on a real Couchbase cluster, only on its community container and on fakes: the accounts, the bucket settings compared, the statistics refreshed, the bulk importer and the snapshot's mark (16 cells)
-- databricks: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (22 cells)
-- db2: built; not run on a real Db2 LUW server (50 cells)
-- db2i: built; not run on a real IBM i (53 cells)
+- bigquery: built; not run on a real Redshift cluster, Snowflake account or BigQuery project (50 cells)
+- cockroachdb: built; not run on a real CockroachDB cluster, only on its single-node container and on fakes: the accounts, the cluster settings compared, the export and import through a stage, the snapshot's mark and large values read in pieces (46 cells)
+- cosmosdb: built; not run on a real Cosmos DB account, only on its emulator and on fakes: the bulk writes and the snapshot's continuation per feed range (12 cells)
+- couchbase: built; not run on a real Couchbase cluster, only on its community container and on fakes: the accounts, the bucket settings compared, the statistics refreshed, the bulk importer and the snapshot's mark (17 cells)
+- databricks: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (23 cells)
+- db2: built; not run on a real Db2 LUW server (51 cells)
+- db2i: built; not run on a real IBM i (54 cells)
 - db2zos: built; not run on a real Db2 for z/OS subsystem (45 cells)
-- dcdb: built; not run on a real PolarDB-X or TDSQL instance (55 cells)
-- dsql: built; not run on a real Aurora DSQL cluster, only on a PostgreSQL server and on fakes: the statistics refreshed, the snapshot's mark and large values read in pieces (20 cells)
-- exasol: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (22 cells)
-- gaussdb: built; not run on a real GaussDB instance (35 cells)
+- dcdb: built; not run on a real PolarDB-X or TDSQL instance (56 cells)
+- dsql: built; not run on a real Aurora DSQL cluster, only on a PostgreSQL server and on fakes: the statistics refreshed, the snapshot's mark and large values read in pieces (21 cells)
+- exasol: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (23 cells)
+- gaussdb: built; not run on a real GaussDB instance (36 cells)
 - geminidb-cassandra: built; not run on a real GeminiDB instance (46 cells)
-- geminidb-mongo: built; not run on a real GeminiDB instance (58 cells)
-- geminidb-redis: built; not run on a real GeminiDB instance (31 cells)
-- informix: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (22 cells)
-- kafka: built; not run on a real cluster of several brokers (6 cells)
-- keyspaces: built; not run on a real Amazon Keyspaces table (45 cells)
+- geminidb-mongo: built; not run on a real GeminiDB instance (59 cells)
+- geminidb-redis: built; not run on a real GeminiDB instance (32 cells)
+- informix: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (23 cells)
+- kafka: built; not run on a real cluster of several brokers (7 cells)
+- keyspaces: built; not run on a real Amazon Keyspaces table (46 cells)
 - kinesis: built; not run on a real Amazon Kinesis Data Stream (1 cells)
 - lindorm: built; not run on a real Lindorm instance (14 cells)
-- mongodb: built; not run on a real MongoDB replica set, only on fakes; a cell whose lane test is not written yet is owed that test (11 cells)
-- mssql: built; not run on a real SQL Server, only on its edge edition in the sandbox (stopped Agent, CLR off, a thinner catalogue); a cell whose lane test is not written yet is owed that test (29 cells)
-- neptune: built; not run on a real Amazon Neptune cluster (19 cells)
-- netezza: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (22 cells)
-- oceanbase: built; not run on a real OceanBase tenant (63 cells)
+- mongodb: built; not run on a real MongoDB replica set, only on fakes; a cell whose lane test is not written yet is owed that test (12 cells)
+- mssql: built; not run on a real SQL Server, only on its edge edition in the sandbox (stopped Agent, CLR off, a thinner catalogue); a cell whose lane test is not written yet is owed that test (30 cells)
+- neptune: built; not run on a real Amazon Neptune cluster (20 cells)
+- netezza: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (23 cells)
+- oceanbase: built; not run on a real OceanBase tenant (64 cells)
 - oceanbase-oracle: built; not run on a real OceanBase tenant (22 cells)
-- oracle: built; not run on a real Oracle server, only on fakes and stand-ins; a cell whose lane test is not written yet is owed that test (38 cells)
-- polardbx: built; not run on a real PolarDB-X or TDSQL instance (43 cells)
-- progress: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (22 cells)
+- oracle: built; not run on a real Oracle server, only on fakes and stand-ins; a cell whose lane test is not written yet is owed that test (39 cells)
+- polardbx: built; not run on a real PolarDB-X or TDSQL instance (44 cells)
+- progress: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (23 cells)
 - pubsub: built; not run on a real Google Cloud Pub/Sub topic (1 cells)
 - redshift: built; not run on a real Redshift cluster, Snowflake account or BigQuery project (29 cells)
 - saas: built; not run on a real SaaS production service (4 cells)
-- saphana: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (22 cells)
+- saphana: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (23 cells)
 - sapodp: built; not run on a real SAP Gateway system (5 cells)
-- singlestore: built; not run on a real SingleStore workspace (66 cells)
-- snowflake: built; not run on a real Redshift cluster, Snowflake account or BigQuery project (44 cells)
+- singlestore: built; not run on a real SingleStore workspace (67 cells)
+- snowflake: built; not run on a real Redshift cluster, Snowflake account or BigQuery project (45 cells)
 - synapse: built; not run on a real Synapse dedicated SQL pool (35 cells)
-- tidb: built; not run on a real TiDB cluster, only on its single-node container and on fakes: the accounts, the bulk load, the snapshot's mark, TiCDC's open-protocol and Avro messages, binary keys on the canal-json way only, and the service details unverified (IMPORT INTO wildcard, --ignore-fields, Avro watermark framing, DSQL ANALYZE) (8 cells)
+- tidb: built; not run on a real TiDB cluster, only on its single-node container and on fakes: the accounts, the bulk load, the snapshot's mark, TiCDC's open-protocol and Avro messages, binary keys on the canal-json way only, and the service details unverified (IMPORT INTO wildcard, --ignore-fields, Avro watermark framing, DSQL ANALYZE) (9 cells)
 - timestream: built; not run on a real Amazon Timestream database (11 cells)
-- vertica: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (22 cells)
-- yugabytedb: built; not run on a real YugabyteDB cluster (59 cells)
+- vertica: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (23 cells)
+- yugabytedb: built; not run on a real YugabyteDB cluster (60 cells)
 - alibaba: built; not run against a real Alibaba Cloud account (free.provider-metric)
 - alibaba-analyticdb-mysql: built; not run on a real AnalyticDB for MySQL cluster (managed.readiness, managed.brand-api)
 - alibaba-analyticdb-postgres: built; not run on a real AnalyticDB for PostgreSQL instance (managed.readiness, managed.brand-api)
@@ -297,6 +297,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | move.sized | ase bigquery clickhouse cosmosdb db2 dsql duckdb dynamodb hetero kafka mongodb mssql mysql opensearch postgres redis sqlite tidb | cassandra teradata | analyticdb-mysql analyticdb-postgres cockroachdb db2i db2zos dcdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces lindorm oceanbase oceanbase-oracle oracle polardbx redshift singlestore snowflake synapse yugabytedb | the rest (23) | kinesis pubsub |
 | move.load-window | hetero mysql opensearch oracle postgres | cassandra clickhouse teradata | analyticdb-mysql dcdb geminidb-cassandra geminidb-mongo keyspaces mongodb mssql oceanbase polardbx singlestore | the rest (30) | bigquery bigtable copybook delta dynamodb geminidb-redis iceberg kafka kinesis neptune parquet pubsub redis redshift saas sapodp snowflake timestream |
 | move.create-missing | cosmosdb dsql dynamodb hetero mysql opensearch oracle postgres teradata tidb | cassandra clickhouse | analyticdb-mysql analyticdb-postgres bigquery cockroachdb dcdb gaussdb geminidb-cassandra kafka keyspaces mssql oceanbase polardbx redshift singlestore snowflake synapse yugabytedb | the rest (26) | datastore firestore geminidb-mongo geminidb-redis kinesis mongodb neptune pubsub redis saas sapodp |
+| move.reshard | postgres | bigtable cassandra clickhouse dynamodb firestore generic hetero mysql neo4j opensearch redis spanner | the rest (32) | ase delta iceberg lindorm oceanbase-oracle | copybook datastore db2zos duckdb geminidb-cassandra kinesis parquet pubsub qdrant redshift saas sapodp sqlite synapse teradata timestream |
 | cutover.freeze | cassandra clickhouse cockroachdb databricks exasol informix kafka mongodb mssql mysql netezza opensearch postgres progress redis redshift saphana snowflake synapse teradata tidb vertica | hetero | analyticdb-mysql analyticdb-postgres ase couchbase db2 dcdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis oceanbase oceanbase-oracle oracle polardbx singlestore yugabytedb | - | the rest (27) |
 | cutover.read-only-target | the rest (30) | hetero | analyticdb-mysql analyticdb-postgres db2i db2zos dcdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis oceanbase oceanbase-oracle polardbx singlestore yugabytedb | - | bigtable copybook cosmosdb datastore delta duckdb firestore generic iceberg keyspaces kinesis neo4j neptune parquet pubsub qdrant saas sapodp spanner sqlite timestream |
 | cutover.counters | dcdb duckdb gaussdb hetero mssql mysql oceanbase-oracle oracle polardbx postgres spanner sqlite tidb | - | analyticdb-mysql analyticdb-postgres ase cockroachdb db2 db2i db2zos dsql oceanbase redshift singlestore snowflake yugabytedb | - | the rest (40) |
@@ -313,89 +314,89 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 
 390 upward imports still listed (`docs/agents/LAYERS.md`; the list only shrinks); 1 files no package claims (`docs/agents/INVENTORY.md`).
 
-Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 4290 ordered pairs of 66 engines; 50 shape lacks, 38 capability lacks, 3063 depth lacks in all; fewest mysql -> postgres (0), most vertica -> saphana (160).
+Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 4290 ordered pairs of 66 engines; 50 shape lacks, 38 capability lacks, 3112 depth lacks in all; fewest mysql -> postgres (1), most vertica -> saphana (162).
 
 ## Gaps by pair
 
-71 pairs the registry carries (every engine of `engines.NAMES` to itself, and every pair a cross-engine way joins, `crossmove._joined`), each with what `autonomous.gaps(src, dst)` says it lacks by kind; 3272 lacks in all (backlog P0-DECISION-ALL.gaps).
+71 pairs the registry carries (every engine of `engines.NAMES` to itself, and every pair a cross-engine way joins, `crossmove._joined`), each with what `autonomous.gaps(src, dst)` says it lacks by kind; 3323 lacks in all (backlog P0-DECISION-ALL.gaps).
 
 | pair | shape | capability | depth | in all |
 |---|---|---|---|---|
-| analyticdb-mysql -> analyticdb-mysql | 0 | 0 | 74 | 74 |
-| analyticdb-postgres -> analyticdb-postgres | 0 | 3 | 74 | 77 |
-| ase -> ase | 1 | 1 | 67 | 69 |
-| bigquery -> bigquery | 0 | 0 | 49 | 49 |
-| bigtable -> bigtable | 1 | 0 | 41 | 42 |
-| cassandra -> cassandra | 0 | 0 | 29 | 29 |
-| clickhouse -> clickhouse | 0 | 0 | 45 | 45 |
-| cockroachdb -> cockroachdb | 0 | 0 | 51 | 51 |
+| analyticdb-mysql -> analyticdb-mysql | 0 | 0 | 75 | 75 |
+| analyticdb-postgres -> analyticdb-postgres | 0 | 3 | 75 | 78 |
+| ase -> ase | 1 | 1 | 68 | 70 |
+| bigquery -> bigquery | 0 | 0 | 50 | 50 |
+| bigtable -> bigtable | 1 | 0 | 42 | 43 |
+| cassandra -> cassandra | 0 | 0 | 30 | 30 |
+| clickhouse -> clickhouse | 0 | 0 | 46 | 46 |
+| cockroachdb -> cockroachdb | 0 | 0 | 52 | 52 |
 | copybook -> copybook | 0 | 0 | 31 | 31 |
-| cosmosdb -> cosmosdb | 0 | 0 | 21 | 21 |
-| couchbase -> couchbase | 0 | 0 | 49 | 49 |
-| databricks -> databricks | 5 | 0 | 75 | 80 |
+| cosmosdb -> cosmosdb | 0 | 0 | 22 | 22 |
+| couchbase -> couchbase | 0 | 0 | 50 | 50 |
+| databricks -> databricks | 5 | 0 | 76 | 81 |
 | datastore -> datastore | 0 | 0 | 37 | 37 |
-| db2 -> db2 | 0 | 0 | 67 | 67 |
-| db2i -> db2i | 0 | 0 | 70 | 70 |
+| db2 -> db2 | 0 | 0 | 68 | 68 |
+| db2i -> db2i | 0 | 0 | 71 | 71 |
 | db2zos -> db2zos | 0 | 0 | 61 | 61 |
-| dcdb -> dcdb | 0 | 1 | 65 | 66 |
-| delta -> delta | 1 | 7 | 48 | 56 |
-| dsql -> dsql | 0 | 0 | 28 | 28 |
+| dcdb -> dcdb | 0 | 1 | 66 | 67 |
+| delta -> delta | 1 | 7 | 49 | 57 |
+| dsql -> dsql | 0 | 0 | 29 | 29 |
 | duckdb -> duckdb | 0 | 0 | 46 | 46 |
 | duckdb -> postgres | 0 | 0 | 46 | 46 |
-| dynamodb -> dynamodb | 0 | 0 | 8 | 8 |
-| exasol -> exasol | 5 | 0 | 75 | 80 |
-| firestore -> firestore | 0 | 0 | 43 | 43 |
-| gaussdb -> gaussdb | 0 | 0 | 68 | 68 |
+| dynamodb -> dynamodb | 0 | 0 | 9 | 9 |
+| exasol -> exasol | 5 | 0 | 76 | 81 |
+| firestore -> firestore | 0 | 0 | 44 | 44 |
+| gaussdb -> gaussdb | 0 | 0 | 69 | 69 |
 | geminidb-cassandra -> geminidb-cassandra | 0 | 0 | 48 | 48 |
-| geminidb-mongo -> geminidb-mongo | 0 | 0 | 50 | 50 |
-| geminidb-redis -> geminidb-redis | 0 | 0 | 36 | 36 |
-| generic -> generic | 0 | 0 | 58 | 58 |
-| hetero -> hetero | 2 | 0 | 45 | 47 |
-| iceberg -> iceberg | 1 | 7 | 49 | 57 |
-| informix -> informix | 5 | 0 | 75 | 80 |
-| kafka -> kafka | 0 | 0 | 11 | 11 |
-| keyspaces -> keyspaces | 0 | 0 | 50 | 50 |
+| geminidb-mongo -> geminidb-mongo | 0 | 0 | 51 | 51 |
+| geminidb-redis -> geminidb-redis | 0 | 0 | 37 | 37 |
+| generic -> generic | 0 | 0 | 59 | 59 |
+| hetero -> hetero | 2 | 0 | 46 | 48 |
+| iceberg -> iceberg | 1 | 7 | 50 | 58 |
+| informix -> informix | 5 | 0 | 76 | 81 |
+| kafka -> kafka | 0 | 0 | 12 | 12 |
+| keyspaces -> keyspaces | 0 | 0 | 51 | 51 |
 | kinesis -> kinesis | 0 | 0 | 4 | 4 |
-| lindorm -> lindorm | 2 | 4 | 56 | 62 |
-| mongodb -> mongodb | 1 | 0 | 11 | 12 |
-| mssql -> mssql | 0 | 0 | 34 | 34 |
-| mysql -> mysql | 0 | 0 | 0 | 0 |
-| mysql -> postgres | 0 | 0 | 0 | 0 |
-| neo4j -> neo4j | 2 | 3 | 55 | 60 |
-| neptune -> neptune | 1 | 0 | 44 | 45 |
-| netezza -> netezza | 5 | 0 | 75 | 80 |
-| oceanbase -> oceanbase | 0 | 1 | 67 | 68 |
-| oceanbase-oracle -> oceanbase-oracle | 0 | 5 | 70 | 75 |
-| opensearch -> opensearch | 0 | 0 | 26 | 26 |
-| oracle -> oracle | 0 | 0 | 40 | 40 |
+| lindorm -> lindorm | 2 | 4 | 57 | 63 |
+| mongodb -> mongodb | 1 | 0 | 12 | 13 |
+| mssql -> mssql | 0 | 0 | 35 | 35 |
+| mysql -> mysql | 0 | 0 | 1 | 1 |
+| mysql -> postgres | 0 | 0 | 1 | 1 |
+| neo4j -> neo4j | 2 | 3 | 56 | 61 |
+| neptune -> neptune | 1 | 0 | 45 | 46 |
+| netezza -> netezza | 5 | 0 | 76 | 81 |
+| oceanbase -> oceanbase | 0 | 1 | 68 | 69 |
+| oceanbase-oracle -> oceanbase-oracle | 0 | 5 | 71 | 76 |
+| opensearch -> opensearch | 0 | 0 | 27 | 27 |
+| oracle -> oracle | 0 | 0 | 41 | 41 |
 | parquet -> parquet | 0 | 0 | 32 | 32 |
 | parquet -> postgres | 0 | 0 | 32 | 32 |
-| polardbx -> polardbx | 0 | 1 | 68 | 69 |
-| postgres -> mysql | 0 | 0 | 0 | 0 |
+| polardbx -> polardbx | 0 | 1 | 69 | 70 |
+| postgres -> mysql | 0 | 0 | 1 | 1 |
 | postgres -> postgres | 0 | 0 | 0 | 0 |
-| progress -> progress | 5 | 0 | 75 | 80 |
+| progress -> progress | 5 | 0 | 76 | 81 |
 | pubsub -> pubsub | 0 | 0 | 4 | 4 |
 | qdrant -> qdrant | 2 | 2 | 36 | 40 |
-| redis -> redis | 0 | 0 | 10 | 10 |
+| redis -> redis | 0 | 0 | 11 | 11 |
 | redshift -> redshift | 0 | 0 | 52 | 52 |
 | saas -> saas | 0 | 0 | 22 | 22 |
-| saphana -> saphana | 5 | 0 | 75 | 80 |
+| saphana -> saphana | 5 | 0 | 76 | 81 |
 | sapodp -> sapodp | 0 | 0 | 22 | 22 |
-| singlestore -> singlestore | 0 | 0 | 74 | 74 |
-| snowflake -> snowflake | 0 | 0 | 57 | 57 |
-| spanner -> spanner | 0 | 0 | 59 | 59 |
+| singlestore -> singlestore | 0 | 0 | 75 | 75 |
+| snowflake -> snowflake | 0 | 0 | 58 | 58 |
+| spanner -> spanner | 0 | 0 | 60 | 60 |
 | sqlite -> postgres | 0 | 0 | 43 | 43 |
 | sqlite -> sqlite | 0 | 0 | 43 | 43 |
 | synapse -> synapse | 0 | 0 | 73 | 73 |
 | teradata -> teradata | 0 | 0 | 32 | 32 |
-| tidb -> tidb | 0 | 0 | 16 | 16 |
+| tidb -> tidb | 0 | 0 | 17 | 17 |
 | timestream -> timestream | 1 | 0 | 38 | 39 |
-| vertica -> vertica | 5 | 0 | 75 | 80 |
-| yugabytedb -> yugabytedb | 0 | 3 | 74 | 77 |
+| vertica -> vertica | 5 | 0 | 76 | 81 |
+| yugabytedb -> yugabytedb | 0 | 3 | 75 | 78 |
 
 ## Backlog (576 items, `docs/backlog-index.md`)
 
-DONE 439 - PARTLY 82 - OPEN 34 - BLOCKED 12 - NOT PURSUED 9
+DONE 447 - PARTLY 81 - OPEN 27 - BLOCKED 12 - NOT PURSUED 9
 
 | area | DONE | PARTLY | IN PROGRESS | OPEN | BLOCKED | NOT PURSUED |
 |---|---|---|---|---|---|---|
@@ -406,10 +407,10 @@ DONE 439 - PARTLY 82 - OPEN 34 - BLOCKED 12 - NOT PURSUED 9
 | correctness/performance | 0 | 1 | 0 | 0 | 0 | 0 |
 | cutover | 22 | 1 | 0 | 0 | 0 | 0 |
 | ease of use | 37 | 6 | 0 | 0 | 1 | 1 |
-| engines | 46 | 12 | 0 | 4 | 3 | 1 |
+| engines | 47 | 12 | 0 | 3 | 3 | 1 |
 | maintainability | 10 | 2 | 0 | 2 | 0 | 0 |
-| move | 46 | 15 | 0 | 8 | 0 | 2 |
-| operations/scale | 52 | 14 | 0 | 8 | 5 | 3 |
+| move | 51 | 15 | 0 | 3 | 0 | 2 |
+| operations/scale | 54 | 13 | 0 | 7 | 5 | 3 |
 | operations/verify | 0 | 1 | 0 | 0 | 0 | 0 |
 | security | 12 | 6 | 0 | 1 | 1 | 1 |
 | tools used whole | 41 | 6 | 0 | 0 | 0 | 0 |
@@ -417,5 +418,5 @@ DONE 439 - PARTLY 82 - OPEN 34 - BLOCKED 12 - NOT PURSUED 9
 | types | 13 | 1 | 0 | 0 | 0 | 0 |
 | verify | 56 | 5 | 0 | 5 | 1 | 1 |
 
-Not done (128): P0-DE.1, P0-DE.2, P0-DE.4, BAR-1, BAR-3, 0f-DVT, 0f-REST, 0a.measure, 0b.window, 6.mariadb, 6.fkwin, 7.free, A2/D10, C1.managed, P3.dryrun, 26.versions, MSSQL-x86, AUD.release, P0-DEPTH.calibrate, P0-DEPTH.json, P0-DEPTH.triggers, P0-DEPTH.rank, P0-AUDIT, AUD-E.pin, AUD-G2, AUD-T2, P0-PARITY.small, P0-PARITY.lv.new, P0-CLOUDS.more, DEC1001.media, DEC1001.gui, P0-SCENARIOS.managed, P0-SCENARIOS.arch, P0-SCENARIOS.charset, P0-SCENARIOS.engine, P0-SCENARIOS.consolidate, DEC30.sweep, S1.e, S4, F3, F7.beat, F7.edges, F7.sec, CV.P9, ER1.acct, ER4, ER5, ER6, W5, LT.R1, LT.R8, LT.C1, LT.C4, LT.C5, LT.C6, LT.P1, LT.P2, LT.P3, W1, W2, W4.b, W8, W9, 28.rates, R5.actions, R5.anchor, 45.run, R3.topo, R17b.hmac, R17b.prog, DOCS, R8.more, R8.mv, R12.minio, R13-DB2, R13-ASE, R13-GENERIC, R16b, R16c, R17d, R18.6/R20.2, R18.7, R19.1, R19.3, R19.9/R20.3, R20.5, R20.6, R20.7, R20.10, R20.11, R21.8, R21.9, R21.M, DTS.sample, REL, REL.gate, R25.3, P0-SCOPE.open, P0-PARITY.scope, P0-PARITY.verify, P0-PARITY.tail, P0-PARITY.all, P0-MINIMAL-INPUT.ownership, P0-MINIMAL-INPUT.acceptance, P0-AUTO-RESOURCES.proof, P0-SAFETY-INTEGRITY, P0-RESILIENCE-ALL, P0-AUTONOMOUS-MIGRATION, P0-PRODUCT-TELEMETRY, P0-AUTOTUNE-ALL, P1-SOURCE-HIERARCHY.layout, P1-SOURCE-HIERARCHY.engines, P1-SOURCE-HIERARCHY.navigation, P1-SOURCE-HIERARCHY.proof, P0-VALIDATE.unattended.proof, P0-ETA-ALL, P0-CONNECTION-PROGRESS, P0-VERIFY-EXECUTION, W7.lanes, W7.depth, W7.history, W4.a.place, SEED.media-lanes, SAML.real-idp, PROVIDERS.free-space, TEST.keeps-move, TEST.closed-bundle-arm, P0-DECISION-ALL.gaps
+Not done (120): P0-DE.1, P0-DE.2, P0-DE.4, BAR-1, BAR-3, 0f-DVT, 0f-REST, 0a.measure, 0b.window, 6.mariadb, 6.fkwin, 7.free, A2/D10, C1.managed, P3.dryrun, 26.versions, MSSQL-x86, AUD.release, P0-DEPTH.calibrate, P0-DEPTH.json, P0-DEPTH.triggers, P0-DEPTH.rank, P0-AUDIT, AUD-E.pin, AUD-G2, AUD-T2, P0-PARITY.small, P0-PARITY.lv.new, P0-CLOUDS.more, DEC1001.media, DEC1001.gui, P0-SCENARIOS.managed, P0-SCENARIOS.arch, P0-SCENARIOS.charset, P0-SCENARIOS.engine, P0-SCENARIOS.consolidate, DEC30.sweep, S1.e, S4, F3, F7.beat, F7.edges, F7.sec, CV.P9, ER1.acct, ER4, ER5, ER6, W5, LT.R1, LT.R8, LT.C1, LT.C4, LT.C5, LT.C6, LT.P1, LT.P2, LT.P3, W1, W2, W4.b, W8, W9, 28.rates, R5.actions, R5.anchor, 45.run, R3.topo, R17b.hmac, R17b.prog, DOCS, R8.more, R8.mv, R12.minio, R13-DB2, R13-ASE, R13-GENERIC, R16b, R16c, R17d, R18.6/R20.2, R18.7, R19.1, R19.3, R19.9/R20.3, R20.5, R20.6, R20.7, R20.10, R20.11, R21.8, R21.9, R21.M, DTS.sample, REL, REL.gate, R25.3, P0-SCOPE.open, P0-PARITY.scope, P0-PARITY.verify, P0-PARITY.tail, P0-PARITY.all, P0-MINIMAL-INPUT.ownership, P0-MINIMAL-INPUT.acceptance, P0-AUTO-RESOURCES.proof, P0-SAFETY-INTEGRITY, P0-RESILIENCE-ALL, P0-AUTONOMOUS-MIGRATION, P0-PRODUCT-TELEMETRY, P0-AUTOTUNE-ALL, P1-SOURCE-HIERARCHY.layout, P1-SOURCE-HIERARCHY.engines, P1-SOURCE-HIERARCHY.navigation, P1-SOURCE-HIERARCHY.proof, P0-VALIDATE.unattended.proof, P0-ETA-ALL, P0-CONNECTION-PROGRESS, P0-VERIFY-EXECUTION, SAML.real-idp, TEST.closed-bundle-arm
 

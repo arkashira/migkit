@@ -21,14 +21,10 @@ from migkit.util import which
 from tests import servers
 from tests.conftest import needs_docker
 
-pytestmark = [needs_docker,
-              pytest.mark.skipif(not which("mysql"),
-                                 reason="the source's own client is not"
-                                        " installed here")]
-
-SRC = servers.name("migkit-ship-my-src")
-DST = servers.name("migkit-ship-my-dst")
-PORT = {SRC: servers.private_port(0), DST: servers.private_port(1)}
+SRC = servers.name("migkit-ship-my-src", 7)
+DST = servers.name("migkit-ship-my-dst", 7)
+PORT = {SRC: servers.port(servers.PRIVATE + 0, 7),
+        DST: servers.port(servers.PRIVATE + 1, 7)}
 
 TABLE = ("create table orders (id bigint primary key, item varchar(40)"
          " not null, qty int, at datetime(6), note varbinary(16),"
@@ -129,7 +125,10 @@ def _same():
         == _my(DST, "set session group_concat_max_len = 1073741824;" + sql)
 
 
-def test_ranges_go_as_the_bulk_loads_lines_and_are_proved_by_the_target(
+@needs_docker
+@pytest.mark.skipif(not which("mysql"),
+                    reason="the source's own client is not installed here")
+def test_ranges_go_as_the_bulk_loads_lines_and_are_proved_by_the_target_lane_7(
         hop):
     got, said = _carry(hop)
     assert got["app"].half == "export", said
@@ -160,7 +159,11 @@ def test_ranges_go_as_the_bulk_loads_lines_and_are_proved_by_the_target(
     assert _same()
 
 
-def test_the_export_reads_nothing_of_the_target_and_the_schema_travels(hop):
+@needs_docker
+@pytest.mark.skipif(not which("mysql"),
+                    reason="the source's own client is not installed here")
+def test_the_export_reads_nothing_of_the_target_and_the_schema_travels_lane_7(
+        hop):
     """The target is down, and its table not there, while the seed is
     exported beside the source: the lines' columns come from the source
     alone and travel in the manifest, and the load beside the target holds
@@ -195,3 +198,207 @@ def test_the_export_reads_nothing_of_the_target_and_the_schema_travels(hop):
     with pytest.raises(SystemExit) as e:
         _carry(hop)
     assert "amount" in str(e.value), e.value
+
+
+def test_decide_reads_parquet_read_from_capability_table():
+    from migkit import decide
+    assert hasattr(decide, "TARGET_CAPABILITIES")
+    assert hasattr(decide, "READS_PARQUET")
+    expected = tuple(k for k, v in decide.TARGET_CAPABILITIES.items()
+                     if v.get("reads_parquet"))
+    assert decide.READS_PARQUET == expected
+    assert set(decide.READS_PARQUET) == {
+        "parquet", "iceberg", "delta", "duckdb", "clickhouse",
+        "bigquery", "redshift"
+    }
+
+
+def test_object_store_gather_across_moto_azurite_and_fake_gcs(tmp_path, monkeypatch):
+    import hashlib
+    from types import SimpleNamespace
+    import boto3
+    from moto import mock_aws
+    from azure.core.exceptions import ResourceNotFoundError
+    import azure.storage.blob
+    import google.cloud.storage
+
+    class FakeBlobClient:
+        def __init__(self, data):
+            self._data = data
+
+        def get_blob_properties(self):
+            return SimpleNamespace(size=len(self._data))
+
+    class FakeBlobDownload:
+        def __init__(self, data):
+            self._data = data
+
+        def readall(self):
+            return self._data
+
+        def readinto(self, f):
+            f.write(self._data)
+            return len(self._data)
+
+    class FakeContainerClient:
+        def __init__(self):
+            self.blobs = {}
+
+        def upload_blob(self, name, data, overwrite=True, **kw):
+            if hasattr(data, "read"):
+                self.blobs[name] = data.read()
+            else:
+                self.blobs[name] = bytes(data)
+
+        def download_blob(self, name, offset=None, length=None, **kw):
+            if name not in self.blobs:
+                raise ResourceNotFoundError(name)
+            d = self.blobs[name]
+            if offset is not None:
+                d = d[offset: offset + length if length is not None else None]
+            return FakeBlobDownload(d)
+
+        def get_blob_client(self, name):
+            if name not in self.blobs:
+                raise ResourceNotFoundError(name)
+            return FakeBlobClient(self.blobs[name])
+
+        def list_blobs(self, name_starts_with=""):
+            return [SimpleNamespace(name=k, size=len(v))
+                    for k, v in self.blobs.items()
+                    if k.startswith(name_starts_with)]
+
+        def delete_blob(self, name):
+            self.blobs.pop(name, None)
+
+    class FakeBlobService:
+        def __init__(self, *a, **k):
+            self.containers = {}
+
+        def get_container_client(self, name):
+            if name not in self.containers:
+                self.containers[name] = FakeContainerClient()
+            return self.containers[name]
+
+    class FakeGcsBlob:
+        def __init__(self, bucket, name):
+            self.bucket = bucket
+            self.name = name
+
+        def upload_from_filename(self, path):
+            from pathlib import Path
+            self.bucket.blobs[self.name] = Path(path).read_bytes()
+
+        def upload_from_string(self, data):
+            self.bucket.blobs[self.name] = bytes(data)
+
+        def download_to_filename(self, path):
+            from pathlib import Path
+            Path(path).write_bytes(self.bucket.blobs[self.name])
+
+        def download_as_bytes(self, start=None, end=None):
+            d = self.bucket.blobs[self.name]
+            if start is not None:
+                d = d[start: end + 1 if end is not None else None]
+            return d
+
+        def delete(self):
+            self.bucket.blobs.pop(self.name, None)
+
+        @property
+        def size(self):
+            return len(self.bucket.blobs.get(self.name, b""))
+
+    class FakeGcsBucket:
+        def __init__(self, name, client):
+            self.name = name
+            self.client = client
+            self.blobs = {}
+
+        def blob(self, name):
+            return FakeGcsBlob(self, name)
+
+        def get_blob(self, name):
+            if name in self.blobs:
+                return FakeGcsBlob(self, name)
+            return None
+
+    class FakeGcsClient:
+        def __init__(self, **kw):
+            self.buckets = {}
+
+        def bucket(self, name):
+            if name not in self.buckets:
+                self.buckets[name] = FakeGcsBucket(name, self)
+            return self.buckets[name]
+
+        def list_blobs(self, bucket, prefix=""):
+            return [FakeGcsBlob(bucket, k) for k in bucket.blobs
+                    if k.startswith(prefix)]
+
+    monkeypatch.setattr(azure.storage.blob, "BlobServiceClient", FakeBlobService)
+    monkeypatch.setattr(google.cloud.storage, "Client", FakeGcsClient)
+
+    class Work:
+        def __init__(self):
+            self.db = "app"
+            self.dir = tmp_path / "reports"
+            self.dir.mkdir(parents=True, exist_ok=True)
+            self.spool = tmp_path / "spool"
+            self.spool.mkdir(parents=True, exist_ok=True)
+            self.said = []
+
+        def prefix(self):
+            return "myseed/app/"
+
+        def log(self, msg):
+            self.said.append(msg)
+
+    w = Work()
+    main_store = carriers.LocalStore(tmp_path / "carrier")
+    parts_data = {
+        "myseed/app/parts/orders-0": b"part-data-zero-17",
+        "myseed/app/parts/orders-1": b"part-data-one--17",
+        "myseed/app/parts/orders-2": b"part-data-two--17",
+    }
+    manifest = {
+        "tables": [{
+            "table": "orders",
+            "parts": {
+                str(i): {
+                    "name": f"myseed/app/parts/orders-{i}",
+                    "bytes": len(data),
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                }
+                for i, data in enumerate(parts_data.values())
+            },
+        }]
+    }
+    seal = {"manifest_sha256": hashlib.sha256(b"manifest").hexdigest()}
+
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket="gather-s3")
+        s3.put_object(Bucket="gather-s3", Key="myseed/app/parts/orders-0",
+                      Body=parts_data["myseed/app/parts/orders-0"])
+
+        s = {
+            "gather": [
+                "s3://gather-s3/",
+                "http://127.0.0.1:10000/seedacct/gather-container/",
+                "gs://gather-gcs/",
+            ]
+        }
+        others = ship.others_of(s)
+        others[1].put_bytes("myseed/app/parts/orders-1",
+                            parts_data["myseed/app/parts/orders-1"])
+        others[2].put_bytes("myseed/app/parts/orders-2",
+                            parts_data["myseed/app/parts/orders-2"])
+        others[2].put_bytes("myseed/app/parts/orders-0",
+                            b"corrupt-data-0-17")
+
+        gathered = ship.gather(w, main_store, manifest, seal, others)
+        assert len(gathered) == 3
+        assert "gathered from 4 places" in w.said[-1]
+        assert "1 copies refused" in w.said[-1]
+

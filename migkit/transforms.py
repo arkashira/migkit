@@ -518,9 +518,13 @@ def _engine():
     con = getattr(_local, "con", None)
     if con is None:
         import duckdb
+        import pyarrow as pa
         con = duckdb.connect(":memory:")
         con.execute("set enable_external_access = false")
         con.execute("set lock_configuration = true")
+        con.register("_w", pa.table({"a": pa.array(["str"])}))
+        con.execute("select * from _w").fetchall()
+        con.unregister("_w")
         _local.con = con
     return con
 
@@ -622,8 +626,9 @@ def measure(at, rows):
     way the copy takes - 0.0 where
     `rows` holds none to measure. SystemExit where the statement cannot
     run over them, which refuses the hop before anything is written."""
-    sql_at = [(i, r) for i, r in at
-              if (parse(r) if isinstance(r, str) else r)[0] == "sql"]
+    sql_at = [(i, parse(r, whole_row=True) if isinstance(r, str) else r)
+              for i, r in at]
+    sql_at = [(i, r) for i, r in sql_at if r[0] == "sql"]
     if not sql_at or not rows:
         return 0.0
     _engine()  # made once a thread, which the copy's batches do not pay
@@ -767,7 +772,11 @@ def rewrite(target, table, rules, dialect, db=None, columns=None,
         return None
     if log:
         log(f"on-target rewrite: {table} ({stmt})")
-    if hasattr(target, "sql"):
+    if hasattr(target, "execute_ddl"):
+        target.execute_ddl("dst", db, stmt)
+    elif hasattr(target, "_psql"):
+        target._psql("dst", db, stmt)
+    elif hasattr(target, "sql"):
         target.sql(stmt, db) if db else target.sql(stmt)
     elif hasattr(target, "execute"):
         target.execute(stmt)

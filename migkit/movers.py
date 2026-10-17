@@ -4076,7 +4076,7 @@ def place_transforms(hop, db, table, sample=None, rows=None, copy_s=None,
     auth = transforms.authorized(hop)
     facts = eng.table_facts("src", db).get(table, {}) if eng and hasattr(eng, "table_facts") else {}
     rows = rows or facts.get("rows") or len(sample or ()) or 0
-    copy_s = copy_s or (rows / 1000.0 if rows else 1.0)
+    copy_s = copy_s or max(1.0, rows / 1000.0 if rows else 1.0)
     choice = transforms.place(sql_rules, sample or (), rows, copy_s, dialect,
                               auth, target_runner=target_runner)
     if log:

@@ -214,8 +214,10 @@ def _paired(lines, session=None):
             continue
         if session and line.get("session") != session:
             continue
-        key = (line.get("db", ""), line.get("table", ""),
-               line.get("where", ""))
+        where = line.get("where", "")
+        if isinstance(where, list):
+            where = tuple(where)
+        key = (line.get("db", ""), line.get("table", ""), where)
         last[key] = line.get("session")
         out.setdefault(key, []).append(line)
     paired = {}

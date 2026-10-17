@@ -811,7 +811,7 @@ class ChangeIntervals:
 
     def __init__(self, target, db, store, changes, seconds, costs=None):
         import copy
-        from . import decide
+        from . import canon, decide
         self.target, self.db = target, db
         self.changes = copy.deepcopy(changes)
         self.clock = dict(store.get(INTERVALS + "-clock") or {})
@@ -836,7 +836,9 @@ class ChangeIntervals:
                 continue
             if table not in self.columns:
                 try:
-                    self.columns[table] = target.neutral_columns("dst", db, table)
+                    cols = target.neutral_columns("dst", db, table)
+                    eng = getattr(target, "CANON_ENGINE", None) or "postgres"
+                    self.columns[table] = [(n, canon.fold_class(eng, c, n)) for n, c in cols]
                 except Exception:
                     self.receipt["unknown"].append(table)
                     continue
@@ -865,7 +867,7 @@ class ChangeIntervals:
     @staticmethod
     def signature(change, columns):
         from . import canon, rowtext
-        classes = dict(columns)
+        classes = {n: canon.NEUTRAL_TO_CANON.get(c, c) for n, c in dict(columns).items()}
         parts = [change["op"]]
         for part in ("key", "values"):
             parts.append(part)

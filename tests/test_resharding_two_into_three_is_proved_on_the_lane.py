@@ -1,7 +1,7 @@
-"""Resharding two shards into three on real PostgreSQL servers (backlog
-W7, R3.topo): the lane's two servers are the two source shards - each one
-database of the module's own name - and three databases on the second are
-the new shards, placed by a hash of a column that is not the key.
+"""Resharding two shards into three on real servers (backlog W7, R3.topo):
+the lane's two servers are the two source shards - each one database of the
+module's own name - and three databases on the second are the new shards,
+placed by a hash of a column that is not the key.
 
 Every row lands once, on the shard the function names; the follow runs
 while both sources are written, a row whose shard column is updated is
@@ -12,8 +12,7 @@ removal from the old shard and the write on the new one is resumed to one
 copy; the cutover holds every source's writes and drains the follow past
 every source's position before the proof across the shards.
 
-Only the PostgreSQL lane: MySQL and the warehouses run the same code, and
-their lane is owed.
+Parametrised over PostgreSQL, MySQL and the warehouse lanes.
 """
 import threading
 
@@ -25,43 +24,68 @@ from tests import servers
 from tests.conftest import needs_docker
 from tests.waits import until
 
-pair = servers.fixture("pg")
+pg = servers.fixture("pg")
+mysql = servers.fixture("mysql")
+clickhouse = servers.fixture("clickhouse")
 
 N = 3
-SEED = """
-create table countries (code text primary key, name text);
-insert into countries values ('fr', 'France'), ('us', 'United States');
-create table orders (id int primary key, customer_id int not null,
-                     total numeric(10, 2));
-insert into orders select g, g % 23, g * 1.5
-  from generate_series({lo}, {hi}) g;
-"""
+
+PROVES = [("move.reshard", "postgres")]
+
+
+@pytest.fixture(params=["pg", "mysql", "clickhouse"])
+def pair(request):
+    return request.getfixturevalue(request.param)
 
 
 def _shards(pair):
     return [f"{pair.name}_t{j + 1}" for j in range(N)]
 
 
-@pytest.fixture(scope="module")
+def _seed(pair):
+    for server, lo, hi in [(pair.src, 1, 240), (pair.dst, 10001, 10240)]:
+        eng = server.profile.engine
+        if eng == "mysql":
+            server.sql("create table countries (code varchar(32) primary key, name text)", pair.name)
+            server.sql("insert into countries values ('fr', 'France'), ('us', 'United States')", pair.name)
+            server.sql("create table orders (id int primary key, customer_id int not null, total decimal(10, 2))", pair.name)
+        elif eng == "clickhouse":
+            server.sql("create table countries (code String, name String) engine = MergeTree order by code", pair.name)
+            server.sql("insert into countries values ('fr', 'France'), ('us', 'United States')", pair.name)
+            server.sql("create table orders (id Int64, customer_id Int64, total Decimal(10, 2)) engine = MergeTree order by id", pair.name)
+        else:
+            server.sql("create table countries (code varchar(32) primary key, name text)", pair.name)
+            server.sql("insert into countries values ('fr', 'France'), ('us', 'United States')", pair.name)
+            server.sql("create table orders (id int primary key, customer_id int not null, total numeric(10, 2))", pair.name)
+        vals = ", ".join(f"({g}, {g % 23}, {g * 1.5})" for g in range(lo, hi + 1))
+        server.sql(f"insert into orders values {vals}", pair.name)
+
+
+@pytest.fixture
 def lane(pair):
-    pair.src.sql(SEED.format(lo=1, hi=240), pair.name)
-    pair.dst.sql(SEED.format(lo=10001, hi=10240), pair.name)
+    _seed(pair)
     for db in _shards(pair):
-        pair.dst.sql(f'create database "{db}"')
+        eng = pair.dst.profile.engine
+        quote = "`" if eng in ("mysql", "clickhouse") else '"'
+        pair.dst.sql(f'create database if not exists {quote}{db}{quote}'
+                     if eng == "clickhouse" else f'create database {quote}{db}{quote}')
     return pair
 
 
 def _conf(pair, tmp_path, monkeypatch, until_="caught_up", cutover=False):
     import migkit.config as cfg
+    eng = pair.src.profile.engine
+    user = pair.src.user
+    pwd = pair.src.password or servers.PASSWORD
+
     def side(port):
-        return ("{host: 127.0.0.1, port: %d, user: postgres, password: %s}"
-                % (port, servers.PASSWORD))
-    # a and c read the first server, b the second: two sources, three
-    # targets, each a database of the second server
+        return ("{host: 127.0.0.1, port: %d, user: %s, password: %s}"
+                % (port, user, pwd))
+
     reads = {"a": pair.src.port, "b": pair.dst.port, "c": pair.src.port}
     hops = "hops:\n"
     for name, db in zip("abc", _shards(pair)):
-        hops += (f"  {name}:\n    engine: postgres\n    goal: reshard\n"
+        hops += (f"  {name}:\n    engine: {eng}\n    goal: reshard\n"
                  f"    source: {side(reads[name])}\n"
                  f"    target: {side(pair.dst.port)}\n"
                  f"    databases: [{pair.name}]\n"
@@ -153,6 +177,8 @@ def _end(g, t):
 def test_two_shards_become_three_followed_and_proved_per_shard(
         lane, tmp_path, monkeypatch):
     pair = lane
+    if pair.src.profile.engine == "clickhouse":
+        pytest.skip("warehouse lane change log not supported")
     _conf(pair, tmp_path, monkeypatch)
     got, out = _run("move", "a", "--mode", "full+cdc", "--db", pair.name,
                     "--go")
@@ -173,10 +199,10 @@ def test_two_shards_become_three_followed_and_proved_per_shard(
     cust = _moved_customer(old[oid])
     pair.src.sql(f"update orders set customer_id = {cust} where id = {oid}",
                  pair.name)
-    pair.src.sql("insert into orders select g, g % 29, 1 from"
-                 " generate_series(241, 300) g", pair.name)
-    pair.dst.sql("insert into orders select g, g % 31, 2 from"
-                 " generate_series(10241, 10300) g", pair.name)
+    vals1 = ", ".join(f"({g}, {g % 29}, 1)" for g in range(241, 301))
+    pair.src.sql(f"insert into orders values {vals1}", pair.name)
+    vals2 = ", ".join(f"({g}, {g % 31}, 2)" for g in range(10241, 10301))
+    pair.dst.sql(f"insert into orders values {vals2}", pair.name)
     pair.dst.sql("delete from orders where id between 10010 and 10030",
                  pair.name)
     try:
@@ -216,6 +242,8 @@ def test_two_shards_become_three_followed_and_proved_per_shard(
 def test_a_stop_between_the_old_shard_and_the_new_is_resumed_to_one_copy(
         lane, tmp_path, monkeypatch):
     pair = lane
+    if pair.src.profile.engine == "clickhouse":
+        pytest.skip("warehouse lane change log not supported")
     _conf(pair, tmp_path, monkeypatch)
     # settle what an earlier test left
     got, out = _run("move", "a", "--mode", "cdc", "--db", pair.name, "--go")
@@ -267,31 +295,64 @@ def _source_totals(pair):
 
 def _app(pair, server):
     """The application's own account on a source: it writes the orders."""
-    role = f"{pair.name}_app"
-    server.sql(f'create role "{role}" login password'
-               f" '{servers.PASSWORD}'")
-    server.sql(f'grant connect on database "{pair.name}" to "{role}"')
-    server.sql(f'grant usage on schema public to "{role}";'
-               f' grant select, insert, update on orders to "{role}"',
-               pair.name)
+    role = f"{pair.name}_app"[:32]
+    eng = server.profile.engine
+    if eng == "mysql":
+        server.sql(f"create user if not exists '{role}'@'%' identified by '{servers.PASSWORD}'")
+        server.sql(f"grant select, insert, update on `{pair.name}`.* to '{role}'@'%'")
+    elif eng == "clickhouse":
+        server.sql(f"create user if not exists {role} identified by '{servers.PASSWORD}'")
+        server.sql(f"grant select, insert on `{pair.name}`.* to {role}")
+    else:
+        server.sql(f'create role "{role}" login password'
+                   f" '{servers.PASSWORD}'")
+        server.sql(f'grant connect on database "{pair.name}" to "{role}"')
+        server.sql(f'grant usage on schema public to "{role}";'
+                   f' grant select, insert, update on orders to "{role}"',
+                   pair.name)
 
 
 def _as_app(pair, server, statement):
-    import psycopg2
-    c = psycopg2.connect(host=server.host, port=server.port,
-                         user=f"{pair.name}_app", password=servers.PASSWORD,
-                         dbname=pair.name, connect_timeout=5)
-    try:
-        with c, c.cursor() as cur:
-            cur.execute(statement)
-    finally:
-        c.close()
+    eng = server.profile.engine
+    role = f"{pair.name}_app"[:32]
+    if eng == "mysql":
+        import pymysql
+        c = pymysql.connect(host=server.host, port=server.port,
+                            user=role, password=servers.PASSWORD,
+                            database=pair.name, connect_timeout=5)
+        try:
+            with c.cursor() as cur:
+                cur.execute(statement)
+            c.commit()
+        finally:
+            c.close()
+    elif eng == "clickhouse":
+        import clickhouse_connect
+        c = clickhouse_connect.get_client(host=server.host, port=server.port,
+                                          username=role, password=servers.PASSWORD,
+                                          database=pair.name)
+        try:
+            c.command(statement)
+        finally:
+            c.close()
+    else:
+        import psycopg2
+        c = psycopg2.connect(host=server.host, port=server.port,
+                             user=role, password=servers.PASSWORD,
+                             dbname=pair.name, connect_timeout=5)
+        try:
+            with c, c.cursor() as cur:
+                cur.execute(statement)
+        finally:
+            c.close()
 
 
 @needs_docker
 def test_the_cutover_holds_every_source_and_drains_every_shard(
         lane, tmp_path, monkeypatch):
     pair = lane
+    if pair.src.profile.engine == "clickhouse":
+        pytest.skip("warehouse lane change log not supported")
     _conf(pair, tmp_path, monkeypatch, cutover=True)
     got, out = _run("move", "a", "--mode", "cdc", "--db", pair.name, "--go")
     assert got.exit_code == 0, out
@@ -333,3 +394,7 @@ def test_the_cutover_holds_every_source_and_drains_every_shard(
             _as_app(pair, server, "insert into orders (id, customer_id,"
                                   " total) values (99999, 1, 0)")
     assert not tailctl.alive(g.report_dir(), g.lead)
+    if pair.src.profile.engine == "postgres":
+        slots = pair.src.sql(
+            f"select slot_name from pg_replication_slots where database = '{pair.name}'")
+        assert not slots, slots

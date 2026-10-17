@@ -6339,6 +6339,20 @@ def oracle_digest_rungs():
 
 # ---- how a seed's rows are held in its parts (`ship`, backlog DEC1001) ------
 
+TARGET_CAPABILITIES = {
+    "parquet": {"reads_parquet": True},
+    "iceberg": {"reads_parquet": True},
+    "delta": {"reads_parquet": True},
+    "duckdb": {"reads_parquet": True},
+    "clickhouse": {"reads_parquet": True},
+    "bigquery": {"reads_parquet": True},
+    "redshift": {"reads_parquet": True},
+}
+
+READS_PARQUET = tuple(k for k, v in TARGET_CAPABILITIES.items()
+                      if v.get("reads_parquet"))
+
+
 def rows_container(facts, costs=None):
     """How the rows of a seed's part are held on the carrier where the
     pair has no native format of its own: as Parquet, a file a batch,

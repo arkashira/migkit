@@ -719,8 +719,22 @@ def function(g, table, home=0, record=False):
     way = choice.rung.name
     classes = _classes(reader, "src", db, table)
     every = list(range(len(g.targets)))
+    cols = list(classes)
+    if g.targets:
+        try:
+            have = None
+            for j in range(len(g.targets)):
+                p = g.pair(home, j)
+                dt = _target_table(p, db, table)
+                target_cols = {n for n, _ in p.dst_engine.neutral_columns("dst", db, dt)}
+                if target_cols:
+                    have = target_cols if have is None else have & target_cols
+            if have:
+                cols = [c for c in classes if c in have]
+        except Exception:
+            pass
     out = Function(way, shard_key(g, table, pk), choice.rung.said, every,
-                   classes, pk, list(classes), home)
+                   classes, pk, cols, home)
     if g.kind == "split":
         from . import split
         parts = [split.Part(t.hop) for t in g.targets]
@@ -1925,6 +1939,10 @@ def _change_targets(g, t, kinds, within, log):
                 log(f"{t}: changed on every source; on"
                     f" {g.targets[j].name}: {sql}")
     else:
+        for pair in g._pairs.values():
+            pair.src_engine.forget_shapes()
+            pair.dst_engine.forget_shapes()
+            pair.__dict__.pop("_typed_of", None)
         return
     raise SystemExit(
         f"{t}: {', '.join(sorted(k for k in kinds if k))} on every source"
@@ -1960,6 +1978,7 @@ def follow(g, go, log):
     applied (`_apply`), its position kept once every target has it. A
     connection lost is read again from the kept positions, which the
     targets take by key or their marks settle."""
+    import concurrent.futures
     import contextlib
     import secrets
 
@@ -2114,15 +2133,32 @@ def follow(g, go, log):
         _, order = decide.reshard_order({"took": st["took"],
                                          "full": st["full"]})
         st["order"] = order
-        for i in order:
+        active = [i for i in order if st["held"][i] is None]
+        if len(active) < len(order):
+            settled = False
+
+        def read_one(i):
             s = g.sources[i]
-            if st["held"][i] is not None:
-                settled = False
-                continue
-            reader = g.reader(i)
-            at_start = time.monotonic()
-            got, read_to = reader.neutral_changes(
+            r = g.reader(i)
+            t0 = time.monotonic()
+            got, read_to = r.neutral_changes(
                 "src", s.db, st["read_at"][i], limit=st["limit"][i])
+            return i, got, read_to, time.monotonic() - t0
+
+        read_results = {}
+        if len(active) > 1:
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=len(active)) as ex:
+                for idx, got, read_to, took in ex.map(read_one, active):
+                    read_results[idx] = (got, read_to, took)
+        elif len(active) == 1:
+            idx, got, read_to, took = read_one(active[0])
+            read_results[idx] = (got, read_to, took)
+
+        for i in order:
+            if i not in read_results:
+                continue
+            got, read_to, took = read_results[i]
             fewer = len(got) < st["limit"][i]
             st["full"][i] = not fewer
             changes, st["carried"][i] = st["carried"][i] + got, []
@@ -2132,7 +2168,6 @@ def follow(g, go, log):
                 changes, st["carried"][i] = changes[:cut], changes[cut:]
                 at = changes[-1]["txn_at"]
             applied, m = run_part(i, changes, at)
-            took = time.monotonic() - at_start
             if got:
                 st["took"][i] = took
                 st["before"][i], st["rate"][i] = (
@@ -2473,6 +2508,12 @@ class _Sides:
                 out.append((f"{name}/{db}", hop, get_engine(hop), db))
         return out
 
+    def _quote_ident(self, name):
+        for _, _, part_eng, _ in self.parts:
+            if hasattr(part_eng, "_quote_ident"):
+                return part_eng._quote_ident(name)
+        return f'"{name}"'
+
 
 class Cluster:
     """A group as the cutover's one engine (`cutover.run`): its sources
@@ -2493,6 +2534,68 @@ class Cluster:
 
     def check_data(self, db, table=None, stream=None, with_counts=False):
         return proofs(self.group)
+
+    def history_tables(self, side, db):
+        from . import appversions
+        out = {}
+        engine = self.src_engine if side == "src" else self.dst_engine
+        for _, _, part_eng, part_db in engine.parts:
+            if hasattr(part_eng, "history_tables"):
+                out.update(part_eng.history_tables(side, part_db))
+            elif hasattr(part_eng, "neutral_tables"):
+                try:
+                    out.update(appversions.named(
+                        part_eng.neutral_tables(side, part_db)))
+                except Exception:
+                    pass
+        return out
+
+    def history_columns(self, side, db, ref):
+        engine = self.src_engine if side == "src" else self.dst_engine
+        for _, _, part_eng, part_db in engine.parts:
+            if hasattr(part_eng, "history_columns"):
+                try:
+                    cols = part_eng.history_columns(side, part_db, ref)
+                    if cols:
+                        return cols
+                except Exception:
+                    continue
+        return []
+
+    def history_rows(self, side, db, ref, columns, where=""):
+        engine = self.src_engine if side == "src" else self.dst_engine
+        out = set()
+        for _, _, part_eng, part_db in engine.parts:
+            if hasattr(part_eng, "history_rows"):
+                try:
+                    rows = part_eng.history_rows(side, part_db, ref, columns,
+                                                 where=where)
+                    out.update(tuple(r) for r in rows)
+                except Exception:
+                    continue
+        return list(out)
+
+    def own_schema_changes(self, db):
+        from .movers import renames_any
+        rules = (self.hop.mapping or {}).get("columns") or {}
+        out = ["tables renamed by the hop's mapping"] \
+            if renames_any(self.hop) else []
+        if rules:
+            out.append(f"the columns of {len(rules)} tables kept, dropped or"
+                       " renamed by the hop's mapping ("
+                       + ", ".join(sorted(map(str, rules))[:4]) + ")")
+        return out
+
+    def own_slots(self, db):
+        out = set()
+        for i, s in enumerate(self.group.sources):
+            reader = self.group.reader(i)
+            if hasattr(reader, "own_slots"):
+                out.update(reader.own_slots(s.db))
+        return sorted(out)
+
+    def _quote_ident(self, name):
+        return self.dst_engine._quote_ident(name)
 
     def repair_plan(self, db, kind):
         """Each target's counters past its own rows, as its own engine
@@ -2570,17 +2673,39 @@ def leg(g, say):
     def up(d):
         tailctl.resume(where)
 
+    def _drop_slots(d):
+        for i, s in enumerate(g.sources):
+            reader = g.reader(i)
+            if hasattr(reader, "release_changes"):
+                reader.release_changes()
+            if hasattr(reader, "own_slots") and hasattr(reader, "_psql"):
+                try:
+                    for slot in reader.own_slots(s.db):
+                        reader._psql(
+                            "src", s.db,
+                            f"select pg_terminate_backend(active_pid) from pg_replication_slots "
+                            f"where slot_name = '{slot}' and active_pid is not null; "
+                            f"select pg_drop_replication_slot(slot_name) from pg_replication_slots "
+                            f"where slot_name = '{slot}';")
+                except Exception:
+                    pass
+
     def end(d):
-        if not tailctl.alive(where, g.lead):
-            return
-        tailctl.stop(where)
-        tailctl.resume(where)
-        stop = time.monotonic() + 60
-        while tailctl.alive(where, g.lead) and time.monotonic() < stop:
-            time.sleep(tailctl.POLL)
         if tailctl.alive(where, g.lead):
-            raise SystemExit(f"{d}: the group's follow did not end")
-        say(f"  {d}: the group's follow ended")
+            tailctl.stop(where)
+            tailctl.resume(where)
+            stop = time.monotonic() + 60
+            while tailctl.alive(where, g.lead) and time.monotonic() < stop:
+                time.sleep(tailctl.POLL)
+            if tailctl.alive(where, g.lead):
+                raise SystemExit(f"{d}: the group's follow did not end")
+            say(f"  {d}: the group's follow ended")
+        _drop_slots(d)
+
+    def after_flip(d):
+        _drop_slots(d)
+        return []
+
     def manual(go):
         """The teardown of a group without `cutover:`: its follow ended,
         once migkit has proved around it what it proves by hand."""
@@ -2594,7 +2719,7 @@ def leg(g, say):
         return cutover.Leg("none", why="no follow of the group runs: start"
                                        " it with --mode cdc", manual=manual)
     return cutover.Leg("tail", fence=_Fence(g), down=down, up=up, end=end,
-                       manual=manual)
+                       after_flip=after_flip, manual=manual)
 
 
 def cut_over(hop, dbs, go, say, approve):

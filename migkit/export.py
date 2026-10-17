@@ -525,7 +525,7 @@ def _decisions(hop, session):
     seen = {}
 
     def _keyable(v):
-        if isinstance(v, list):
+        if isinstance(v, (list, tuple, set)):
             return tuple(_keyable(x) for x in v)
         if isinstance(v, dict):
             return tuple(sorted((k, _keyable(val)) for k, val in v.items()))
