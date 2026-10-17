@@ -1310,6 +1310,7 @@ class _IndexWindow:
     """
 
     def __init__(self, hop, db, workers, log, table=None, only_left=False):
+        from . import indexes as _ix
         from .setaside import SetAside
         self.hop, self.db, self.workers, self.log = hop, db, workers, log
         self.table, self.only_left = table, only_left
@@ -1319,6 +1320,10 @@ class _IndexWindow:
         self.of, self.built = {}, {}
         self._lock = threading.Lock()
         self.record = SetAside(hop, db, "dropped-indexes")
+        self.lifecycle = _ix.DeferredIndexLifecycle(
+            hop, db, log=log, tables={table} if table else None,
+            max_workers=workers, engine="postgres"
+        )
 
     def __enter__(self):
         from . import indexes as _ix

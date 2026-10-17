@@ -281,12 +281,15 @@ def drop_index_sql(schema, name, table=None, engine="postgres"):
     return f"DROP INDEX IF EXISTS {name}"
 
 
-def rebuild_indexes_parallel(definitions, run, max_workers=4,
+def rebuild_indexes_parallel(definitions, run, max_workers=None,
                              engine="postgres", log=None):
     """Rebuild indexes post-load via parallel background workers."""
     if not definitions:
         return [], []
     import concurrent.futures
+    import os
+    if max_workers is None:
+        max_workers = min(len(definitions), max(1, os.cpu_count() or 4))
     items = list(definitions.items())
     rebuilt, failed = [], []
 
@@ -655,11 +658,14 @@ def topological_validate_fks(dropped, run, max_workers=4, present=None,
     return validated, failed
 
 
-def restore_foreign_keys_non_blocking(dropped, run, max_workers=4,
+def restore_foreign_keys_non_blocking(dropped, run, max_workers=None,
                                       present=None, log=None):
     """Restore foreign keys: ADD CONSTRAINT ... NOT VALID, then topological VALIDATE."""
     if not dropped:
         return [], []
+    import os
+    if max_workers is None:
+        max_workers = min(len(dropped), max(1, os.cpu_count() or 4))
     present = present or {}
     added, failed = [], []
 
@@ -841,8 +847,18 @@ class ForeignKeyWindow:
 class DeferredIndexLifecycle:
     """Unified lifecycle manager for deferred indexes and non-blocking FKs."""
 
-    def __init__(self, hop, db, log=None, tables=None, run=None,
-                 max_workers=4, engine="postgres", hold=False):
+    def __init__(self, hop, db=None, log=None, tables=None, run=None,
+                 max_workers=None, engine="postgres", hold=False):
+        if db is None:
+            db = getattr(hop, "target_db", None) or getattr(hop, "db", None) or ""
+        if max_workers is None:
+            opts = getattr(hop, "options", None) or {}
+            max_workers = (
+                opts.get("workers")
+                or getattr(hop, "workers", None)
+                or getattr(hop, "workers_most", None)
+                or 4
+            )
         self.hop, self.db, self.log, self.hold = hop, db, log, hold
         self.max_workers = max_workers
         self.engine = engine
@@ -854,6 +870,19 @@ class DeferredIndexLifecycle:
         self.fk_window = ForeignKeyWindow(
             hop, db, log=log, tables=tables, run=run,
             hold=hold, topological=True, max_workers=max_workers)
+
+    def drop_non_unique_indexes(self):
+        self.fk_window.__enter__()
+        self.ix_window.__enter__()
+        return list(self.ix_window.dropped.keys())
+
+    def rebuild_indexes(self):
+        self.ix_window._rebuild()
+        return list(self.ix_window.dropped.keys())
+
+    def restore_foreign_keys(self):
+        self.fk_window._put_back()
+        return list(self.fk_window.dropped.keys())
 
     def __enter__(self):
         self.fk_window.__enter__()

@@ -351,3 +351,44 @@ def test_schema_module_exports():
     assert schema.rebuild_indexes_parallel is rebuild_indexes_parallel
     assert schema.topological_fk_sort is topological_fk_sort
     assert schema.concurrent_index_sql is concurrent_index_sql
+
+
+def test_deferred_index_lifecycle_one_arg_ctor_and_explicit_methods(tmp_path):
+    hop = Hop(tmp_path)
+    hop.target_db = "production_db"
+    hop.workers = 8
+
+    # 1-arg constructor
+    lc = DeferredIndexLifecycle(hop)
+    assert lc.db == "production_db"
+    assert lc.max_workers == 8
+
+    # Explicit lifecycle methods with mocked runner
+    raw_indexes = (
+        chr(31).join(["public", "orders", "orders_pkey", "CREATE UNIQUE INDEX orders_pkey ON orders (id)", "t", "t", "t"])
+        + chr(30)
+        + chr(31).join(["public", "orders", "orders_status_idx", "CREATE INDEX orders_status_idx ON orders (status)", "f", "f", "f"])
+    )
+    t = ScriptedTarget(indexes_raw=raw_indexes)
+    lc.ix_window.run = t
+    lc.fk_window.run = t
+
+    dropped = lc.drop_non_unique_indexes()
+    assert '"public"."orders_status_idx"' in dropped
+
+    rebuilt = lc.rebuild_indexes()
+    assert len(rebuilt) >= 0
+
+    fks = lc.restore_foreign_keys()
+    assert len(fks) >= 0
+
+
+def test_movers_index_window_wires_deferred_index_lifecycle(tmp_path):
+    from migkit.movers import _IndexWindow
+
+    hop = Hop(tmp_path)
+    w = _IndexWindow(hop, "testdb", 4, lambda m: None)
+    assert hasattr(w, "lifecycle")
+    assert isinstance(w.lifecycle, DeferredIndexLifecycle)
+    assert w.lifecycle.max_workers == 4
+

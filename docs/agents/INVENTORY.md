@@ -20,7 +20,7 @@ None.
 | decision | 8 | 36 | 36861 | choosing: the rungs, the cost model, the joint plan, what each engine can do |
 | engines | 9 | 80 | 128671 | the contract every engine fills and each engine's own adapter |
 | integrations | 9 | 23 | 24368 | the programs, libraries and provider APIs migkit wraps, and the other tools it meets |
-| workflows | 10 | 111 | 145104 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
+| workflows | 10 | 111 | 145138 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
 | cli | 11 | 4 | 10464 | the command line and the guide that asks for two addresses |
 | web | 11 | 30 | 6451 | the web view and its API |
 | tools | - | 13 | 7195 | the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them |
@@ -413,7 +413,7 @@ None.
 | `migkit/handoff_overlap.py` | - | 519 | 0 | workflows 2 | - | 1: handoff_overlap_contract |
 | `migkit/history_contract.py` | - | 2069 | 0 | - | - | 1: history_contract_semantics |
 | `migkit/incumbent_switch.py` | - | 1641 | 0 | decision 3 | - | 1: incumbent_switch_transition_costs |
-| `migkit/indexes.py` | - | 877 | 5: engines.postgres, movers, schema, setaside, target_tuning_contract | decision 2, engines 4, execution 2, persistence 2, workflows 3 | - | 9: a_cutover_proof_on_postgres_reads_every_table, deferred_index_and_non_blocking_fk, foreign_keys_go_back_or_the_move_stops (+6) |
+| `migkit/indexes.py` | - | 906 | 5: engines.postgres, movers, schema, setaside, target_tuning_contract | decision 2, engines 4, execution 2, persistence 2, workflows 3 | - | 9: a_cutover_proof_on_postgres_reads_every_table, deferred_index_and_non_blocking_fk, foreign_keys_go_back_or_the_move_stops (+6) |
 | `migkit/information_budget.py` | - | 1248 | 0 | decision 1, persistence 1 | - | 1: information_budget_voI |
 | `migkit/jobs.py` | - | 531 | 3: capabilities, cutover, engines.mssql | configuration 2, engines 1, persistence 2, safety 1 | - | 7: clickhouse_catalogue_checks_without_a_server, oracle_jobs_run_on_one_side_at_a_time, sql_server_agent_jobs_run_on_one_side_at_a_time (+4) |
 | `migkit/keyless_proof.py` | - | 1605 | 0 | conversion 3, decision 1 | - | 1: keyless_proof_multiset_scale |
@@ -423,7 +423,7 @@ None.
 | `migkit/lob_transaction.py` | - | 522 | 0 | - | - | 1: lob_transaction_semantics |
 | `migkit/mapping_proof.py` | - | 1056 | 0 | - | - | 1: composed_mapping_proof_load_and_cdc |
 | `migkit/marks.py` | - | 784 | 12: barriers, cli, engines.cassandra, engines.dynamodb, engines.hetero (+7) | decision 7, workflows 4 | - | 11: one_way_batches_are_numbered_on_the_target, the_mark_travels_in_the_atomic_unit_on_cassandra, the_mark_travels_in_the_atomic_unit_on_dynamodb (+8) |
-| `migkit/movers.py` | - | 9620 | 32: autonomous, bulkways, capabilities, cli, cutover (+27) | configuration 15, conversion 2, decision 63, engines 64, execution 20, integrations 14, persistence 8, reporting 30, safety 1, workflows 12 | debezium, mydumper, myloader, mysqlsh, pg_dump, pg_restore, pgcopydb, redpanda | 123: a_batch_that_is_not_a_page_is_the_decisions, a_connection_is_verified_where_it_can_be, a_cross_engine_table_goes_the_way_measured_fastest (+120) |
+| `migkit/movers.py` | - | 9625 | 32: autonomous, bulkways, capabilities, cli, cutover (+27) | configuration 15, conversion 2, decision 63, engines 64, execution 20, integrations 14, persistence 8, reporting 30, safety 1, workflows 13 | debezium, mydumper, myloader, mysqlsh, pg_dump, pg_restore, pgcopydb, redpanda | 124: a_batch_that_is_not_a_page_is_the_decisions, a_connection_is_verified_where_it_can_be, a_cross_engine_table_goes_the_way_measured_fastest (+121) |
 | `migkit/online_confirmation.py` | - | 1384 | 0 | decision 1, persistence 1 | - | 1: online_confirmation_divergence |
 | `migkit/operation_experiments.py` | - | 982 | 0 | decision 1, persistence 1, safety 1 | - | 1: operation_experiments_whole_runs |
 | `migkit/physical.py` | - | 2142 | 11: backupseed, case, charsets, cli, cloudseed (+6) | configuration 5, decision 14, engines 2, execution 5, integrations 6, persistence 1, reporting 1, workflows 7 | - | 19: a_clone_goes_on_exactly_mysql, a_clone_plugin_offer_on_mysql, a_cloud_copy_seeds_the_target (+16) |
