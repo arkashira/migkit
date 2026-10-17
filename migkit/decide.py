@@ -739,7 +739,7 @@ def from_model(model):
 
 
 def _tied(a, b):
-    return abs(a - b) <= TIE * max(abs(a), abs(b))
+    return abs(a - b) <= TIE * min(abs(a), abs(b))
 
 
 def _order(entries):
