@@ -44,7 +44,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/attempts.py` - Each attempt at a unit of work, the server session that is exactly its own, and a wait the server stopped answering told apart from a slow a Classes: View, Attempt, SessionHealth, Spanning, Ledger, Monitor.
 - `migkit/audit.py` - The run's own record of what migkit did, written so a changed record shows.
 - `migkit/autonomous.py` - `migkit migrate`: two addresses, their access and a goal in; the whole workflow run to a verified outcome (backlog P0-AUTONOMOUS-MIGRATION). Classes: Question, Asked, Unit, Workflow, Plan, Outcome.
-- `migkit/autopilot.py` - (no docstring) Classes: AutopilotPhase, AutopilotStatus, PhaseResult, AutopilotResult, AutopilotOrchestrator.
+- `migkit/autopilot.py` - (no docstring) Classes: AutopilotPhase, AutopilotStatus, CareBadge, PhaseResult, AutopilotResult, AutopilotCheckpointUnit.
 - `migkit/avrostream.py` - Changes as Avro messages through a schema registry, in Debezium's envelope: `before`, `after`, `source`, `op` and `ts_ms`, the key a record  Classes: Encoder.
 - `migkit/backfill_race.py` - (no docstring) Classes: CoverageStrategy, ObligationStatus, CDCEvent, SchemaEpoch, ObservedGap, HistoricalCoverageObligation.
 - `migkit/backupseed.py` - SQL Server's own backup, restored on the target: a database's pages carried whole, and its changes followed from the version the restored co Classes: MsFacts.
