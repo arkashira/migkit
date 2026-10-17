@@ -590,7 +590,9 @@ _BY_NAME = {
                  " backfill_race lob_transaction rollback_set shadow_resync"
                  " dag_scheduler reverse autopilot retention_controller"
                  " conflict_semantics mapping_proof reverse_contract"
-                 " snapshot_watermark source_role traffic_state",
+                 " snapshot_watermark source_role traffic_state"
+                 " conversion_ledger ai_proof_loop rule_generalization"
+                 " dynamic_sql_tracer etl_bi_waves query_regression principal_migration",
     "cli": "cli guide ui estate",
 }
 #: a subpackage, whole

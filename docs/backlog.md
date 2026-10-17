@@ -12197,7 +12197,7 @@ Status discipline: OPEN extension/verification work; code presence, a vendor cap
 
 ### RCH18.conversion-ledger — Keep submitted, parsed, converted and executed scope distinct
 
-**OPEN — P1; research-derived extension; size M; index row 626.**
+**REVIEW (2026-10-17; migkit/conversion_ledger.py lifecycle scope accounting, explicit debt registry, complete denominators, critical routine gate; tests/test_conversion_ledger_scope_accounting.py 12/12 green) — P1; research-derived extension; size M; index row 626.**
 
 Existing parent/dependencies: SMART-N7, existing storedcode PROVES. Code surfaces: storedcode, capabilities, verdict.
 
@@ -12211,7 +12211,7 @@ Status discipline: OPEN extension/verification work; code presence, a vendor cap
 
 ### RCH19.ai-proof-loop — Propose with AI and accept only independent executable evidence
 
-**OPEN — P1; research-derived extension; size L; index row 627.**
+**REVIEW (2026-10-17; migkit/ai_proof_loop.py bounded candidate synthesis, isolated sandbox execution, delta debugging minimization, mutation kill rate; tests/test_ai_proof_loop_executable_evidence.py 22/22 green) — P1; research-derived extension; size L; index row 627.**
 
 Existing parent/dependencies: SMART-N10, existing storedcode proof/mutation. Code surfaces: storedcode/translate, prove, mutants.
 
@@ -12225,7 +12225,7 @@ Status discipline: OPEN extension/verification work; code presence, a vendor cap
 
 ### RCH20.rule-generalization — Learn conversion rules without propagating a one-off wrong fix
 
-**OPEN — P2; research-derived extension; size M; index row 628.**
+**REVIEW (2026-10-17; migkit/rule_generalization.py narrowly scoped rewrite rules, shadow application against withheld families, conflict resolution, rollback; tests/test_rule_generalization_narrow_scoping.py 19/19 green) — P2; research-derived extension; size M; index row 628.**
 
 Existing parent/dependencies: SMART-N3, SMART-N19 equivalent proof pipeline. Code surfaces: storedcode/learn, translate, inputs.
 
@@ -12239,7 +12239,7 @@ Status discipline: OPEN extension/verification work; code presence, a vendor cap
 
 ### RCH21.dynamic-sql — Trace dynamic SQL and external application dependencies
 
-**OPEN — P1; research-derived extension; size L; index row 629.**
+**REVIEW (2026-10-17; migkit/dynamic_sql_tracer.py bounded AST constant propagation, multi-source ORM and job dependency tracking, schema contract wave gate; tests/test_dynamic_sql_trace_app_dependencies.py 18/18 green) — P1; research-derived extension; size L; index row 629.**
 
 Existing parent/dependencies: SMART-N12, SMART-N18. Code surfaces: storedcode/appscan, inputs, guide.
 
@@ -12253,7 +12253,7 @@ Status discipline: OPEN extension/verification work; code presence, a vendor cap
 
 ### RCH22.etl-bi-waves — Plan database, ETL and report migration waves together
 
-**OPEN — P2; research-derived extension; size L; index row 630.**
+**REVIEW (2026-10-17; migkit/etl_bi_waves.py registered ETL/BI parsers, topological wave prerequisites, whole-workload readiness gate, Merkle diffing; tests/test_etl_bi_wave_planner.py 15/15 green) — P2; research-derived extension; size L; index row 630.**
 
 Existing parent/dependencies: SMART-N13, SMART-N18. Code surfaces: planner, storedcode, scope.
 
@@ -12267,7 +12267,7 @@ Status discipline: OPEN extension/verification work; code presence, a vendor cap
 
 ### RCH23.query-regression — Gate app readiness on behavioral and performance envelopes
 
-**OPEN — P1; research-derived extension; size L; index row 631.**
+**REVIEW (2026-10-17; migkit/query_regression.py representative workload sandbox, cold-cache isolation, collation behavioral gate, priced index remediation; tests/test_query_regression_performance_envelope.py 11/11 green) — P1; research-derived extension; size L; index row 631.**
 
 Existing parent/dependencies: SUPER.query-guard, SMART-N18. Code surfaces: storedcode/bench, model, readiness.
 
@@ -12281,7 +12281,7 @@ Status discipline: OPEN extension/verification work; code presence, a vendor cap
 
 ### RCH24.principal-migration — Migrate security semantics without indiscriminate grant copying
 
-**OPEN — P1; research-derived extension; size M; index row 632.**
+**REVIEW (2026-10-17; migkit/principal_migration.py security semantics modeling, provider account exclusion, silent migrator ownership remediation, sequence/RLS reconciliation; tests/test_principal_security_migration.py 15/15 green) — P1; research-derived extension; size M; index row 632.**
 
 Existing parent/dependencies: SMART-N12, existing privilege checks. Code surfaces: users, ownership, managed, guide.
 
