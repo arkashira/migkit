@@ -532,6 +532,53 @@ class DDLCompatibilityMatrix:
         )
 
 
+def dialect_syntax_rungs():
+    """Decide rungs for dialect SQL quoting and DDL generation (Row 617)."""
+    from .decide import Need, Rung
+    return (
+        Rung(
+            "ansi_quotes_dialect_syntax",
+            "ANSI SQL identifier quoting with double-quotes for Postgres and SQLite",
+            needs=(
+                Need(
+                    "ANSI quoting dialect capability",
+                    lambda f: f.get("dialect") in ("postgres", "postgresql", "sqlite", "oracle", "duckdb"),
+                    "dialect does not use ANSI SQL double-quote delimiters",
+                ),
+            ),
+            because="dialect adheres to ANSI SQL double-quote identifier quoting standard",
+        ),
+        Rung(
+            "backtick_quotes_dialect_syntax",
+            "MySQL/TiDB/MariaDB identifier quoting with backticks",
+            needs=(
+                Need(
+                    "backtick quoting dialect capability",
+                    lambda f: f.get("dialect") in ("mysql", "mariadb", "tidb", "clickhouse"),
+                    "dialect does not use MySQL backtick quoting delimiters",
+                ),
+            ),
+            because="dialect adheres to MySQL backtick identifier quoting standard",
+        ),
+        Rung(
+            "unquoted_dialect_syntax",
+            "unquoted plain SQL identifier representation fallback",
+            because="fallback plain SQL identifier formatting when quoting convention is unneeded",
+        ),
+    )
+
+
+def quote_ident_dialect(ident: str, dialect: str) -> str:
+    from . import decide
+    d = str(dialect).lower()
+    choice = decide.climb("dialect SQL quoting syntax", dialect_syntax_rungs(), {"dialect": d})
+    if choice.path == "ansi_quotes_dialect_syntax":
+        return f'"{ident}"'
+    if choice.path == "backtick_quotes_dialect_syntax":
+        return f'`{ident}`'
+    return str(ident)
+
+
 class SchemaEpochPlanner:
     def __init__(
         self,
@@ -615,66 +662,56 @@ class SchemaEpochPlanner:
     def generate_target_sql(self, op: DDLOperation, curr_state: SchemaEpochState) -> List[str]:
         target = self.target_dialect
         table = op.table
+        q_table = quote_ident_dialect(table, target)
         op_type = op.op_type.upper()
         statements: List[str] = []
 
         if op_type == "ADD_COLUMN":
             col = op.column or ""
+            q_col = quote_ident_dialect(col, target)
             raw_type = op.data_type or "TEXT"
             dtype = map_type_to_dialect(raw_type, target)
             default_part = f" DEFAULT {op.default}" if op.default is not None else ""
             null_part = " NOT NULL" if op.nullable is False else ""
-
-            if target in ("postgres", "postgresql", "sqlite"):
-                statements.append(f'ALTER TABLE "{table}" ADD COLUMN "{col}" {dtype}{default_part}{null_part}')
-            elif target in ("mysql", "mariadb"):
-                statements.append(f"ALTER TABLE `{table}` ADD COLUMN `{col}` {dtype}{default_part}{null_part}")
-            else:
-                statements.append(f"ALTER TABLE {table} ADD COLUMN {col} {dtype}{default_part}{null_part}")
+            statements.append(f"ALTER TABLE {q_table} ADD COLUMN {q_col} {dtype}{default_part}{null_part}")
 
         elif op_type == "DROP_COLUMN":
             col = op.column or ""
-            if target in ("postgres", "postgresql", "sqlite"):
-                statements.append(f'ALTER TABLE "{table}" DROP COLUMN "{col}"')
-            elif target in ("mysql", "mariadb"):
-                statements.append(f"ALTER TABLE `{table}` DROP COLUMN `{col}`")
-            else:
-                statements.append(f"ALTER TABLE {table} DROP COLUMN {col}")
+            q_col = quote_ident_dialect(col, target)
+            statements.append(f"ALTER TABLE {q_table} DROP COLUMN {q_col}")
 
         elif op_type == "RENAME_COLUMN":
             old_col = op.column or ""
             new_col = op.new_column_name or ""
-            if target in ("postgres", "postgresql", "sqlite"):
-                statements.append(f'ALTER TABLE "{table}" RENAME COLUMN "{old_col}" TO "{new_col}"')
-            elif target in ("mysql", "mariadb"):
-                statements.append(f"ALTER TABLE `{table}` RENAME COLUMN `{old_col}` TO `{new_col}`")
-            else:
-                statements.append(f"ALTER TABLE {table} RENAME COLUMN {old_col} TO {new_col}")
+            q_old = quote_ident_dialect(old_col, target)
+            q_new = quote_ident_dialect(new_col, target)
+            statements.append(f"ALTER TABLE {q_table} RENAME COLUMN {q_old} TO {q_new}")
 
         elif op_type in ("MODIFY_COLUMN", "ALTER_TYPE"):
             col = op.column or ""
+            q_col = quote_ident_dialect(col, target)
             raw_type = op.data_type or "TEXT"
             dtype = map_type_to_dialect(raw_type, target)
             if target in ("postgres", "postgresql"):
-                statements.append(f'ALTER TABLE "{table}" ALTER COLUMN "{col}" TYPE {dtype} USING "{col}"::{dtype}')
+                statements.append(f"ALTER TABLE {q_table} ALTER COLUMN {q_col} TYPE {dtype} USING {q_col}::{dtype}")
             elif target in ("mysql", "mariadb"):
-                statements.append(f"ALTER TABLE `{table}` MODIFY COLUMN `{col}` {dtype}")
+                statements.append(f"ALTER TABLE {q_table} MODIFY COLUMN {q_col} {dtype}")
             else:
-                statements.append(f"ALTER TABLE {table} MODIFY COLUMN {col} {dtype}")
+                statements.append(f"ALTER TABLE {q_table} MODIFY COLUMN {q_col} {dtype}")
 
         elif op_type == "CHANGE_PK":
             new_pks = op.primary_key_columns or []
             if target in ("postgres", "postgresql"):
-                statements.append(f'ALTER TABLE "{table}" DROP CONSTRAINT IF EXISTS "{table}_pkey"')
-                cols_quoted = ", ".join(f'"{c}"' for c in new_pks)
-                statements.append(f'ALTER TABLE "{table}" ADD PRIMARY KEY ({cols_quoted})')
+                statements.append(f'ALTER TABLE {q_table} DROP CONSTRAINT IF EXISTS "{table}_pkey"')
+                cols_quoted = ", ".join(quote_ident_dialect(c, target) for c in new_pks)
+                statements.append(f"ALTER TABLE {q_table} ADD PRIMARY KEY ({cols_quoted})")
             elif target in ("mysql", "mariadb"):
-                statements.append(f"ALTER TABLE `{table}` DROP PRIMARY KEY")
-                cols_quoted = ", ".join(f"`{c}`" for c in new_pks)
-                statements.append(f"ALTER TABLE `{table}` ADD PRIMARY KEY ({cols_quoted})")
+                statements.append(f"ALTER TABLE {q_table} DROP PRIMARY KEY")
+                cols_quoted = ", ".join(quote_ident_dialect(c, target) for c in new_pks)
+                statements.append(f"ALTER TABLE {q_table} ADD PRIMARY KEY ({cols_quoted})")
             else:
-                cols_quoted = ", ".join(new_pks)
-                statements.append(f"ALTER TABLE {table} ADD PRIMARY KEY ({cols_quoted})")
+                cols_quoted = ", ".join(quote_ident_dialect(c, target) for c in new_pks)
+                statements.append(f"ALTER TABLE {q_table} ADD PRIMARY KEY ({cols_quoted})")
 
         return statements
 
@@ -850,6 +887,15 @@ class SchemaEpochPlanner:
         self.applied_plans[plan.plan_id] = plan
         return plan
 
+    def apply_ddl_operation(
+        self,
+        op: DDLOperation,
+        fence: Optional[TransactionalFence] = None,
+        executor: Optional[Callable[[str], Any]] = None,
+    ) -> FencedEpochPlan:
+        plan = self.plan_ddl(op)
+        return self.apply_plan(plan, fence=fence, executor=executor)
+
     def decode_change(self, change: Dict[str, Any]) -> Dict[str, Any]:
         table = change.get("table", "")
         if table not in self.table_epochs:
@@ -1015,3 +1061,19 @@ class SchemaEpochPlanner:
             planner.applied_plans[pid] = FencedEpochPlan.from_dict(pdata)
 
         return planner
+
+
+__all__ = [
+    "UnrepresentableDDLError",
+    "CompatibilityType",
+    "ColumnIdentity",
+    "DDLOperation",
+    "CompatibilityVerdict",
+    "SchemaEpochState",
+    "FencedEpochPlan",
+    "ActiveSnapshotContext",
+    "DDLCompatibilityMatrix",
+    "SchemaEpochPlanner",
+    "dialect_syntax_rungs",
+    "quote_ident_dialect",
+]

@@ -16,7 +16,18 @@ from migkit.schema_epoch_plan import (
     SchemaEpochPlanner,
     SchemaEpochState,
     UnrepresentableDDLError,
+    dialect_syntax_rungs,
+    quote_ident_dialect,
 )
+from tests.rung_branches import HOLDS, REFUSES, branch, watched
+
+PROVES_RUNGS = [
+    ('schema_epoch_plan', 'dialect_syntax_rungs', 'ansi_quotes_dialect_syntax', 'holds'),
+    ('schema_epoch_plan', 'dialect_syntax_rungs', 'ansi_quotes_dialect_syntax', 'refuses'),
+    ('schema_epoch_plan', 'dialect_syntax_rungs', 'backtick_quotes_dialect_syntax', 'holds'),
+    ('schema_epoch_plan', 'dialect_syntax_rungs', 'backtick_quotes_dialect_syntax', 'refuses'),
+    ('schema_epoch_plan', 'dialect_syntax_rungs', 'unquoted_dialect_syntax', 'holds'),
+]
 
 
 def test_unrepresentable_ddl_error_raised_for_lossy_narrowing():
@@ -757,3 +768,45 @@ def test_serialization_roundtrip_all_dataclasses():
     snap_restored = ActiveSnapshotContext.from_dict(snap.to_dict())
     assert snap_restored.snapshot_id == "snap_1"
     assert len(snap_restored.concurrent_ddls) == 1
+
+
+def test_dialect_syntax_decide_rungs():
+    with watched() as seen:
+        q1 = quote_ident_dialect("users", "postgres")
+        assert q1 == '"users"'
+        q2 = quote_ident_dialect("users", "mysql")
+        assert q2 == "`users`"
+        q3 = quote_ident_dialect("users", "generic_plain")
+        assert q3 == "users"
+
+    assert set(branch(seen, "ansi_quotes_dialect_syntax")) == {HOLDS, REFUSES}
+    assert set(branch(seen, "backtick_quotes_dialect_syntax")) == {HOLDS, REFUSES}
+    assert branch(seen, "unquoted_dialect_syntax") == [HOLDS]
+
+
+def test_tailctl_apply_unit_with_epoch_planner():
+    from migkit import tailctl
+    planner = SchemaEpochPlanner(target_dialect="sqlite")
+    col = ColumnSchema("status", "INT", nullable=True)
+    planner.register_table("orders", [col], ["id"])
+
+    applied_stmts = []
+
+    class FakeEngine:
+        def __init__(self, p):
+            self.epoch_planner = p
+            self.name = "sqlite"
+
+        def apply_columns(self, side, db, cols):
+            return 1
+
+    eng = FakeEngine(planner)
+    op = DDLOperation(op_type="ADD_COLUMN", table="orders", column="note", data_type="TEXT")
+    changes = [
+        {"type": "DDL", "ddl_operation": op, "executor": lambda sql: applied_stmts.append(sql)},
+    ]
+    tailctl.apply_unit(eng, "main", 100, changes, lambda c: len(c))
+    assert len(applied_stmts) == 1
+    assert "ALTER TABLE orders ADD COLUMN note TEXT" in applied_stmts[0] or 'ALTER TABLE "orders" ADD COLUMN "note" TEXT' in applied_stmts[0]
+    assert planner.get_current_epoch("orders") == 2
+

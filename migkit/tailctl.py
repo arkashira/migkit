@@ -868,6 +868,18 @@ def apply_unit(eng, db, at, changes, apply, log=None):
                 log(f"ddl barrier {res.barrier_id}: {res.status} {res.affected_table}")
         if ddl:
             changes = [c for c in changes if c not in ddl]
+    epoch_planner = getattr(eng, "epoch_planner", None)
+    if epoch_planner is None and hasattr(eng, "hop"):
+        epoch_planner = getattr(eng.hop, "epoch_planner", None)
+    if epoch_planner is not None and hasattr(epoch_planner, "apply_ddl_operation"):
+        epoch_ddl = [c for c in changes if str(c.get("type", "")).upper() == "DDL" and (c.get("ddl_operation") or c.get("op"))]
+        for c in epoch_ddl:
+            op = c.get("ddl_operation") or c.get("op")
+            res_plan = epoch_planner.apply_ddl_operation(op, fence=c.get("fence"), executor=c.get("executor"))
+            if log:
+                log(f"epoch plan {res_plan.plan_id}: epoch {res_plan.from_epoch}->{res_plan.to_epoch} {res_plan.status}")
+        if epoch_ddl:
+            changes = [c for c in changes if c not in epoch_ddl]
     checkpointer = getattr(eng, "effect_checkpointer", None)
     if checkpointer is None and hasattr(eng, "hop"):
         checkpointer = getattr(eng.hop, "effect_checkpointer", None)

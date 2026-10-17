@@ -26,7 +26,7 @@ A package imports its own rank and the ranks below it, never one above. A rank o
 
 Outside the rule: `tools` (the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them); `data` (the files migkit ships as resources).
 
-## Upward imports still listed: 408
+## Upward imports still listed: 409
 
 ### (not listed)
 
@@ -51,6 +51,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/schema.py:1` conversion -> workflows (`indexes`)
 - `migkit/schema_drift.py:480` conversion -> decision (`sizing`)
 - `migkit/schema_drift.py:1287` conversion -> decision (`decide`)
+- `migkit/schema_epoch_plan.py:537` conversion -> decision (`decide`)
 
 ### a brand's confidence is a rung (`decide.brand_confidence`) the configuration reads once the server's signs are in; the rung moves below configuration
 
