@@ -17,7 +17,7 @@ def _fake_hop(tmp_path=None):
 def test_classify_care_distinguishes_must_care_from_dont_care():
     data_diff = {"check": "data", "scope": "shop.orders", "status": "diff", "detail": "14 rows differ"}
     c1 = classify_care(data_diff)
-    assert c1["tier"] == "action_required"
+    assert c1["tier"] == "action"
     assert c1["care_level"] == "must_care"
     assert c1["action_required"] is True
 
@@ -42,13 +42,13 @@ def test_classify_care_distinguishes_must_care_from_dont_care():
 
     schema_drift = {"check": "schema", "scope": "shop.users", "status": "warn", "detail": "missing index idx_users_email"}
     c5 = classify_care(schema_drift)
-    assert c5["tier"] == "attention"
+    assert c5["tier"] == "review"
     assert c5["care_level"] == "review"
     assert c5["action_required"] is False
 
     ok_finding = {"check": "counts", "scope": "shop.orders", "status": "ok", "detail": "1000==1000"}
     c6 = classify_care(ok_finding)
-    assert c6["tier"] == "passed"
+    assert c6["tier"] == "pass"
     assert c6["care_level"] == "no_action"
     assert c6["action_required"] is False
 
@@ -64,13 +64,13 @@ def test_triage_summary_counts_and_care_status():
     assert triage["has_action_required"] is True
     assert triage["has_attention"] is True
     assert triage["has_benign"] is True
-    assert triage["care_status"] == "action_required"
+    assert triage["care_status"] == "action"
     assert triage["counts"]["action_required"] == 1
     assert triage["counts"]["attention"] == 1
     assert triage["counts"]["benign"] == 1
     assert triage["counts"]["passed"] == 1
-    assert "Action Required" in triage["headline"]
-    assert "Safe to Ignore" in triage["headline"]
+    assert "1 action" in triage["headline"]
+    assert "1 benign" in triage["headline"]
 
 
 def test_format_console_executive_triage_dashboard():
@@ -84,11 +84,9 @@ def test_format_console_executive_triage_dashboard():
     console_out = format_console(envelope)
 
     assert "MIGRATION RESULT SUMMARY: DIFFERENT" in console_out
-    assert "OVERALL VERDICT : ACTION REQUIRED" in console_out
-    assert "TRIAGE BREAKDOWN: Action: 1 | Review: 1 | Safe to Ignore: 1 | Clean: 1" in console_out
+    assert "OVERALL: DIFFERENT (action: 1, review: 1, benign: 1, ok: 1)" in console_out
     assert "ACTIONABLE ISSUES & IMPACT:" in console_out
-    assert "SAFE TO IGNORE / BENIGN (no action needed - safe for cutover):" in console_out
-    assert "Why safe:" in console_out
+    assert "BENIGN (safe to ignore):" in console_out
 
 
 def test_cli_said_row_visual_badges(capsys):
@@ -101,7 +99,7 @@ def test_cli_said_row_visual_badges(capsys):
     cli._said_row({"check": "schema", "scope": "shop.awsdms_apply_exceptions", "status": "diff", "detail": "internal tracker"})
     out2 = capsys.readouterr().out
     assert "BENIGN" in out2
-    assert "safe to ignore" in out2
+    assert "internal tracker" in out2
 
     cli._said_row({"check": "counts", "scope": "shop.items", "status": "ok", "detail": "100 rows"})
     out3 = capsys.readouterr().out
@@ -118,7 +116,7 @@ def test_verdict_summarize_carries_operator_summary(tmp_path):
     assert env["action_required"] is True
     assert "operator_summary" in env
     assert env["operator_summary"]["counts"]["action_required"] == 1
-    assert env["findings"][0]["tier"] == "action_required"
+    assert env["findings"][0]["tier"] == "action"
     assert env["findings"][0]["care_level"] == "must_care"
 
 
@@ -130,6 +128,5 @@ def test_report_html_renders_safe_to_ignore_pill_and_reason(tmp_path):
     ]
     decided = verdict.decide(records, hop)
     html_out = report.render(hop, records, decided=decided)
-    assert "ACTION REQUIRED" in html_out
-    assert "SAFE TO IGNORE" in html_out
-    assert "Safe to ignore:" in html_out
+    assert "ACTION" in html_out
+    assert "BENIGN" in html_out

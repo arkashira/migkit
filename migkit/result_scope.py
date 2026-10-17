@@ -59,8 +59,8 @@ class PracticalProblem:
     check: str = ""
     status: str = "diff"
     severity: str = "error"
-    tier: str = "action_required"
-    tier_badge: str = "ACTION REQUIRED"
+    tier: str = "action"
+    tier_badge: str = "ACTION"
     care_level: str = "must_care"
     care_reason: str = ""
     action_required: bool = True
@@ -186,30 +186,30 @@ def classify_care(r: Dict[str, Any], hop: Any = None) -> Dict[str, Any]:
     from . import leftovers
     origin = leftovers.artifact_origin(tbl, sch) if tbl else ""
     if origin or r.get("is_replication_artifact"):
-        orig_name = origin or r.get("artifact_origin") or "Replication"
+        orig_name = origin or r.get("artifact_origin") or "replication"
         return {
             "tier": "benign",
-            "tier_badge": "SAFE TO IGNORE",
+            "tier_badge": "BENIGN",
             "care_level": "dont_care",
-            "care_reason": f"Replication service artifact ({orig_name}) - internal tracking table; safe for application.",
+            "care_reason": f"artifact ({orig_name})",
             "action_required": False,
         }
 
     if r.get("kept_by_hop") or "kept by the hop" in det:
         return {
             "tier": "benign",
-            "tier_badge": "SAFE TO IGNORE",
+            "tier_badge": "BENIGN",
             "care_level": "dont_care",
-            "care_reason": "Differences are intentional under hop mapping contract (mapping.ops preserves changes).",
+            "care_reason": "mapping.ops contract",
             "action_required": False,
         }
 
     if any(k in det for k in ("suspect in-flight", "caught up", "replication fence", "grace period", "watermark")):
         return {
             "tier": "benign",
-            "tier_badge": "SAFE TO IGNORE",
+            "tier_badge": "BENIGN",
             "care_level": "dont_care",
-            "care_reason": "Transient replication stream in-flight lag; caught up within replication fence.",
+            "care_reason": "in-flight replication lag (fence cleared)",
             "action_required": False,
         }
 
@@ -217,87 +217,87 @@ def classify_care(r: Dict[str, Any], hop: Any = None) -> Dict[str, Any]:
         if any(w in det for w in ("timeout", "work_mem", "idle", "application_name", "timezone", "client_encoding")):
             return {
                 "tier": "benign",
-                "tier_badge": "SAFE TO IGNORE",
+                "tier_badge": "BENIGN",
                 "care_level": "dont_care",
-                "care_reason": "Non-critical server configuration difference; safe for normal application operation.",
+                "care_reason": "non-critical parameter difference",
                 "action_required": False,
             }
         return {
-            "tier": "attention",
-            "tier_badge": "REVIEW NEEDED",
+            "tier": "review",
+            "tier_badge": "REVIEW",
             "care_level": "review",
-            "care_reason": "Server parameter differences may affect query behavior or memory limits.",
+            "care_reason": "parameter difference",
             "action_required": False,
         }
 
     if r.get("severity") == "note" or "more slowly" in det:
         return {
             "tier": "benign",
-            "tier_badge": "SAFE TO IGNORE",
+            "tier_badge": "BENIGN",
             "care_level": "dont_care",
-            "care_reason": "Performance advisory only; data integrity is not in question.",
+            "care_reason": "performance note",
             "action_required": False,
         }
 
     if st == "skip" or "not sampled" in det:
         return {
             "tier": "benign",
-            "tier_badge": "INFORMATIONAL",
+            "tier_badge": "BENIGN",
             "care_level": "dont_care",
-            "care_reason": "Sample check skipped for unindexed table; full verification check handles it.",
+            "care_reason": "sample skipped (no key)",
             "action_required": False,
         }
 
     if st == "error":
         return {
-            "tier": "action_required",
-            "tier_badge": "ACTION REQUIRED",
+            "tier": "action",
+            "tier_badge": "ACTION",
             "care_level": "must_care",
-            "care_reason": "Fatal query error, connection failure, or permission issue.",
+            "care_reason": "engine or connection error",
             "action_required": True,
         }
 
     if st == "diff" and (chk in ("data", "counts", "autoinc", "keys", "hash", "rows") or cat in ("data", "counts", "autoinc")):
         return {
-            "tier": "action_required",
-            "tier_badge": "ACTION REQUIRED",
+            "tier": "action",
+            "tier_badge": "ACTION",
             "care_level": "must_care",
-            "care_reason": "Data or row count divergence detected. Must repair before cutover.",
+            "care_reason": "data divergence",
             "action_required": True,
         }
 
     if st in ("diff", "warn") and (chk == "schema" or cat == "schema"):
         return {
-            "tier": "attention",
-            "tier_badge": "REVIEW NEEDED",
+            "tier": "review",
+            "tier_badge": "REVIEW",
             "care_level": "review",
-            "care_reason": "Schema drift, missing indexes, or constraint mismatch. Review DDL before cutover.",
+            "care_reason": "schema drift",
             "action_required": False,
         }
 
     if st == "warn":
         return {
-            "tier": "attention",
-            "tier_badge": "REVIEW NEEDED",
+            "tier": "review",
+            "tier_badge": "REVIEW",
             "care_level": "review",
-            "care_reason": "Inspection advised before final cutover.",
+            "care_reason": "warning",
             "action_required": False,
         }
 
     if st == "diff":
         return {
-            "tier": "action_required",
-            "tier_badge": "ACTION REQUIRED",
+            "tier": "action",
+            "tier_badge": "ACTION",
             "care_level": "must_care",
-            "care_reason": "Difference found between source and target.",
+            "care_reason": "diff",
             "action_required": True,
         }
 
     return {
-        "tier": "passed",
-        "tier_badge": "PASSED",
+        "tier": "pass",
+        "tier_badge": "PASS",
         "care_level": "no_action",
-        "care_reason": "Verified clean.",
+        "care_reason": "",
         "action_required": False,
     }
 
@@ -324,9 +324,9 @@ def triage_summary(records: List[Dict[str, Any]], hop: Any = None) -> Dict[str, 
             "next_action": r.get("fix_hint", "") or _suggest_next_action(
                 r.get("check", ""), r.get("status", ""), r.get("fix_hint", ""), tier == "benign"),
         }
-        if tier == "action_required":
+        if tier in ("action", "action_required"):
             action_items.append(item)
-        elif tier == "attention":
+        elif tier in ("review", "attention"):
             review_items.append(item)
         elif tier == "benign":
             benign_items.append(item)
@@ -337,32 +337,10 @@ def triage_summary(records: List[Dict[str, Any]], hop: Any = None) -> Dict[str, 
     has_review = bool(review_items)
     has_benign = bool(benign_items)
 
-    if has_action:
-        care_status = "action_required"
-        status_badge = "ACTION REQUIRED"
-        care_message = f"{len(action_items)} critical issue(s) must be fixed before cutover."
-    elif has_review:
-        care_status = "review_needed"
-        status_badge = "REVIEW NEEDED"
-        care_message = f"{len(review_items)} item(s) to review; data is intact."
-    elif has_benign and not (has_action or has_review):
-        care_status = "benign_only"
-        status_badge = "ALL GREEN (SAFE TO IGNORE)"
-        care_message = "All findings are benign or replication artifacts. Safe for cutover."
-    else:
-        care_status = "all_green"
-        status_badge = "ALL GREEN"
-        care_message = "100% verified clean. Zero action required."
+    care_status = "action" if has_action else ("review" if has_review else ("benign" if has_benign else "pass"))
+    status_badge = "ACTION" if has_action else ("REVIEW" if has_review else ("BENIGN" if has_benign else "PASS"))
 
-    headline_parts = []
-    if action_items:
-        headline_parts.append(f"{len(action_items)} Action Required")
-    if review_items:
-        headline_parts.append(f"{len(review_items)} Review Needed")
-    if benign_items:
-        headline_parts.append(f"{len(benign_items)} Safe to Ignore (Benign)")
-    if not headline_parts:
-        headline_parts.append("All Checks Clean")
+    headline = f"{len(action_items)} action, {len(review_items)} review, {len(benign_items)} benign, {passed_count} ok"
 
     return {
         "has_action_required": has_action,
@@ -370,8 +348,8 @@ def triage_summary(records: List[Dict[str, Any]], hop: Any = None) -> Dict[str, 
         "has_benign": has_benign,
         "status_badge": status_badge,
         "care_status": care_status,
-        "care_message": care_message,
-        "headline": ", ".join(headline_parts),
+        "care_message": f"{len(action_items)} action required" if has_action else "clean",
+        "headline": headline,
         "counts": {
             "action_required": len(action_items),
             "attention": len(review_items),
@@ -591,20 +569,12 @@ def format_console(envelope: GroupedResultEnvelope) -> str:
                  f"({envelope.total_passed}/{envelope.total_checks} checks passed, {envelope.total_issues} issues)")
     lines.append("=" * 80)
 
-    action_count = sum(1 for db in envelope.databases.values() for p in db.practical_problems if p.tier == "action_required")
-    review_count = sum(1 for db in envelope.databases.values() for p in db.practical_problems if p.tier == "attention")
+    action_count = sum(1 for db in envelope.databases.values() for p in db.practical_problems if p.tier in ("action", "action_required"))
+    review_count = sum(1 for db in envelope.databases.values() for p in db.practical_problems if p.tier in ("review", "attention"))
     benign_count = sum(1 for db in envelope.databases.values() for p in db.practical_problems if p.tier == "benign")
 
-    if action_count > 0:
-        lines.append(f"OVERALL VERDICT : ACTION REQUIRED ({action_count} critical issue{'s' if action_count > 1 else ''} must be fixed before cutover)")
-    elif review_count > 0:
-        lines.append(f"OVERALL VERDICT : REVIEW NEEDED ({review_count} item{'s' if review_count > 1 else ''} to review; data is intact)")
-    elif benign_count > 0:
-        lines.append(f"OVERALL VERDICT : ALL GREEN (All {benign_count} finding{'s' if benign_count > 1 else ''} are benign / safe to ignore)")
-    else:
-        lines.append("OVERALL VERDICT : ALL GREEN (100% schema & data integrity verified)")
-
-    lines.append(f"TRIAGE BREAKDOWN: Action: {action_count} | Review: {review_count} | Safe to Ignore: {benign_count} | Clean: {envelope.total_passed}")
+    lines.append(f"OVERALL: {envelope.status.upper()} "
+                 f"(action: {action_count}, review: {review_count}, benign: {benign_count}, ok: {envelope.total_passed})")
     lines.append("-" * 80)
 
     lines.append(f"{'DATABASE':<20} {'CHECKS':<12} {'STATUS':<14} {'ISSUES':<8} {'PRACTICAL SUMMARY'}")
@@ -616,13 +586,13 @@ def format_console(envelope: GroupedResultEnvelope) -> str:
             first_prob = summary.practical_problems[0]
             desc = first_prob.problem
             if first_prob.is_replication_artifact:
-                desc = f"[{first_prob.artifact_origin} artifact] {desc}"
+                desc = f"[{first_prob.artifact_origin}] {desc}"
             elif first_prob.tier == "benign":
-                desc = f"[SAFE TO IGNORE] {desc}"
+                desc = f"[benign] {desc}"
         elif summary.remaining_work:
-            desc = f"Remaining checks: {', '.join(summary.remaining_work)}"
+            desc = f"Remaining: {', '.join(summary.remaining_work)}"
         else:
-            desc = "All checks verified clean"
+            desc = "clean"
         if len(desc) > 35:
             desc = desc[:32] + "..."
         lines.append(f"{db_name:<20} {checks_str:<12} {summary.status.upper():<14} {summary.issues_count:<8} {desc}")
@@ -639,7 +609,7 @@ def format_console(envelope: GroupedResultEnvelope) -> str:
             summary = envelope.databases[db_name]
             lines.append(f"Database: {db_name} [{summary.status.upper()}]")
             for p in summary.practical_problems:
-                badge = f" ({p.artifact_origin} artifact)" if p.is_replication_artifact else ""
+                badge = f" ({p.artifact_origin})" if p.is_replication_artifact else ""
                 lines.append(f"  * [{p.severity.upper()}] {p.object_name}{badge}: {p.problem}")
                 if p.impact:
                     lines.append(f"    Impact: {p.impact}")
@@ -655,11 +625,10 @@ def format_console(envelope: GroupedResultEnvelope) -> str:
     if benign_probs:
         lines.append("")
         lines.append("-" * 80)
-        lines.append("SAFE TO IGNORE / BENIGN (no action needed - safe for cutover):")
+        lines.append("BENIGN (safe to ignore):")
         for db_name, p in benign_probs:
-            lines.append(f"  * [SAFE TO IGNORE] {db_name} - {p.object_name}: {p.problem}")
-            if p.care_reason:
-                lines.append(f"    Why safe: {p.care_reason}")
+            reason = f" ({p.care_reason})" if p.care_reason else ""
+            lines.append(f"  * {db_name}.{p.object_name}: {p.problem}{reason}")
 
     if envelope.unmatched_dimensions:
         lines.append("")

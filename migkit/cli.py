@@ -2227,27 +2227,27 @@ def _held_since(then, now):
 def _said_row(r):
     from .result_scope import classify_care
     care = classify_care(r)
-    st = str(r.get("status", "")).upper()
+    st = str(r.get("status", ""))
     chk = str(r.get("check", ""))
     scope = str(r.get("scope", ""))
     det = str(r.get("detail", ""))
 
-    tier = care.get("tier", "passed")
-    if tier == "action_required":
-        badge = "[bold red]✖ ACTION[/bold red]"
-        st_styled = f"[bold red]{_esc(st)}[/bold red]"
-    elif tier == "attention":
-        badge = "[bold yellow]▲ REVIEW[/bold yellow]"
-        st_styled = f"[bold yellow]{_esc(st)}[/bold yellow]"
+    tier = care.get("tier", "pass")
+    if tier in ("action", "action_required"):
+        tag = "[bold red]ACTION[/bold red]"
+        st_color = "bold red"
+    elif tier in ("review", "attention"):
+        tag = "[yellow]REVIEW[/yellow]"
+        st_color = "yellow"
     elif tier == "benign":
-        badge = "[dim cyan]☕ BENIGN[/dim cyan]"
-        st_styled = f"[dim cyan]{_esc(st)}[/dim cyan]"
+        tag = "[dim]BENIGN[/dim]"
+        st_color = "dim"
     else:
-        badge = "[green]✔ OK    [/green]"
-        st_styled = f"[green]{_esc(st)}[/green]"
+        tag = "[green]OK    [/green]"
+        st_color = "green"
 
-    ignorable_tag = " [dim](safe to ignore)[/dim]" if care.get("care_level") == "dont_care" and tier == "benign" else ""
-    console.print(f"{badge} {_esc(chk):8s} {_esc(scope)}: {st_styled} {_esc(det)}{ignorable_tag}")
+    st_str = f"[{st_color}]{_esc(st.upper())}[/{st_color}]"
+    console.print(f"{tag} {_esc(chk):8s} {_esc(scope)}: {st_str} {_esc(det)}")
 
 
 def run_checks(hop, eng, dbs, checks, table="", consistent=False,

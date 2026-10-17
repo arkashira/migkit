@@ -355,10 +355,12 @@ def render(hop, results, generated=None, decided=None, taken=None):
     from .result_scope import classify_care
     for r in findings:
         care = classify_care(r, hop)
-        tier = care.get("tier", "action_required")
-        tier_badge = care.get("tier_badge", "ACTION REQUIRED")
+        tier = care.get("tier", "action")
+        tier_badge = care.get("tier_badge", "ACTION")
         badge_style = {
+            "action": "background:#fdeeee;color:#d03b3b;border:1px solid #d03b3b;",
             "action_required": "background:#fdeeee;color:#d03b3b;border:1px solid #d03b3b;",
+            "review": "background:#fff8e6;color:#e07b00;border:1px solid #fab219;",
             "attention": "background:#fff8e6;color:#e07b00;border:1px solid #fab219;",
             "benign": "background:#e8f4fd;color:#0b72b9;border:1px solid #a4d2f6;",
         }.get(tier, "background:#f1f0ec;color:#52514e;")
@@ -371,8 +373,8 @@ def render(hop, results, generated=None, decided=None, taken=None):
         origin = r.get("artifact_origin")
         origin_badge = (f' <span class="fix" style="margin:0;padding:2px 6px;font-size:11px;">'
                         f'{html.escape(origin)} artifact</span>') if origin else ""
-        why_safe_html = (f'<div style="font-size:12px;color:#0b72b9;margin-top:6px;">'
-                         f'<strong>Safe to ignore:</strong> {html.escape(care["care_reason"])}</div>'
+        why_safe_html = (f'<div style="font-size:12px;color:#52514e;margin-top:4px;">'
+                         f'{html.escape(care["care_reason"])}</div>'
                          if tier == "benign" and care.get("care_reason") else "")
         cards.append(
             f'<div class="finding {sev}"><div class="head">'
