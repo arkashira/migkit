@@ -14,14 +14,14 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 | scope | 2 | 3 | 1626 | which objects and rows a hop carries |
 | persistence | 3 | 15 | 6880 | state that outlives a process: checkpoints, the audit record, the run's own files, the undo |
 | safety | 4 | 11 | 11423 | who may write, what must not leak, what keeps a mover from writing twice |
-| execution | 5 | 12 | 7681 | the running of work: processes, ranges, retries, pacing, stalls, sizing of what runs at once |
+| execution | 5 | 12 | 7694 | the running of work: processes, ranges, retries, pacing, stalls, sizing of what runs at once |
 | conversion | 6 | 62 | 42660 | a value or an object as another engine takes it: canonical text, transforms, types, stored code |
 | reporting | 7 | 11 | 8378 | what the operator reads: the verdict, the result shape, the log, the metrics, the notices |
 | decision | 8 | 32 | 33795 | choosing: the rungs, the cost model, the joint plan, what each engine can do |
 | engines | 9 | 79 | 127866 | the contract every engine fills and each engine's own adapter |
 | integrations | 9 | 23 | 24368 | the programs, libraries and provider APIs migkit wraps, and the other tools it meets |
 | workflows | 10 | 42 | 53230 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
-| cli | 11 | 4 | 10394 | the command line and the guide that asks for two addresses |
+| cli | 11 | 4 | 10402 | the command line and the guide that asks for two addresses |
 | web | 11 | 30 | 6451 | the web view and its API |
 | tools | - | 12 | 7099 | the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them |
 | data | - | 5 | 10810 | the files migkit ships as resources |
@@ -99,7 +99,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 | `migkit/stall.py` | - | 99 | 8: engines.my_pass, engines.mysql, engines.pg_pass, engines.postgres, legs (+3) | configuration 1 | - | 2: one_runner_for_every_program, the_wrapped_programs_run_one_way |
 | `migkit/throttle.py` | - | 305 | 10: cli, engines.generic, engines.hetero, engines.kafka, engines.mongodb (+5) | decision 2 | - | 8: a_native_replica_is_proved_two_ways, calibrated_eta, generic_reladiff (+5) |
 | `migkit/tunnel.py` | - | 1203 | 7: autopilot, engines, engines.postgres, legs, model (+2) | decision 1, safety 1 | - | 5: a_server_behind_a_bastion_is_reached, built_in_auto_bastion_tunnels, the_cloud_native_services_as_sides (+2) |
-| `migkit/util.py` | - | 1444 | 47: attempts, cli, config, cutover, digests (+42) | configuration 1, decision 6, engines 2, execution 1, persistence 5, reporting 1, safety 2 | reladiff | 35: a_failure_is_told_by_what_it_did, a_lost_answer_closes_only_its_session, a_mysql_server_is_asked_for_its_certificate (+32) |
+| `migkit/util.py` | - | 1457 | 47: attempts, cli, config, cutover, digests (+42) | configuration 1, decision 6, engines 2, execution 1, persistence 5, reporting 1, safety 2 | reladiff | 36: a_failure_is_told_by_what_it_did, a_lost_answer_closes_only_its_session, a_mysql_server_is_asked_for_its_certificate (+33) |
 
 ## conversion (62 files)
 
@@ -384,7 +384,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 
 | file | owner | lines | imported by | reaches | wraps | tests |
 |---|---|---|---|---|---|---|
-| `migkit/cli.py` | - | 7700 | 10: engines.base, engines.oracle_pump, estate, ha, integrations (+5) | cli 8, configuration 28, conversion 5, decision 83, engines 23, execution 31, integrations 4, persistence 36, reporting 52, safety 27, scope 1, web 1, workflows 98 | - | 243: conftest.py, cosmos_fake.py, cutover_harness.py (+240) |
+| `migkit/cli.py` | - | 7708 | 10: engines.base, engines.oracle_pump, estate, ha, integrations (+5) | cli 8, configuration 28, conversion 5, decision 83, engines 23, execution 31, integrations 4, persistence 36, reporting 52, safety 27, scope 1, web 1, workflows 98 | - | 243: conftest.py, cosmos_fake.py, cutover_harness.py (+240) |
 | `migkit/estate.py` | - | 365 | 1: cli | cli 1, configuration 3, decision 4, engines 1, integrations 1, reporting 2 | - | 1: the_estate_is_discovered_sized_and_priced |
 | `migkit/guide.py` | - | 905 | 5: cli, init, managed, tools.gen_docs, web.newhop | configuration 19, conversion 1, decision 8, engines 1, integrations 2, persistence 1, reporting 4 | - | 11: drain_to_position_and_the_approval_gate, every_command_ends_in_its_own_words, every_goal_and_mode_is_explained (+8) |
 | `migkit/ui.py` | - | 1424 | 4: cli, tools.gen_docs, web.app, web.views | configuration 7, decision 2, execution 1, persistence 5, reporting 4, web 2, workflows 6 | - | 14: a_tail_ends_its_batches_at_commits_and_says_when, alerts_and_notifications, every_resource_in_one_model (+11) |

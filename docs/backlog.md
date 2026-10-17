@@ -13016,7 +13016,7 @@ Acceptance test: Verify a heterogeneous table containing mixed 100-byte rows and
 
 ### FIELD-OPS04.byte-weighted-instant-eta — Zero-warmup instant cold-start ETA via byte-weighted EWMA and P90 confidence
 
-**OPEN — P1; ease of use; size M; index row 680.**
+**DONE (2026-10-17; effective warmup scaling and instant cold-start ETA; tests/test_instant_cold_start_eta.py) — P1; ease of use; size M; index row 680.**
 
 Parent/dependencies and code: `migkit/util.py`, `migkit/cli.py`.
 

@@ -2491,17 +2491,25 @@ def _checks_eta(hop, eng, dbs, local_map, timings, finished_at, futs,
     kept = {u.name: u.ended for u in history.finished(label)}
     units = []
     for d in dbs:
+        db_rows = None
+        if local_map and d in local_map:
+            try:
+                db_rows = float(len(local_map[d]))
+            except Exception:
+                pass
         if d in finished_at:
             u = Unit(d, "check", seconds=sum(timings.get(d, {}).values())
-                     or None, state="done", ended=finished_at[d])
+                     or None, rows=db_rows, done_rows=db_rows or 0.0,
+                     state="done", ended=finished_at[d])
             if kept.get(d) != finished_at[d]:
                 history.done(label, u)
         else:
-            u = Unit(d, "check", state="running" if d in running
-                     else "pending")
+            u = Unit(d, "check", rows=db_rows,
+                     state="running" if d in running else "pending")
         units.append(u)
     return eng.forecast(kind, scope, units=units, history=history,
-                        workers=max(1, int(workers or 1)), attempts=True)
+                        workers=max(1, int(workers or 1)), attempts=True,
+                        instant=True)
 
 
 def _collided(hop, eng, dbs):

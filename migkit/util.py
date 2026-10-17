@@ -669,6 +669,12 @@ def _estimate_rungs():
                          " units measured here so far"),),
              because="the units this run finished last measure the servers"
                      " and the link as they are now"),
+        Rung("eta.initial", "the first measured units of this run",
+             needs=(Need("at least one finished unit measured",
+                         lambda f: f.get("instant", False) and f["measured"] >= 1,
+                         why="instant cold-start disabled or no units measured yet"),),
+             because="an initial cold-start estimate from the first unit's throughput,"
+                     " narrowing as more units land"),
         Rung("eta.kept", "the rate an earlier run of this hop kept",
              needs=(Need("fewer finished units here than the warm-up",
                          lambda f: f["measured"] < f["warmup"],
@@ -685,7 +691,7 @@ def _estimate_rungs():
 
 def forecast(units, kind="move", scope="", workers=None, health=(),
              now=None, kept_rate=None, undiscovered=False, history=None,
-             warmup=WARMUP_UNITS):
+             warmup=WARMUP_UNITS, instant=False):
     """When the remaining work of one task ends, from the work itself.
 
     `units` are the ledger's units of the task, finished and not; what is
@@ -729,7 +735,14 @@ def forecast(units, kind="move", scope="", workers=None, health=(),
     byte_rates = [u.bytes / u.seconds for u in window if u.bytes]
     durations = [u.seconds for u in window]
     evidence = []
-    facts = Facts({"measured": len(window), "warmup": int(warmup)},
+    target_warmup = int(warmup)
+    total_units = len(units)
+    if total_units > 0 and total_units < target_warmup:
+        effective_warmup = 1
+    else:
+        effective_warmup = target_warmup
+    facts = Facts({"measured": len(window), "warmup": effective_warmup,
+                   "instant": bool(instant)},
                   kept_rate=kept_rate if callable(kept_rate)
                   else (lambda: kept_rate))
     choice = climb(f"when {scope} ends", _estimate_rungs(), facts=facts)
@@ -758,9 +771,9 @@ def forecast(units, kind="move", scope="", workers=None, health=(),
         evidence.append(f"{len(left)} units left, {len(unsized)} of them"
                         " not yet measured")
         return made(None, None, None, 0.0,
-                    f"not enough evidence yet: {len(window)} of {warmup}"
+                    f"not enough evidence yet: {len(window)} of {effective_warmup}"
                     " units measured", "insufficient",
-                    f"wait for {int(warmup) - len(window)} more units to"
+                    f"wait for {int(effective_warmup) - len(window)} more units to"
                     " finish; the time is said from them")
     if choice.path == "eta.kept":
         row_rates = [float(facts["kept_rate"])]
@@ -810,7 +823,7 @@ def forecast(units, kind="move", scope="", workers=None, health=(),
                     f" {human_secs(active)} of work, the longest chain"
                     f" {human_secs(critical)}")
     conf = min(1.0, len(window) / 6.0) if choice.path == "eta.window" \
-        else 0.25
+        else (0.45 if choice.path == "eta.initial" else 0.25)
     if len(row_rates) >= 2:
         mid = _quantile(row_rates, 0.5)
         spread = _quantile(row_rates, 0.9) - _quantile(row_rates, 0.1)
