@@ -7644,3 +7644,51 @@ def monitor_checks(facts):
     if got.path == "fit":
         return fitted, got
     return [], got
+
+
+def retention_action(facts):
+    """(action_name, `Choice`) how the retention controller responds to WAL
+    and spool accumulation (backlog RCH16, row 624):
+    "stop_and_reseed" - stop truthfully from a valid durable checkpoint
+    before irreversible log loss occurs;
+    "expand_capacity" - allocate authorized extra spool capacity;
+    "throttle_safe_stages" - backpressure safe background stages to preserve
+    disk and WAL headroom for CDC;
+    "speed_copy" - proactively increase copy/applier throughput;
+    else "steady" - current pace maintains safe headroom.
+    `facts`: {"stop_required": bool, "expansion_available": int,
+             "throttle_safe": bool, "can_speed": bool, "drain_needed": bool,
+             "free_disk": int, "headroom": int, "time_to_breach": float}.
+    """
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    got = climb("how retention and spool accumulation is controlled", (
+        Rung("stop_and_reseed", "stop truthfully from a valid checkpoint"
+             " before irreversible log loss", because="available spool"
+             " or disk headroom is exhausted or source retention expiry is"
+             " imminent; stop truthfully before log loss", needs=(
+                 Need("stop required before irreversible loss",
+                      lambda x: bool(x.get("stop_required")),
+                      "headroom and retention windows remain within safe limits or proactive controls apply"),)),
+        Rung("expand_capacity", "allocate authorized extra spool capacity",
+             because="spool growth outpaces consumption and authorized expansion"
+                     " headroom is available", needs=(
+                 Need("authorized capacity expansion available",
+                      lambda x: int(x.get("expansion_available") or 0) > 0 and bool(x.get("drain_needed")),
+                      "no authorized capacity expansion is available or needed"),)),
+        Rung("throttle_safe_stages", "throttle safe background stages",
+             because="throttling background load reduces disk pressure and preserves"
+                     " spool budget for replication", needs=(
+                 Need("safe stages eligible for throttling",
+                      lambda x: bool(x.get("throttle_safe")) and bool(x.get("drain_needed")),
+                      "no safe background stages are running or eligible to throttle"),)),
+        Rung("speed_copy", "proactively increase copy pace",
+             because="target applier throughput can be increased to drain spool backlog",
+             needs=(
+                 Need("target throughput can be accelerated",
+                      lambda x: bool(x.get("can_speed")) and bool(x.get("drain_needed")),
+                      "target cannot accept faster copy rate or no drain is needed"),)),
+        Rung("steady", "maintain steady pace with safe spool and disk headroom",
+             because="consumption rate matches or exceeds arrival rate and"
+                     " storage headroom is safe")), f)
+    return got.path, got
+

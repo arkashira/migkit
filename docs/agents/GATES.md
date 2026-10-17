@@ -16,3 +16,10 @@ re-dispatches it with the finding and the row comes back here when it passes.
 | 673 | 2026-10-17 | PASS | critic-reviewer | master | 17/17 tests pass; adaptive bounds envelope validator; pure unix |
 | 675 | 2026-10-17 | PASS | critic-reviewer | master | 25/25 tests pass; dynamic lineage evidence auditor; pure unix |
 | 676 | 2026-10-17 | PASS | critic-reviewer | master | 12/12 tests pass; demand benchmark harness; pure unix |
+| 619 | 2026-10-17 | PASS | critic-reviewer | master | 19/19 tests pass; snapshot watermark handoff mechanisms; pure unix |
+| 620 | 2026-10-17 | PASS | critic-reviewer | master | 22/22 tests pass; preflight reversibility failback contract; pure unix |
+| 621 | 2026-10-17 | PASS | critic-reviewer | master | 17/17 tests pass; cutover client db traffic state machine; pure unix |
+| 622 | 2026-10-17 | PASS | critic-reviewer | master | 23/23 tests pass; conflict rules data semantics; pure unix |
+| 623 | 2026-10-17 | PASS | critic-reviewer | master | 24/24 tests pass; replica snapshot valid source role; pure unix |
+| 624 | 2026-10-17 | PASS | critic-reviewer | master | 11/11 tests pass; wal spool retention controller; pure unix |
+| 625 | 2026-10-17 | PASS | critic-reviewer | master | 13/13 tests pass; composed mapping proof load and cdc; pure unix |

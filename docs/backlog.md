@@ -12099,7 +12099,7 @@ Status: DONE (2026-10-17; tests/test_shadow_resnapshot_atomic_swap.py 19/19 gree
 
 ### RCH11.snapshot-watermark — Choose consistent snapshot-to-stream handoff mechanisms
 
-**OPEN — P1; research-derived extension; size L; index row 619.**
+**DONE (2026-10-17; migkit/snapshot_watermark.py shared snapshot, range watermark and engine-native handoffs, WAL pricing, read-only source intent, missing interval detection; proved by tests/test_snapshot_watermark_stream_handoff.py 19/19 green) — P1; research-derived extension; size L; index row 619.**
 
 Existing parent/dependencies: SMART-N16, existing shared snapshot. Code surfaces: planner, movers, snapshot, tailtables.
 
@@ -12113,7 +12113,7 @@ Status discipline: OPEN extension/verification work; code presence, a vendor cap
 
 ### RCH12.reverse-contract — Preflight reversibility before claiming failback
 
-**OPEN — P1; research-derived extension; size L; index row 620.**
+**DONE (2026-10-17; migkit/reverse_contract.py reverse capability contract for types, mappings, keys, DDL, commit ordering and zero-loss gate; proved by tests/test_preflight_reversibility_failback_contract.py 22/22 green) — P1; research-derived extension; size L; index row 620.**
 
 Existing parent/dependencies: AUTO.reverse-failback, SMART-N14. Code surfaces: reverse, cutover, transforms.
 
@@ -12127,7 +12127,7 @@ Status discipline: OPEN extension/verification work; code presence, a vendor cap
 
 ### RCH13.traffic-state — Make cutover a durable client-and-database state machine
 
-**OPEN — P1; research-derived extension; size M; index row 621.**
+**DONE (2026-10-17; migkit/traffic_state.py durable client-and-database cutover state machine, DNS and session observation, active writer reconciliation; proved by tests/test_cutover_client_db_traffic_state.py 17/17 green) — P1; research-derived extension; size M; index row 621.**
 
 Existing parent/dependencies: AUTO.proxy-shift, SMART-N17. Code surfaces: proxy, cutover, session.
 
@@ -12141,7 +12141,7 @@ Status discipline: OPEN extension/verification work; code presence, a vendor cap
 
 ### RCH14.conflict-semantics — Choose conflict rules by data semantics and evidence
 
-**OPEN — P1; research-derived extension; size L; index row 622.**
+**DONE (2026-10-17; migkit/conflict_semantics.py origin identity, version vectors, tombstone horizons, CRDT commutative merge algebra and conflict audit; proved by tests/test_conflict_rules_data_semantics.py 23/23 green) — P1; research-derived extension; size L; index row 622.**
 
 Existing parent/dependencies: SMART-N14, existing two-way. Code surfaces: twoway, canon, guarantees.
 
@@ -12155,7 +12155,7 @@ Status discipline: OPEN extension/verification work; code presence, a vendor cap
 
 ### RCH15.source-role — Use replicas only when their snapshots and positions are valid
 
-**OPEN — P1; research-derived extension; size M; index row 623.**
+**DONE (2026-10-17; migkit/source_role.py primary/replica role discovery, timeline lineage, portable positions, workload routing and dynamic invalidation; proved by tests/test_replica_snapshot_valid_source_role.py 24/24 green) — P1; research-derived extension; size M; index row 623.**
 
 Existing parent/dependencies: SMART-N2, SMART-N9. Code surfaces: engines, model, scenarios.
 
@@ -12169,7 +12169,7 @@ Status discipline: OPEN extension/verification work; code presence, a vendor cap
 
 ### RCH16.retention-controller — Prevent unbounded WAL and spool risk proactively
 
-**OPEN — P1; research-derived extension; size M; index row 624.**
+**DONE (2026-10-17; migkit/retention_controller.py proactive WAL and spool growth forecaster with decide.retention_action rungs, O(1) typed durable checkpoint, truthful stop before irreversible log loss without acknowledging unretained source changes, and .run.lock mutual exclusion; proved by tests/test_wal_spool_retention_controller.py) — P1; research-derived extension; size M; index row 624.**
 
 Existing parent/dependencies: SUPER.store-forward, SMART-N19. Code surfaces: model, tailtables, sizing, leftovers.
 
@@ -12183,7 +12183,7 @@ Status discipline: OPEN extension/verification work; code presence, a vendor cap
 
 ### RCH17.mapping-proof — Verify composed mappings in both load and CDC
 
-**OPEN — P1; research-derived extension; size M; index row 625.**
+**DONE (2026-10-17; migkit/mapping_proof.py versioned dataflow coverage lineage, value-for-value mapped proof, explicit lossiness classification and CDC mutations; proved by tests/test_composed_mapping_proof_load_and_cdc.py 13/13 green) — P1; research-derived extension; size M; index row 625.**
 
 Existing parent/dependencies: SMART-N14, existing transformed verification. Code surfaces: transforms, canon, engines/hetero.
 

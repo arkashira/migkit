@@ -26,7 +26,7 @@ A package imports its own rank and the ranks below it, never one above. A rank o
 
 Outside the rule: `tools` (the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them); `data` (the files migkit ships as resources).
 
-## Upward imports still listed: 437
+## Upward imports still listed: 444
 
 ### (not listed)
 
@@ -34,6 +34,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/__init__.py:3` configuration -> decision (`adaptive_bounds`)
 - `migkit/__init__.py:3` configuration -> workflows (`backfill_race`)
 - `migkit/__init__.py:3` configuration -> execution (`cancel_recovery`)
+- `migkit/__init__.py:3` configuration -> workflows (`conflict_semantics`)
 - `migkit/__init__.py:3` configuration -> persistence (`control_upgrade`)
 - `migkit/__init__.py:3` configuration -> decision (`cost_envelope`)
 - `migkit/__init__.py:3` configuration -> execution (`decomp_budget`)
@@ -45,6 +46,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/__init__.py:3` configuration -> conversion (`lineage_evidence`)
 - `migkit/__init__.py:3` configuration -> workflows (`lob_transaction`)
 - `migkit/__init__.py:3` configuration -> safety (`lock_capability`)
+- `migkit/__init__.py:3` configuration -> workflows (`mapping_proof`)
 - `migkit/__init__.py:3` configuration -> conversion (`merkle`)
 - `migkit/__init__.py:3` configuration -> decision (`offset_diag`)
 - `migkit/__init__.py:3` configuration -> scope (`partial_access`)
@@ -55,6 +57,8 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/__init__.py:3` configuration -> reporting (`query_guard`)
 - `migkit/__init__.py:3` configuration -> engines (`quiet_source`)
 - `migkit/__init__.py:3` configuration -> scope (`resume_scope`)
+- `migkit/__init__.py:3` configuration -> workflows (`retention_controller`)
+- `migkit/__init__.py:3` configuration -> workflows (`reverse_contract`)
 - `migkit/__init__.py:3` configuration -> workflows (`ring_buffer`)
 - `migkit/__init__.py:3` configuration -> workflows (`rollback`)
 - `migkit/__init__.py:3` configuration -> workflows (`rollback_set`)
@@ -62,7 +66,10 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/__init__.py:3` configuration -> conversion (`schema_epoch_plan`)
 - `migkit/__init__.py:3` configuration -> workflows (`shadow_resync`)
 - `migkit/__init__.py:3` configuration -> persistence (`snapshot_state`)
+- `migkit/__init__.py:3` configuration -> workflows (`snapshot_watermark`)
+- `migkit/__init__.py:3` configuration -> workflows (`source_role`)
 - `migkit/__init__.py:3` configuration -> reporting (`support_reproducer`)
+- `migkit/__init__.py:3` configuration -> workflows (`traffic_state`)
 - `migkit/checkpoint.py:33` persistence -> decision (`sizing`)
 - `migkit/config.py:446` configuration -> execution (`keepalive`)
 - `migkit/engines/mysql.py:11567` engines -> workflows (`ratchet`)

@@ -588,7 +588,9 @@ _BY_NAME = {
                  " streamout changetopic fleet second_reader proxy ring_buffer"
                  " ratchet rollback handoff_overlap"
                  " backfill_race lob_transaction rollback_set shadow_resync"
-                 " dag_scheduler reverse autopilot",
+                 " dag_scheduler reverse autopilot retention_controller"
+                 " conflict_semantics mapping_proof reverse_contract"
+                 " snapshot_watermark source_role traffic_state",
     "cli": "cli guide ui estate",
 }
 #: a subpackage, whole
