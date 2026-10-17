@@ -2092,9 +2092,9 @@ def space(work, parts, facts=None, need=(), costs=None, keep=None,
             elif not any(c[i] is o for c, _ in admissible):
                 # the strongest any way with it reaches, and where that
                 # falls short
-                lv = max((x for c, x in weaker if c[i] is o),
-                         key=g.vector)
-                above.append(f"{o.said} gives {g.short(lv, top)} with any"
+                weak_lv = max((x for c, x in weaker if c[i] is o),
+                              key=g.vector)
+                above.append(f"{o.said} gives {g.short(weak_lv, top)} with any"
                              " way the other parts can go")
             else:
                 above.append(f"the whole way costs less without {o.said}")
@@ -2103,6 +2103,15 @@ def space(work, parts, facts=None, need=(), costs=None, keep=None,
     behind = []
     for c, t in ranked:
         if c is combo or len(behind) >= runners:
+            continue
+        bad = False
+        for n, r in zip(names, c):
+            if (n, r.name) not in failed:
+                failed[(n, r.name)] = r.prove(facts) if r.prove else None
+            if failed[(n, r.name)]:
+                bad = True
+                break
+        if bad:
             continue
         behind.append((Strategy(work, dict(zip(names, c)), estimate=t,
                                 guarantees=g.named(g.of(c))),

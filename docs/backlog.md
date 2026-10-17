@@ -11773,13 +11773,13 @@ Observed: jointplan._meets sets meets=False for deadline/money violations, but c
 
 ### REV-D2.strategy-guarantees — Preserve the selected strategy guarantee vector
 
-**OPEN — P2; bug; size S; index row 578.** Historical 750b38a5 reproduction; revalidate against current code before fixing/closing.
+**DONE 2026-10-17.** (Fixed in decide.space: renamed weaker alternative guarantee level variable from `lv` to `weak_lv`, preventing shadowing/overwriting of winner vector `lv`; proved green by tests/test_every_way_is_weighed.py 8/8 passed).
 
 Observed: decide.space unpacks combo, lv, total, overwrites lv while explaining a weaker alternative (line 2093), and exports that vector as the winner's guarantees (2109). Reproduced with weak/unproved then strong/proved: strong selected but unproved reported. Two existing test_every_way_is_weighed.py tests fail. Fix: immutable winner vector and separate explanation variable. Proof: both existing regressions green; best.guarantees equals guarantees.of(best.parts.values()) across property-generated alternatives, including ties and failed proofs.
 
 ### REV-D3.failed-runners — Keep failed proofs out of executable alternatives
 
-**OPEN — P2; bug; size S; index row 579.** Historical 750b38a5 reproduction; revalidate against current code before fixing/closing.
+**DONE 2026-10-17.** (Fixed in decide.space: excluded combinations containing components whose r.prove failed from behind/runners; verified by tests/test_every_way_is_weighed.py test_failed_proofs_are_kept_out_of_runners 9/9 passed).
 
 Observed: space.best.runners contains combinations whose prove already failed; jointplan.ways_of_space turns them into scheduler ways. Reproduced: bad/1s returns not available from prove; good/2s passes; good selected but bad is a runner and scheduler way. Only test callers of this adapter found, not production callers. Fix: separate rejected, unprobed and proved runnable alternatives; never schedule a known-refused combination. Proof: adapter excludes failed candidates, retains their refusal evidence and explicitly probes any unprobed candidate before trusting it.
 

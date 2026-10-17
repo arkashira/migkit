@@ -144,3 +144,13 @@ def test_the_evidence_names_no_label():
         in text
     for label in ("'bulk'", "'ranges'", "'hash'", "'snap'"):
         assert label not in text, label
+
+
+def test_failed_proofs_are_kept_out_of_runners():
+    parts = [d.Part("a", (R("good", "a good way", startup=2.0),
+                          R("bad", "a failing way", startup=1.0,
+                            prove=lambda f: "connection failed")))]
+    sp = d.space("t", parts)
+    assert sp.best.names == {"a": "good"}
+    assert not any(runner.names.get("a") == "bad" for runner, _ in sp.best.runners)
+
