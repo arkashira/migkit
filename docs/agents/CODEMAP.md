@@ -22,10 +22,11 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - [`docs/agents/INVENTORY.md`](INVENTORY.md) - every file of `migkit/` and `tools/`: its responsibility package, owner domain, size, importers, the packages it reaches, the programs it wraps and the tests that reach it
 - [`docs/agents/LAYERS.md`](LAYERS.md) - the layering rule (a package imports its own rank and below) and every upward import still listed, with its reason
 
-## `migkit/` (269 modules)
+## `migkit/` (276 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/ack_lattice.py` - (no docstring) Classes: PipelineStage, MonotoneRegressionError, SourceAckRefusedError, CutoverRefusedError, CutoverAuthorization, PositionLattice.
+- `migkit/action_compiler.py` - Compile typed actions into a causally complete plan (Row 596: SMART-N13.action-compiler). Classes: CareBadge, CausalPhase, EffectKind, ActionCompilationError, CausalContradictionError, UnsatisfiablePrerequisiteError.
 - `migkit/adaptive_bounds.py` - (no docstring) Classes: AdaptiveBoundsError, InfeasibleBoundsError, CutoverStatus, AdaptiveBoundsEnvelope, ClusterNode, ShardInfo.
 - `migkit/addresses.py` - A hop from two addresses (backlog R21).
 - `migkit/advisors.py` - (no docstring)
@@ -57,6 +58,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/canon.py` - One text rendering of a value that two different engines both produce. Classes: Added, Kept, Limits.
 - `migkit/canon_oracle.py` - (no docstring) Classes: ScalePolicy, SpacePolicy, CollationPolicy, SignedZeroPolicy, DriftKind, DriftResult.
 - `migkit/capabilities.py` - What each engine can do, read off the code, with every gap declared.
+- `migkit/capability_discovery.py` - Grow engine breadth through proved capability contracts (Row 592: SMART-N9.capability-discovery). Classes: CareBadge, CapabilityKind, DepthLevel, CapabilityStatus, RecoverySemantics, ProbeKind.
 - `migkit/carriers.py` - Where a seed shipped on media is written, and where the far end reads it back (`ship`; the owner's scope, 2026-10-01). Classes: Limits, Store, LocalStore, S3Store, AzureBlobStore, GcsStore.
 - `migkit/case.py` - The case migkit recognised between a hop's two servers, said and held to before anything is written (backlog P0-SCENARIOS). Classes: Case.
 - `migkit/catalog.py` - What one side's catalogue says about its tables, in one shape every reader and every comparer meets on (audit 2026-10-01, SC3, SC15). Classes: Column, Index, ForeignKey, Shape, Catalog.
@@ -66,6 +68,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/checkpoint.py` - Make a long verify restartable. Classes: Checkpoint, Rate.
 - `migkit/claims.py` - One table across machines: its ranges handed out through one record each machine writes only over the version it read (backlog W1; R5 looked Classes: Lost, Table.
 - `migkit/cli.py` - (no docstring)
+- `migkit/closed_loop_proof.py` - Measure and replay decision quality end to end (Row 593: SMART-N10.closed-loop-proof). Classes: CareBadge, ClosedLoopProofError, UnsafeEndpointHostError, UnsafeExecutionLaneError, TamperedTraceError, ReplayDivergenceError.
 - `migkit/cloud_readiness.py` - The cloud side of readiness, audited before the move (backlog R25.2).
 - `migkit/cloudapi.py` - What a managed database's provider says and does about it, asked through that provider's own API (backlog P0-SCENARIOS): the facts of the in Classes: NotOffered, Param, Instance, RestorePoint, Adapter, Operation.
 - `migkit/clouds.py` - Which cloud runs a side, and how that cloud spells a change to it. Classes: Where.
@@ -74,6 +77,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/complete_path.py` - Optimize verified completion across the full path (Row 589: SMART-N6.complete-path). Classes: CareBadge, CompletePathStage, CompletePathStrategy, EncodingTransportMode, SkewHandlingMode, OptimizerSearchMode.
 - `migkit/config.py` - (no docstring) Classes: Endpoint, SideEndpoint, IamEndpoint, KeychainEndpoint, Hop.
 - `migkit/conflict_semantics.py` - (no docstring) Classes: CareBadge, MergeAlgebraKind, ConflictType, OriginIdentity, VersionVector, HybridLogicalClock.
+- `migkit/connection_only.py` - Complete endpoint-only operation with reusable intent (Row 594: SMART-N11.connection-only). Classes: CareBadge, ConnectionOnlyError, PolicyMissingError, UnknownBusinessIntentError, UnauthorizedTargetReplacementError, UnauthorizedCutoverError.
 - `migkit/connector_capability.py` - Model schema drift and limitations per connector version (Row 640: RCH32.connector-capability). Classes: CareBadge, ReplicationMode, DriftOperation, SupportDisposition, DocReleaseStatus, ConnectorCapabilityError.
 - `migkit/consolidate.py` - Many databases or tenants into one (backlog P0-SCENARIOS): each source's rows carried into one target under a column the hop names, filled w Classes: Source, TablePlan, SliceVerdict.
 - `migkit/context_learning.py` - Transfer measurements without false confidence (Row 586: SMART-N3.context-learning). Classes: CareBadge, ContextLearningError, UnsafeEndpointHostError, CorruptedMeasurementError, VerificationLeaseError, UncalibratedIntervalError.
@@ -95,6 +99,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/described.py` - What a table migkit made on a store that keeps no column types is: its columns' classes and its key, kept beside the store's endpoint on thi
 - `migkit/diagnostics.py` - A bundle to report a problem with, holding nothing to hand over. Classes: Reading, ProbeAccumulator.
 - `migkit/digests.py` - Every table's digest as a check took it, kept so anyone can take it again (backlog R23.1).
+- `migkit/discovery_closure.py` - Discover transitive dependencies within authorized scope (Row 595: SMART-N12.discovery-closure). Classes: CareBadge, ObjectKind, ObjectStatus, CycleDisposition, ExternalRefDisposition, TargetConflictDisposition.
 - `migkit/document_model.py` - Normalized-to-document transformation and update/delete propagation verifier (Row 636: RCH28.document-model). Classes: CareBadge, RelationMultiplicity, OrderSemantics, DeletePropagationPolicy, TypeConversionKind, VerificationFetchStrategy.
 - `migkit/drainmark.py` - A drain proved by a mark written on the source, where the stream keeps no position migkit can hold it to.
 - `migkit/drift.py` - Did the source's shape change while it was being moved.
@@ -215,6 +220,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/reverse_contract.py` - (no docstring) Classes: ReverseContractError, ZeroLossFailbackIneligibleError, FencePreparationError, LeaseLockError, TypeIncompatibilityError, MappingInvertibilityError.
 - `migkit/revert.py` - The way back, handed over at the same moment as the way forward.
 - `migkit/ring_buffer.py` - (no docstring) Classes: ChunkCompressor, RecordBatch, DiskSegment, StoreAndForwardRingBuffer.
+- `migkit/robust_scheduling.py` - Plan for correlated tail risk and conflicting objectives (Row 591: SMART-N8.robust-scheduling). Classes: CareBadge, RiskPreference, SchedulingStrategy, RobustSchedulingError, UnsafeEndpointHostError, ImpossibleCatchupError.
 - `migkit/rollback.py` - (no docstring) Classes: ExpandContractPhase, RollbackStrategy, AppVersionSpec, SchemaEvolutionStep, RecoveryArtifact, CurrentWriteState.
 - `migkit/rollback_set.py` - (no docstring) Classes: CyclicDependencyError, EffectNotFoundError, RollbackResolutionError, PostconditionStatus, CompensatingActionType, ForwardSafetyStatus.
 - `migkit/rowfilter.py` - A hop's row filter, read one way and said in every engine's own words (backlog P0-SCOPE.7).
@@ -232,6 +238,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/schemaformats.py` - Messages framed by a schema registry that carry JSON Schema or Protobuf rather than Avro (backlog R4.formats), read and - for JSON Schema -  Classes: Undecodable, JsonEncoder, ProtoFile, Col, NeutralTable, Difference.
 - `migkit/second_reader.py` - An independent second reading of the data, run out of process. Classes: Narrowing.
 - `migkit/seedtools.py` - What the seed on media (`ship`, `carriers`) asks of each library it wraps, against what each offers (backlog 0f): the compression of a part,
+- `migkit/semantic_negotiation.py` - Negotiate cross-engine semantics before ranking fast paths (Row 597: SMART-N14.semantic-negotiation). Classes: CareBadge, SemanticDomain, SemanticEquivalenceKind, SemanticNegotiationError, SemanticConstraintBreachError, UnsafeEndpointError.
 - `migkit/servicecheck.py` - What another tool's own check said, held table by table against what migkit found (backlog P0-SCOPE.5). Classes: Claims.
 - `migkit/session.py` - One run of migkit: the command an operator started on a hop, and what is kept of it (backlog R23.1, R23.8, R23.10). Classes: Decisions.
 - `migkit/setaside.py` - What a load takes off a target to put back afterwards, kept on disk per process. Classes: SetAside.

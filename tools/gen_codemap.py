@@ -600,7 +600,9 @@ _BY_NAME = {
                  " provider_path lob_policy transaction_dag apply_contract"
                  " repair_fence online_confirmation keyless_proof"
                  " execution_contract complete_path proof_planning"
-                 " fact_validity context_learning information_budget live_replan",
+                 " fact_validity context_learning information_budget live_replan"
+                 " robust_scheduling capability_discovery closed_loop_proof connection_only"
+                 " discovery_closure action_compiler semantic_negotiation",
     "cli": "cli guide ui estate",
 }
 #: a subpackage, whole

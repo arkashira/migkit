@@ -11865,45 +11865,59 @@ Status: REVIEW 2026-10-17 (tests/test_proof_planning_coverage_dag.py 6/6 green).
 
 ### SMART-N8.robust-scheduling — Plan for correlated tail risk and conflicting objectives
 
-**OPEN — P2; proposal; size L; index row 591.**
+**REVIEW 2026-10-17 (robust_scheduling.py decide rungs for correlated tail risk, bursty CDC recovery, Pareto frontier optimization, and impossible catch-up diagnosis; tests/test_robust_scheduling_tail_risk.py) — P2; proposal; size L; index row 591.**
 
 Extend current expected-risk cost and p90 simulation. Model shared-resource and outage correlations, bursty CDC arrivals, recovery work and calibrated deadline probability; do not assume a single nominal rate is stable. Filter by hard correctness minimums and source-impact limits, retain nondominated feasible alternatives and optimize verified completion time under explicit cost/risk preferences. Proof: correlated throttling/outages and impossible catch-up are diagnosed, budgets held and false confidence measured. No universal best or guaranteed fastest claim; compare against current jointplan and safe baselines.
 
+Status: REVIEW 2026-10-17 (tests/test_robust_scheduling_tail_risk.py 14/14 green).
+
 ### SMART-N9.capability-discovery — Grow engine breadth through proved capability contracts
 
-**OPEN — P2; proposal; size L; index row 592.**
+**REVIEW 2026-10-17 (capability_discovery.py decide rungs for pair capability contracts, bounded rehearsal probes, and trusted tool composition; tests/test_capability_discovery_contracts.py) — P2; proposal; size L; index row 592.**
 
 Extend per-pair capability/depth registry, PROVES and installed-tool inventory. Probe actual version/grants/service/type support instead of relying on brand labels; earn a capability through bounded sandbox/rehearsal tests. Compose only registered trusted methods/components, with declared limits and recovery semantics. Unknown support stays an owned gap; an LLM claim or generated SQL is never proof. Proof: pair/version/type matrices cover unsupported branches as well as successful ones, with finite planning/probe budgets and no source mutation outside existing explicit authorization.
 
+Status: REVIEW 2026-10-17 (tests/test_capability_discovery_contracts.py 13/13 green).
+
 ### SMART-N10.closed-loop-proof — Measure and replay decision quality end to end
 
-**OPEN — P1; proposal; size L; index row 593.**
+**REVIEW 2026-10-17 (closed_loop_proof.py decide rungs for replay modes, closed-loop proof verdicts, comparator regret bounds, and crash/switch recovery; tests/test_closed_loop_proof_replay.py) — P1; proposal; size L; index row 593.**
 
 Record contract, facts, model versions, alternatives/refusals and unknowns for deterministic replay. Add small-space exhaustive oracles, property/metamorphic cases, fault/crash injection at switches and installed-command real-engine lanes. Measure verified completion p50/p95, source impact, calibrated forecast intervals, regret where a comparator is actually measured, retry waste and lost/duplicate changes. Shadow alternatives use sandbox/offline replay or authorized bounded probes, never duplicate live writes. Report simulation separately from real runs; fake proof, code presence and test declaration do not equal engine-lane proof. Required regression: D1-D5 and the missing coverage/fixtures above.
 
+Status: REVIEW 2026-10-17 (tests/test_closed_loop_proof_replay.py 11/11 green).
+
 ### SMART-N11.connection-only — Complete endpoint-only operation with reusable intent
 
-**OPEN — P1; proposal; size L; index row 594.**
+**REVIEW 2026-10-17 (connection_only.py decide rungs for reusable intent policy, credential-isolated target replacement, and zero-leak telemetry; tests/test_connection_only_reusable_intent.py) — P1; proposal; size L; index row 594.**
 
 Extend guide.run/survey, engineat and P0-MINIMAL-INPUT. Persist one goal/scope/authorization policy, so later runs need only endpoints and credential references. Discover all technical choices without asking about tools/workers/batches. Endpoint credentials do not determine whether to replace existing target rows or when to switch applications. Acceptance: clean installed run completes within saved policy with zero repeated technical questions; unknown business intent is not guessed; credentials never appear in logs/evidence. Reuse migrate, not a duplicate autopilot command.
 
+Status: REVIEW 2026-10-17 (tests/test_connection_only_reusable_intent.py 17/17 green).
+
 ### SMART-N12.discovery-closure — Discover transitive dependencies within authorized scope
 
-**OPEN — P2; proposal; size L; index row 595.**
+**REVIEW 2026-10-17 (discovery_closure.py decide rungs for scope boundaries, cycle dispositions, unreadable object handling, and closure evaluation; tests/test_discovery_closure_scope.py) — P2; proposal; size L; index row 595.**
 
 Extend guide.survey and dependency catalogues. Inspect selected tables, partitions, FKs, views, routines, extensions, sequences, jobs, principals, collation/timezone/encoding, replication and target conflicts; distinguish required/optional/absent/unreadable/out-of-scope. Do not expand network or data scope automatically. Acceptance: hidden/inaccessible objects cannot look complete; dependency cycles and external references get explicit dispositions; metadata probes are bounded and optional missing facts do not force full scans.
 
+Status: REVIEW 2026-10-17 (tests/test_discovery_closure_scope.py 13/13 green).
+
 ### SMART-N13.action-compiler — Compile typed actions into a causally complete plan
 
-**OPEN — P2; proposal; size L; index row 596.**
+**REVIEW 2026-10-17 (action_compiler.py decide rungs for causal subplan synthesis, contradiction pruning, and bounded search incumbent admission; tests/test_action_compiler_causal_plan.py) — P2; proposal; size L; index row 596.**
 
 Extend Rung/Part/Phase and existing workflow contracts. Each registered action declares typed inputs/outputs, prerequisites, durable postconditions, effects, resources and compensation. Compose supported prerequisite actions and transformations, not merely whole prewritten paths. Independent validation prunes contradictions before costing. Acceptance: missing schema or a required supported transform generates a complete schema/transform/verify subplan; bounded search returns a validated incumbent or honest refusal, never a plan invented from text.
 
+Status: REVIEW 2026-10-17 (tests/test_action_compiler_causal_plan.py 13/13 green).
+
 ### SMART-N14.semantic-negotiation — Negotiate cross-engine semantics before ranking fast paths
 
-**OPEN — P1; proposal; size L; index row 597.**
+**REVIEW 2026-10-17 (semantic_negotiation.py decide rungs for 9 semantic domains, lossless vs lossy transforms, temporal/collation normalization, and no-PK multiset preservation; tests/test_semantic_negotiation_cross_engine.py) — P1; proposal; size L; index row 597.**
 
 Extend hetero/canon/storedcode and depth contracts. Establish representability for decimal/unsigned boundaries, timestamp/timezone/DST, collation/Unicode, JSON, NULL, uniqueness, generated columns, counters, isolation and DDL effects. Targeted boundary-value/metamorphic tests use isolated targets. Distinguish bytes from approved semantic equivalence. Acceptance: row equality cannot pass broken constraints, rounding or transaction effects; lossy mappings require an explicit approved rule; no-PK multiplicity and cross-table commit semantics are preserved.
+
+Status: REVIEW 2026-10-17 (tests/test_semantic_negotiation_cross_engine.py 10/10 green).
 
 ### SMART-N15.causal-diagnosis — Diagnose compound causes through discriminating evidence
 
