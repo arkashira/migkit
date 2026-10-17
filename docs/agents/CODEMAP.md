@@ -22,7 +22,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - [`docs/agents/INVENTORY.md`](INVENTORY.md) - every file of `migkit/` and `tools/`: its responsibility package, owner domain, size, importers, the packages it reaches, the programs it wraps and the tests that reach it
 - [`docs/agents/LAYERS.md`](LAYERS.md) - the layering rule (a package imports its own rank and below) and every upward import still listed, with its reason
 
-## `migkit/` (262 modules)
+## `migkit/` (265 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/ack_lattice.py` - (no docstring) Classes: PipelineStage, MonotoneRegressionError, SourceAckRefusedError, CutoverRefusedError, CutoverAuthorization, PositionLattice.
@@ -71,6 +71,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/clouds.py` - Which cloud runs a side, and how that cloud spells a change to it. Classes: Where.
 - `migkit/cloudseed.py` - What only a cloud's control plane can do, driven through its API (backlog R19 lever 1; the owner's "structural four", 2026-09-28): the targe Classes: Aws, Azure, Google, ByApi.
 - `migkit/commercial.py` - The types only the commercial engines have (backlog W6; the type-fidelity research, docs/research/type-fidelity-2026-09-28.md, sections 6, 8 Classes: Variant.
+- `migkit/complete_path.py` - Optimize verified completion across the full path (Row 589: SMART-N6.complete-path). Classes: CareBadge, CompletePathStage, CompletePathStrategy, EncodingTransportMode, SkewHandlingMode, OptimizerSearchMode.
 - `migkit/config.py` - (no docstring) Classes: Endpoint, SideEndpoint, IamEndpoint, KeychainEndpoint, Hop.
 - `migkit/conflict_semantics.py` - (no docstring) Classes: CareBadge, MergeAlgebraKind, ConflictType, OriginIdentity, VersionVector, HybridLogicalClock.
 - `migkit/connector_capability.py` - Model schema drift and limitations per connector version (Row 640: RCH32.connector-capability). Classes: CareBadge, ReplicationMode, DriftOperation, SupportDisposition, DocReleaseStatus, ConnectorCapabilityError.
@@ -108,6 +109,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/estate.py` - The estate, not the hop (backlog W2): every database a machine or an account can reach, what moving each would take by migkit's own measurem Classes: Found.
 - `migkit/etl_bi_waves.py` - Integrated Database, ETL, and BI Migration Wave Planner (backlog RCH22, row 630). Classes: LineageNode, ArtefactParser, DbtModelParser, AirflowDagParser, MetabaseModelParser, LookerModelParser.
 - `migkit/evidence.py` - The files migkit writes that hold the application's values, kept encrypted where the hop asks (backlog R17b): Classes: EvidencePath.
+- `migkit/execution_contract.py` - Compile intent into one checked execution contract (Row 584: SMART-N1.contract). Classes: CareBadge, MigrationGoalKind, ExecutionPathClass, LifecycleBoundary, IrreversibleBoundaryKind, ProofCoverageLevel.
 - `migkit/exit_portability.py` - (no docstring) Classes: PortabilityValidationError, NeutralType, NeutralSchema, CollisionStrategy, PortableManifestExporter, PortableStateImporter.
 - `migkit/export.py` - The evidence of a migration, exported: what migkit did on a hop and what it measured, in the forms audit and change processes take - HTML an
 - `migkit/factbook.py` - Every fact a choice may read, in one place (backlog P0-SMART, the owner's note B of 2026-09-30: "every factor"). Classes: Fact.
@@ -181,6 +183,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/private_proof.py` - (no docstring) Classes: PrivateProofError, DebtSeverity, DebtCategory, VerificationStatus, SaltEpoch, SaltRotationManager.
 - `migkit/process_memory.py` - (no docstring) Classes: ProcessMemoryError, MemoryBudgetExceededError, ReconciliationRequiredError, UnverifiedResumeRefusedError, MemoryCategory, FailureClassification.
 - `migkit/progress_cause.py` - (no docstring) Classes: CausalPhase, EtaStatus, Checkpoint, RequiredUserAction, ProgressDiagnosis, RestoreDiagnostic.
+- `migkit/proof_planning.py` - Plan the deepest required proof with explicit coverage (Row 590: SMART-N7.proof-planning). Classes: CareBadge, ProofPlanningError, UnsafeEndpointHostError, ProofDAGCycleError, ProofDAGDependencyError, InvalidDependencyCertificateError.
 - `migkit/provider_path.py` - Differentiate provider-native and generic migration paths (Row 609: RCH01.provider-path). Classes: CareBadge, MigrationPathKind, SecondaryObjectKind, SecondaryValidationStrategy, ProviderResourceKind, ProviderResourceState.
 - `migkit/proxy.py` - Pooler and proxy coordinators and seamless cutover traffic shifting. Classes: ProxyShiftResult, BaseProxyCoordinator, PgBouncerCoordinator, ProxySQLCoordinator, EnvoyXdsCoordinator.
 - `migkit/query_guard.py` - (no docstring) Classes: QueryPattern, ExecutionPlan, ParityIssue, IndexRecommendation, QueryParityReport, QueryOptimizerParityGuard.

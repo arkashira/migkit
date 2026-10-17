@@ -598,7 +598,8 @@ _BY_NAME = {
                  " connector_capability agent_control release_intelligence incumbent_switch"
                  " verify_method failure_budget storage_protocol anti_corruption end_to_end_bar"
                  " provider_path lob_policy transaction_dag apply_contract"
-                 " repair_fence online_confirmation keyless_proof",
+                 " repair_fence online_confirmation keyless_proof"
+                 " execution_contract complete_path proof_planning",
     "cli": "cli guide ui estate",
 }
 #: a subpackage, whole

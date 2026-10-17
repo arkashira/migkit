@@ -11809,9 +11809,11 @@ Observed: eight tests/test_one_table_ladder.py cases fail after writes_in_pieces
 
 ### SMART-N1.contract — Compile intent into one checked execution contract
 
-**OPEN — P1; proposal; size L; index row 584.**
+**REVIEW 2026-10-17 (execution_contract.py decide rungs for intent compilation, native/bulk/range/table contract paths, lexicographic minimums, and boundary admission checks; tests/test_execution_contract_intent_compilation.py) — P1; proposal; size L; index row 584.**
 
 Extend existing guarantees, need and admission. Compile goal/scope into required proof coverage, snapshot/fence/ordering, idempotence, restartability, source impact, outage, byte and money bounds. Bind facts/model/plan versions and target identity. Carry the contract through bulk/table/range/native paths, runtime fallback, resume, cutover and rollback. Existing guarantee ordering is lexicographic: explicit minimums must hold componentwise before ranking; incompatible minimums are a refusal. Proof: adversarial alternatives and failures cannot drop a required dimension; independent admission checks run before irreversible boundaries. No new CLI modes or implicit authorization.
+
+Status: REVIEW 2026-10-17 (tests/test_execution_contract_intent_compilation.py 8/8 green).
 
 ### SMART-N2.fact-validity — Make facts and decisions valid for a bounded context
 
@@ -11839,15 +11841,19 @@ Current Trials re-climbs after surprise and autonomous.replan responds to thrott
 
 ### SMART-N6.complete-path — Optimize verified completion across the full path
 
-**OPEN — P2; proposal; size L; index row 589.**
+**REVIEW 2026-10-17 (complete_path.py decide rungs for 10-stage full path optimization, zstd/lz4/passthrough transport, skew-aware split and coalesce, and bounded branch-and-bound search; tests/test_complete_path_optimization.py) — P2; proposal; size L; index row 589.**
 
 Extend jointplan/legs/topology and existing SUPER DAG/store-forward work. Jointly consider seed, encoding/compression, transport/staging, ingestion, indexes/constraints, CDC drain, verification, repair, cutover and rollback. A faster copy is not preferred when its downstream proof/index tail is slower. Include multi-database/hop contention, CPU/disk/network/service quotas, streaming backpressure and skew-aware split/merge. Bound optimizer CPU/memory/time; retain a safe baseline when search is interrupted. Proof: real-server crossover scenarios and thousands-of-table planning scalability; report distance to a valid lower bound where available, not a global-optimum claim.
 
+Status: REVIEW 2026-10-17 (tests/test_complete_path_optimization.py 10/10 green).
+
 ### SMART-N7.proof-planning — Plan the deepest required proof with explicit coverage
 
-**OPEN — P1; proposal; size L; index row 590.**
+**REVIEW 2026-10-17 (proof_planning.py decide rungs for multiset/RLS/merkle/row proof depth, certified evidence reuse, reader correlation, and false-same refusal gates; tests/test_proof_planning_coverage_dag.py) — P1; proposal; size L; index row 590.**
 
 Extend verdict/delta/scanplan and SUPER.merkle-fold. Build a proof dependency/coverage DAG for values, schema, sequences, grants, constraints, stored code and application-visible semantics under explicit epochs/fences. Reuse only evidence with a valid dependency certificate; recheck changed ranges and affected objects. Independent readers need compatible canonicalization and documented correlated blind spots. Sampling alone stays incomplete; keyless multisets preserve multiplicity. Proof: injected omissions, RLS, DDL, canonicalization defects and concurrent writes cannot produce false same; measure source reads and cost to complete the same proof contract.
+
+Status: REVIEW 2026-10-17 (tests/test_proof_planning_coverage_dag.py 6/6 green).
 
 ### SMART-N8.robust-scheduling — Plan for correlated tail risk and conflicting objectives
 
