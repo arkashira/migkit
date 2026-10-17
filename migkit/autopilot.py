@@ -700,7 +700,10 @@ class AutopilotOrchestrator:
         guard = getattr(self, "query_guard", None) or getattr(self.hop, "query_guard", None)
         if guard is None:
             return True
-        report = guard.last_report if hasattr(guard, "last_report") else None
+        workload = getattr(guard, "workload", None)
+        if workload:
+            guard.audit(guard.sample_workload(list(workload)))
+        report = getattr(guard, "last_report", None)
         return True if report is None else bool(report.can_cutover)
 
     def _step_seamless_cutover(self) -> Dict[str, Any]:

@@ -16,11 +16,11 @@ None.
 | safety | 4 | 12 | 12198 | who may write, what must not leak, what keeps a mover from writing twice |
 | execution | 5 | 17 | 10937 | the running of work: processes, ranges, retries, pacing, stalls, sizing of what runs at once |
 | conversion | 6 | 69 | 47855 | a value or an object as another engine takes it: canonical text, transforms, types, stored code |
-| reporting | 7 | 14 | 10831 | what the operator reads: the verdict, the result shape, the log, the metrics, the notices |
+| reporting | 7 | 14 | 10832 | what the operator reads: the verdict, the result shape, the log, the metrics, the notices |
 | decision | 8 | 36 | 36941 | choosing: the rungs, the cost model, the joint plan, what each engine can do |
 | engines | 9 | 80 | 128670 | the contract every engine fills and each engine's own adapter |
 | integrations | 9 | 23 | 24368 | the programs, libraries and provider APIs migkit wraps, and the other tools it meets |
-| workflows | 10 | 111 | 145872 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
+| workflows | 10 | 111 | 145875 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
 | cli | 11 | 4 | 10464 | the command line and the guide that asks for two addresses |
 | web | 11 | 30 | 6451 | the web view and its API |
 | tools | - | 13 | 7195 | the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them |
@@ -197,7 +197,7 @@ None.
 | `migkit/export.py` | - | 1272 | 12: anchor, cli, egress, session, ship (+7) | configuration 4, conversion 2, engines 2, integrations 2, persistence 15, reporting 5, safety 4, workflows 5 | - | 13: a_run_keeps_its_own_log, a_seed_is_shipped_on_media, an_orphan_whose_parent_the_hop_does_not_take (+10) |
 | `migkit/notify.py` | - | 668 | 11: approvals, cli, cutover, schedule, session (+6) | configuration 6, execution 1, integrations 1, reporting 1, safety 3, workflows 1 | apprise | 7: alerts_and_notifications, nothing_leaves_where_nothing_may, one_redactor_hides_every_secret (+4) |
 | `migkit/progress_cause.py` | - | 757 | 0 | - | - | 1: progress_cause_diagnostics |
-| `migkit/query_guard.py` | - | 1010 | 0 | configuration 1, decision 1, persistence 1 | - | 2: ddl_shield_and_query_guard_wiring, query_optimizer_parity_guard |
+| `migkit/query_guard.py` | - | 1011 | 0 | configuration 1, decision 1, persistence 1 | - | 2: ddl_shield_and_query_guard_wiring, query_optimizer_parity_guard |
 | `migkit/report.py` | - | 990 | 4: cli, cutover, export, guide | configuration 1, decision 4, engines 1, execution 5, reporting 7, safety 2, scope 2, workflows 2 | - | 15: a_hop_that_keeps_some_changes_is_held_to_them, a_run_writes_every_step_back_as_it_ends, drain_and_readiness_are_wired (+12) |
 | `migkit/servicecheck.py` | - | 335 | 4: cli, imports, report, verdict | configuration 1 | - | 2: a_hop_from_a_dts_job, what_the_service_said_held_against_migkit |
 | `migkit/support_reproducer.py` | - | 611 | 0 | configuration 2, safety 2 | - | 1: support_diagnostic_reproducer |
@@ -375,7 +375,7 @@ None.
 | `migkit/appversions.py` | - | 458 | 6: cli, cutover, engines.base, engines.mysql, engines.postgres (+1) | - | - | 1: a_migration_run_on_one_side_only_is_found |
 | `migkit/archive.py` | - | 678 | 2: cli, hopkeys | conversion 2, decision 6, engines 3, safety 2, workflows 1 | - | 2: old_rows_are_archived_then_removed_only_once_proved, the_move_way_rungs_hold_and_refuse |
 | `migkit/autonomous.py` | - | 1233 | 4: agent_control, cli, telemetry, tools.measures_table | decision 7, engines 1, execution 1, persistence 1, reporting 2, workflows 1 | - | 10: agent_control_constrained_ops, autonomous_scenarios, autonomous_workflow (+7) |
-| `migkit/autopilot.py` | - | 823 | 1: cli | conversion 1, decision 3, execution 1, persistence 2, workflows 5 | - | 2: ddl_shield_and_query_guard_wiring, migkit_autopilot_one_command |
+| `migkit/autopilot.py` | - | 826 | 1: cli | conversion 1, decision 3, execution 1, persistence 2, workflows 5 | - | 2: ddl_shield_and_query_guard_wiring, migkit_autopilot_one_command |
 | `migkit/backfill_race.py` | - | 680 | 0 | persistence 1 | - | 1: backfill_race_epoch_reconcile |
 | `migkit/barriers.py` | - | 483 | 6: engines.dynamodb, engines.kafka, engines.mongodb, engines.redis, freeze (+1) | configuration 13, workflows 6 | - | 3: the_mark_travels_in_the_atomic_unit_on_kafka, tombstones_and_barriers, transaction_dag_barrier_scheduler |
 | `migkit/cache_semantics.py` | - | 1546 | 0 | - | - | 1: cache_semantics_expiry_eviction |

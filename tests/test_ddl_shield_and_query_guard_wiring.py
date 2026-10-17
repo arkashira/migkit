@@ -131,3 +131,18 @@ def test_cutover_gate_refuses_on_query_regression():
         decide.climb("t", autopilot_cutover_gate_rungs(), facts).rung.name != "certify_zero_drift_cutover_admit"
     facts["query_parity_ok"] = True
     assert decide.climb("t", autopilot_cutover_gate_rungs(), facts).rung.name == "certify_zero_drift_cutover_admit"
+
+
+def test_autopilot_audits_the_workload_before_the_gate():
+    from migkit.autopilot import AutopilotOrchestrator
+    bad = ExecutionPlan("q", execution_time_ms=100.0,
+                        scans=[{"table": "t", "scan_type": "Seq Scan"}])
+    pat = QueryPattern("q", "SELECT * FROM t WHERE a = 1", "x", mean_time_ms=1.0,
+                       tables=["t"], filter_columns=["a"], source_plan=None)
+    g = QueryOptimizerParityGuard(options={"workload": [pat]})
+    g.replay_on_target = lambda p, **k: bad
+    holder = type("H", (), {})()
+    holder.query_guard = g
+    ok = AutopilotOrchestrator._query_parity_ok(holder)
+    assert g.last_report is not None
+    assert ok is g.last_report.can_cutover

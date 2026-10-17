@@ -282,6 +282,7 @@ class QueryOptimizerParityGuard:
         self.latency_threshold = float(latency_threshold if latency_threshold is not None else th.latency_threshold)
         self.sample_size = th.sample_size
         self.last_report: Optional[QueryParityReport] = None
+        self.workload: List[QueryPattern] = list(self.options.get("workload") or [])
         self.say = say or (lambda msg: None)
 
     def extract_from_slow_log(self, log_content: Union[str, Iterable[str]], dialect: str = "auto") -> List[QueryPattern]:
