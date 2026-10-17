@@ -27,7 +27,52 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 
-from . import durable, machine, rehearsal
+from . import decide, durable, machine, rehearsal
+
+
+# -----------------------------------------------------------------------------
+# Decision Engine Rungs (Row 639: RCH31)
+# -----------------------------------------------------------------------------
+
+def placement_topology_rungs(facts: Optional[decide.Facts] = None) -> Tuple[decide.Rung, ...]:
+    """Ladder for selecting candidate target placement topology based on measured workload evidence."""
+    return (
+        decide.Rung(
+            "colocated_topology",
+            "colocate tables to eliminate cross-node distributed 2PC transaction latency",
+            needs=(
+                decide.Need("total_bytes_fits_node", lambda f: bool(f.get("total_bytes_fits_node"))),
+                decide.Need("high_cross_table_transactions", lambda f: bool(f.get("high_cross_table_transactions"))),
+            ),
+        ),
+        decide.Rung(
+            "partitioned_topology",
+            "partition by monotonic range or time key with localized partition pruning",
+            needs=(
+                decide.Need("has_range_partition_key", lambda f: bool(f.get("has_range_partition_key"))),
+                decide.Need("low_cross_partition_fanout", lambda f: bool(f.get("low_cross_partition_fanout"))),
+            ),
+        ),
+        decide.Rung(
+            "hybrid_topology",
+            "hybrid topology: colocate reference tables and distribute high-volume sharded tables",
+            needs=(
+                decide.Need("has_reference_tables", lambda f: bool(f.get("has_reference_tables"))),
+                decide.Need("has_distributed_sharded_tables", lambda f: bool(f.get("has_distributed_sharded_tables"))),
+            ),
+        ),
+        decide.Rung(
+            "distributed_hash_topology",
+            "distribute large tables across cluster nodes using uniform hash keys",
+        ),
+    )
+
+
+def decide_placement_topology(facts: Union[Dict[str, Any], decide.Facts]) -> decide.Choice:
+    """Evaluates target placement topology via decide ladder."""
+    f = facts if isinstance(facts, decide.Facts) else decide.Facts(facts)
+    return decide.climb("placement_topology", placement_topology_rungs(f), f)
+
 
 CARE_ACTION = "ACTION"
 CARE_REVIEW = "REVIEW"

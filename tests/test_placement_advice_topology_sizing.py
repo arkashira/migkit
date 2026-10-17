@@ -38,9 +38,23 @@ from migkit.placement_advice import (
     generate_candidate_designs,
     recommend_resource_sizing,
     rehearse_design,
+    decide_placement_topology,
 )
 
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("placement_advice", "placement_topology_rungs", "colocated_topology", "holds"),
+    ("placement_advice", "placement_topology_rungs", "colocated_topology", "refuses"),
+    ("placement_advice", "placement_topology_rungs", "partitioned_topology", "holds"),
+    ("placement_advice", "placement_topology_rungs", "partitioned_topology", "refuses"),
+    ("placement_advice", "placement_topology_rungs", "hybrid_topology", "holds"),
+    ("placement_advice", "placement_topology_rungs", "hybrid_topology", "refuses"),
+    ("placement_advice", "placement_topology_rungs", "distributed_hash_topology", "holds"),
+]
+
 GIB = 1024 ** 3
+
 
 
 def _build_skewed_multi_table_evidence(
@@ -509,3 +523,41 @@ def test_unix_report_rendering_assess_items_and_pure_ascii():
     test_text = pathlib.Path(__file__).resolve().read_text(encoding="utf-8")
     assert all(ord(c) < 128 for c in mod_text)
     assert all(ord(c) < 128 for c in test_text)
+
+
+def test_placement_topology_rungs_reachability():
+    """Prove all branches of placement_topology_rungs under watched()."""
+    with watched():
+        # 1. colocated_topology holds
+        c1 = decide_placement_topology({
+            "total_bytes_fits_node": True,
+            "high_cross_table_transactions": True,
+        })
+        assert c1.rung.name == "colocated_topology"
+
+        # 2. colocated_topology refuses, partitioned_topology holds
+        c2 = decide_placement_topology({
+            "total_bytes_fits_node": False,
+            "has_range_partition_key": True,
+            "low_cross_partition_fanout": True,
+        })
+        assert c2.rung.name == "partitioned_topology"
+
+        # 3. partitioned_topology refuses, hybrid_topology holds
+        c3 = decide_placement_topology({
+            "total_bytes_fits_node": False,
+            "has_range_partition_key": False,
+            "has_reference_tables": True,
+            "has_distributed_sharded_tables": True,
+        })
+        assert c3.rung.name == "hybrid_topology"
+
+        # 4. hybrid_topology refuses, distributed_hash_topology holds
+        c4 = decide_placement_topology({
+            "total_bytes_fits_node": False,
+            "has_range_partition_key": False,
+            "has_reference_tables": False,
+            "has_distributed_sharded_tables": False,
+        })
+        assert c4.rung.name == "distributed_hash_topology"
+
