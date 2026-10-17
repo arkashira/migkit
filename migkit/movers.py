@@ -6970,6 +6970,17 @@ def stream_ways():
              footprint=2,
              leaves="containers on this machine (a log and a connector), and"
                     " on a PostgreSQL source a slot and a publication"),
+        Rung("store_and_forward", "store-and-forward memory-mapped ring buffer stream",
+             needs=(Need("an engine it streams or follows",
+                         lambda f: bool(f.get("repl") or f.get("tail") or f.get("stream") or stream_supported(f.get("engine"))),
+                         "{rung} does not stream or follow this engine"),
+                    Need("store-and-forward buffer enabled",
+                         lambda f: bool(f.get("store_forward") if f.get("store_forward") is not None else (f.get("store_and_forward") if f.get("store_and_forward") is not None else envkeys.flag("MIGKIT_STORE_FORWARD"))),
+                         "store-and-forward ring buffer is not selected on this hop")),
+             because="decoupled source reader process and target applier worker"
+                     " isolated by compressed memory-mapped disk ring buffer",
+             footprint=1,
+             leaves="a spool directory and a watermark checkpoint on this machine"),
     )
 
 
@@ -9618,6 +9629,57 @@ def _bytes_said(n):
             return f"{n:.0f} {unit}"
         n /= 1024
     return f"{n:.1f} TB"
+
+
+def store_and_forward_buffer(hop=None, db=None, **kwargs):
+    """Store-and-Forward Memory-Mapped Ring Buffer for hop stream replication (Row 565)."""
+    from .ring_buffer import StoreAndForwardRingBuffer
+    spool_dir = kwargs.pop("spool_dir", None)
+    if spool_dir is None and hop is not None and db:
+        spool_dir = hop.report_dir(db) / "store_forward"
+    return StoreAndForwardRingBuffer(spool_dir=spool_dir, hop=hop, **kwargs)
+
+
+def stream_with_store_and_forward(
+    hop=None,
+    db=None,
+    reader_source=None,
+    applier_target=None,
+    batch_size=100,
+    poll_timeout=1.0,
+    max_memory_bytes=None,
+    segment_size=None,
+    compression="auto",
+    spool_dir=None,
+    log=None,
+    as_process=True,
+    drain_timeout=None,
+):
+    """Decoupled WAL/binlog reader and target applier via Store-and-Forward Ring Buffer."""
+    from .ring_buffer import StoreAndForwardPipeline
+    if spool_dir is None and hop is not None and db:
+        spool_dir = hop.report_dir(db) / "store_forward"
+
+    pipeline = StoreAndForwardPipeline(
+        spool_dir=spool_dir,
+        source_records=reader_source if isinstance(reader_source, (list, tuple)) else None,
+        source_callable=reader_source if callable(reader_source) else None,
+        applier_callable=applier_target,
+        max_memory_bytes=max_memory_bytes,
+        segment_size=segment_size,
+        batch_size=batch_size,
+        poll_timeout=poll_timeout,
+        compression=compression,
+        hop=hop,
+        as_process=as_process,
+    )
+    if log:
+        s = pipeline.stats()
+        log(f"store-and-forward initialized: envelope {s['max_memory_bytes']} bytes, badge {pipeline.care_badge}")
+    if drain_timeout is not None:
+        pipeline.start()
+        pipeline.drain(timeout=drain_timeout)
+    return pipeline
 
 
 from .engines import hooks  # noqa: E402

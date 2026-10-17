@@ -523,3 +523,204 @@ def test_barrier_rollback_on_failure_resumes_applier():
     assert applier.pause_count == 1
     assert applier.resume_count == 1
     assert "metadata" not in cache.get_table("users").columns
+
+
+def test_schema_evolution_rungs_ladder_climb():
+    from migkit import decide
+    from migkit.schema_drift import schema_evolution_rungs
+
+    rungs = schema_evolution_rungs()
+    assert len(rungs) == 3
+
+    f_safe = decide.Facts({
+        "has_drift": True,
+        "all_inline_safe": True,
+        "requires_backfill": False,
+        "has_key": True,
+        "incompatible": False,
+    })
+    c_safe = decide.climb("schema_evolution", rungs, facts=f_safe)
+    assert c_safe.rung.name == "admit_inline_safe_evolution"
+
+    f_backfill = decide.Facts({
+        "has_drift": True,
+        "all_inline_safe": False,
+        "requires_backfill": True,
+        "has_key": True,
+        "incompatible": False,
+    })
+    c_backfill = decide.climb("schema_evolution", rungs, facts=f_backfill)
+    assert c_backfill.rung.name == "admit_evolution_with_batched_backfill"
+
+    f_incompat = decide.Facts({
+        "has_drift": True,
+        "all_inline_safe": False,
+        "requires_backfill": False,
+        "has_key": True,
+        "incompatible": True,
+    })
+    c_incompat = decide.climb("schema_evolution", rungs, facts=f_incompat)
+    assert c_incompat.rung.name == "refuse_incompatible_schema_drift"
+
+
+def test_wire_drift_resolver_into_tailctl_apply_unit():
+    from migkit import tailctl
+    from migkit.schema_drift import SchemaDriftController
+
+    executed_ddl = []
+    cache = SchemaCache()
+    cache.add_table("orders", columns=[
+        ColumnSchema(name="id", data_type="BIGINT", is_primary_key=True),
+        ColumnSchema(name="amount", data_type="INT"),
+    ])
+
+    resolver = SchemaDriftController(
+        target_dialect="postgres",
+        schema_cache=cache,
+        target_executor=lambda sql: executed_ddl.append(sql),
+    )
+
+    applied_changes = []
+
+    class MockEngine:
+        def __init__(self):
+            self.drift_resolver = resolver
+
+        def neutral_key(self, side, db, table):
+            return ["id"]
+
+        def apply_columns(self, side, db, cols):
+            raise tailctl.NotColumns("fallback to records")
+
+    eng = MockEngine()
+    changes = [
+        {"op": "insert", "table": "orders", "key": {"id": 1}, "values": {"amount": 100}},
+        {
+            "type": "SCHEMA_CHANGE",
+            "table": "orders",
+            "schema": {
+                "columns": {
+                    "id": {"data_type": "BIGINT", "nullable": False},
+                    "amount": {"data_type": "BIGINT", "nullable": True},
+                    "channel": {"data_type": "VARCHAR(32)", "nullable": True},
+                }
+            },
+        },
+        {"op": "insert", "table": "orders", "key": {"id": 2}, "values": {"amount": 9999999999, "channel": "web"}},
+    ]
+
+    def mock_apply(records):
+        applied_changes.extend(records)
+        return len(records)
+
+    tailctl.apply_unit(eng, "orders_db", {"pos": 100}, changes, mock_apply)
+
+    assert len(applied_changes) == 3
+    assert any('ALTER TABLE "orders" ADD COLUMN "channel"' in s for s in executed_ddl)
+    assert any('ALTER TABLE "orders" ALTER COLUMN "amount" TYPE BIGINT' in s for s in executed_ddl)
+    assert "channel" in cache.get_table("orders").columns
+
+
+def test_batched_keyset_chunked_backfill_with_aimd_and_durable_resume(tmp_path):
+    executed_sql = []
+
+    def mock_executor(sql: str):
+        executed_sql.append(sql)
+        return 50
+
+    chk_file = tmp_path / "backfill.checkpoint.json"
+    orchestrator = BackfillOrchestrator(target_executor=mock_executor, async_mode=False)
+
+    task = orchestrator.schedule_backfill(
+        table="users",
+        column_name="verified",
+        default_value=True,
+        key_column="id",
+        batch_size=100,
+        min_key=1,
+        max_key=250,
+        checkpoint_path=str(chk_file),
+    )
+
+    orchestrator.execute_task(task)
+
+    assert task.status == "COMPLETED"
+    assert task.rows_updated > 0
+    assert len(executed_sql) >= 2
+    assert any('WHERE "verified" IS NULL AND "id" >= 1 AND "id" < ' in s for s in executed_sql)
+    assert chk_file.exists()
+
+    task2 = orchestrator.schedule_backfill(
+        table="users",
+        column_name="verified",
+        default_value=True,
+        key_column="id",
+        batch_size=100,
+        min_key=1,
+        max_key=250,
+        checkpoint_path=str(chk_file),
+    )
+    executed_count_before = len(executed_sql)
+    orchestrator.execute_task(task2)
+    assert len(executed_sql) == executed_count_before
+    assert task2.status == "COMPLETED"
+
+
+def test_alter_inference_inspects_source_catalog_metadata():
+    cache = SchemaCache()
+    cache.add_table("accounts", columns=[
+        ColumnSchema(name="id", data_type="BIGINT", is_primary_key=True),
+        ColumnSchema(name="balance", data_type="INT", nullable=False),
+    ])
+
+    catalog_queries = []
+
+    def mock_catalog_inspector(tbl: str):
+        catalog_queries.append(tbl)
+        return {
+            "id": {"data_type": "BIGINT", "nullable": False, "default": None},
+            "balance": {"data_type": "NUMERIC(18, 4)", "nullable": True, "default": None},
+            "risk_score": {"data_type": "DECIMAL(5, 2)", "nullable": True, "default": "0.00"},
+        }
+
+    resolver = SchemaDriftResolver(
+        schema_cache=cache,
+        source_catalog_inspector=mock_catalog_inspector,
+    )
+
+    event = {
+        "type": "INSERT",
+        "table": "accounts",
+        "data": {
+            "id": 10,
+            "balance": 500,
+            "risk_score": 12.5,
+        },
+    }
+
+    tbl, drifts = resolver.detect_drift_from_event(event)
+
+    assert tbl == "accounts"
+    assert len(catalog_queries) == 1
+    assert catalog_queries[0] == "accounts"
+
+    col_drifts = {d.column_name: d for d in drifts}
+    assert "risk_score" in col_drifts
+    assert col_drifts["risk_score"].drift_type == DriftType.NEW_COLUMN
+    assert col_drifts["risk_score"].new_type == "DECIMAL(5, 2)"
+    assert col_drifts["risk_score"].new_default == "0.00"
+    assert col_drifts["balance"].drift_type == DriftType.TYPE_WIDENING
+    assert col_drifts["balance"].new_type == "NUMERIC(18, 4)"
+
+
+def test_replay_idempotency_strict_key_requirement():
+    from migkit import canon
+
+    with pytest.raises(ValueError) as exc:
+        canon.change("insert", "tbl", key={}, values={"val": 10})
+    assert "with no key cannot be applied" in str(exc.value)
+
+    rec = canon.change("insert", "tbl", key={"id": 1}, values={"val": 10})
+    assert rec["key"] == {"id": 1}
+    assert rec["values"] == {"val": 10}
+

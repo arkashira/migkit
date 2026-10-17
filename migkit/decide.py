@@ -7692,3 +7692,29 @@ def retention_action(facts):
                      " storage headroom is safe")), f)
     return got.path, got
 
+
+def spool_memory_bytes(hop=None, default=None):
+    """The dynamic memory bounds for the store-and-forward ring buffer,
+    negotiated from hop options and available host resources."""
+    opts = {}
+    if hop is not None and hasattr(hop, "options") and isinstance(hop.options, dict):
+        opts = hop.options
+    for key in ("ring_buffer_max_memory", "spool_memory_bytes", "max_memory_bytes"):
+        if key in opts:
+            return int(opts[key])
+    if default is not None:
+        return int(default)
+    try:
+        from . import sizing
+        avail = sizing._memory()
+    except Exception:
+        avail = None
+    if avail and avail > 0:
+        return max(32 * 1024 * 1024, min(avail // 4, 1024 * 1024 * 1024))
+    return 64 * 1024 * 1024
+
+
+def schema_evolution_rungs():
+    from .schema_drift import schema_evolution_rungs as _ser
+    return _ser()
+

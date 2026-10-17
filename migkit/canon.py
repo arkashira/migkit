@@ -2522,7 +2522,7 @@ def change(op, table, key, values=None, before=None, txn=None):
     if op not in CHANGE_OPS:
         raise ValueError(f"unknown change op {op!r}, expected one of"
                          f" {', '.join(CHANGE_OPS)}")
-    if not key and op != "insert":
+    if not key:
         raise ValueError(f"a {op} on {table} with no key cannot be applied -"
                          " migkit will not guess which row it meant")
     out = {"op": op, "table": str(table), "key": dict(key),

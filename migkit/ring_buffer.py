@@ -4,6 +4,7 @@ import errno
 import fcntl
 import json
 import mmap
+import multiprocessing
 import os
 import pickle
 import struct
@@ -12,7 +13,7 @@ import threading
 import time
 import zlib
 from pathlib import Path
-from typing import Any, Deque, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any, Callable, Deque, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 
 try:
     import zstandard as zstd
@@ -20,7 +21,86 @@ try:
 except ImportError:
     HAS_ZSTD = False
 
-from . import durable
+from . import decide, durable, envkeys, sizing
+
+CARE_ACTION = "ACTION"
+CARE_REVIEW = "REVIEW"
+CARE_BENIGN = "BENIGN"
+CARE_PASS = "PASS"
+
+
+def buffer_envelope_rungs():
+    """Dynamic Buffer Sizing Ladder (Row 565)."""
+    from .decide import Need, Rung
+    return (
+        Rung("configured_custom_envelope",
+             "explicit memory ceiling configured via environment or hop options",
+             needs=(Need("configured memory ceiling provided",
+                         lambda f: bool(f.get("configured_bytes")),
+                         "no explicit buffer memory envelope configured"),),
+             because="operator or hop explicitly set custom memory bounds"),
+        Rung("adaptive_host_scaled_envelope",
+             "adaptive memory envelope scaled to 25% of host available memory",
+             needs=(Need("host available memory readable and sufficient",
+                         lambda f: f.get("host_memory_bytes") is not None and f["host_memory_bytes"] >= 256 * 1024 * 1024,
+                         "host memory unreadable or constrained under 256 MiB"),),
+             because="dynamic host RAM scaling balances throughput and cgroup safety"),
+        Rung("constrained_minimal_envelope",
+             "minimal safe memory envelope for low-memory container environments",
+             because="fallback baseline memory envelope for constrained hosts"),
+    )
+
+
+def decide_buffer_envelope(hop: Any = None, max_memory_bytes: Optional[int] = None, segment_size: Optional[int] = None) -> Tuple[int, int]:
+    opts = {}
+    if hop is not None and hasattr(hop, "options") and isinstance(hop.options, dict):
+        opts = hop.options
+
+    configured = None
+    if max_memory_bytes is not None:
+        configured = int(max_memory_bytes)
+    elif envkeys.text("MIGKIT_RING_BUFFER_BYTES"):
+        try:
+            configured = int(envkeys.text("MIGKIT_RING_BUFFER_BYTES"))
+        except ValueError:
+            pass
+    elif "ring_buffer_max_memory" in opts:
+        configured = int(opts["ring_buffer_max_memory"])
+    elif "spool_memory_bytes" in opts:
+        configured = int(opts["spool_memory_bytes"])
+    elif "max_memory_bytes" in opts:
+        configured = int(opts["max_memory_bytes"])
+
+    try:
+        host_mem = sizing._memory()
+    except Exception:
+        host_mem = None
+
+    facts = {
+        "configured_bytes": configured,
+        "host_memory_bytes": host_mem,
+    }
+    choice = decide.climb("how store-and-forward memory envelope is sized",
+                          buffer_envelope_rungs(), facts)
+    if choice.path == "configured_custom_envelope":
+        max_mem = configured
+    elif choice.path == "adaptive_host_scaled_envelope":
+        scaled = host_mem // 4
+        max_mem = max(128 * 1024 * 1024, min(scaled, 1024 * 1024 * 1024))
+    else:
+        max_mem = 64 * 1024 * 1024
+
+    if segment_size is None:
+        if "ring_buffer_segment_size" in opts:
+            seg_size = int(opts["ring_buffer_segment_size"])
+        elif "segment_size" in opts:
+            seg_size = int(opts["segment_size"])
+        else:
+            seg_size = max(1024 * 1024, min(max_mem // 4, 64 * 1024 * 1024))
+    else:
+        seg_size = int(segment_size)
+
+    return max_mem, seg_size
 
 CHUNK_MAGIC = b"SF01"
 SEG_MAGIC = b"SFRBSEG1"
@@ -102,8 +182,11 @@ class ChunkCompressor:
         return "unknown"
 
     def compress(self, raw: bytes) -> Tuple[bytes, int]:
-        if self.codec == CODEC_ZSTD and self._zstd_compressor:
-            return self._zstd_compressor.compress(raw), CODEC_ZSTD
+        if self.codec == CODEC_ZSTD:
+            if not self._zstd_compressor and HAS_ZSTD:
+                self._zstd_compressor = zstd.ZstdCompressor(level=self.level)
+            if self._zstd_compressor:
+                return self._zstd_compressor.compress(raw), CODEC_ZSTD
         if self.codec == CODEC_ZLIB:
             return zlib.compress(raw, level=min(9, max(1, self.level))), CODEC_ZLIB
         return raw, CODEC_NONE
@@ -121,6 +204,18 @@ class ChunkCompressor:
             return comp
         raise ValueError(f"Unknown chunk compression codec {codec}")
 
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["_zstd_compressor"] = None
+        state["_zstd_decompressor"] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        if HAS_ZSTD and self.codec == CODEC_ZSTD:
+            self._zstd_compressor = zstd.ZstdCompressor(level=self.level)
+            self._zstd_decompressor = zstd.ZstdDecompressor()
+
 
 class RecordBatch(list):
     def __init__(
@@ -133,6 +228,25 @@ class RecordBatch(list):
         self.records = records
         self._items = items
         self._buffer = buffer
+        if items:
+            self.min_lsn = items[0][1]
+            self.max_lsn = items[-1][1]
+            self.lsn = self.max_lsn
+        else:
+            self.min_lsn = None
+            self.max_lsn = None
+            self.lsn = None
+
+    def __getstate__(self):
+        return {"records": self.records, "items": self._items}
+
+    def __setstate__(self, state):
+        records = state.get("records", [])
+        items = state.get("items", [])
+        super().__init__(records)
+        self.records = records
+        self._items = items
+        self._buffer = None
         if items:
             self.min_lsn = items[0][1]
             self.max_lsn = items[-1][1]
@@ -367,15 +481,19 @@ class StoreAndForwardRingBuffer:
     def __init__(
         self,
         spool_dir: Optional[Union[str, Path]] = None,
-        max_memory_bytes: int = 256 * 1024 * 1024,
-        segment_size: int = 64 * 1024 * 1024,
+        max_memory_bytes: Optional[int] = None,
+        segment_size: Optional[int] = None,
         compression: str = "auto",
         compression_level: int = 3,
         auto_evict: bool = True,
         watermark_file: Optional[Union[str, Path]] = None,
+        hop: Any = None,
     ):
-        self.max_memory_bytes = max_memory_bytes
-        self.segment_size = segment_size
+        derived_max_mem, derived_seg_size = decide_buffer_envelope(
+            hop=hop, max_memory_bytes=max_memory_bytes, segment_size=segment_size
+        )
+        self.max_memory_bytes = derived_max_mem
+        self.segment_size = derived_seg_size
         self.auto_evict = auto_evict
         self.compressor = ChunkCompressor(method=compression, level=compression_level)
 
@@ -471,6 +589,26 @@ class StoreAndForwardRingBuffer:
                 seg.uncompressed_bytes += u_len
                 seg.compressed_bytes += c_len
             mm.close()
+
+    def _discover_new_segments(self):
+        known_paths = {seg.path for seg in self._disk_segments}
+        existing_segments = sorted(self.spool_dir.glob("seg_*.sf"))
+        for p in existing_segments:
+            if p not in known_paths:
+                try:
+                    seg_id = int(p.stem.split("_")[1])
+                    seg = DiskSegment(seg_id, p, self.segment_size, self.compressor)
+                    seg.seal()
+                    self._inspect_existing_segment(seg)
+                    if self._committed_watermark is not None and seg.max_lsn is not None and lsn_le(seg.max_lsn, self._committed_watermark):
+                        seg.evict()
+                    else:
+                        self._disk_segments.append(seg)
+                        known_paths.add(p)
+                        if seg_id >= self._next_segment_id:
+                            self._next_segment_id = seg_id + 1
+                except Exception:
+                    pass
 
     def push(self, records: Any, lsn: Any = None) -> int:
         with self._lock:
@@ -631,6 +769,9 @@ class StoreAndForwardRingBuffer:
             return True
         if self._read_segment_idx < len(self._disk_segments):
             return True
+        self._discover_new_segments()
+        if self._read_segment_idx < len(self._disk_segments):
+            return True
         if self._mem_queue:
             return True
         return False
@@ -749,6 +890,17 @@ class StoreAndForwardRingBuffer:
         with self._lock:
             return not self._has_data_ready()
 
+    @property
+    def care_badge(self) -> str:
+        with self._lock:
+            if self._closed and self.pending_records_count > 0:
+                return CARE_ACTION
+            if self.disk_bytes > (self.max_memory_bytes * 8):
+                return CARE_REVIEW
+            if self.disk_bytes > 0 or self._mem_bytes > (self.max_memory_bytes * 0.5):
+                return CARE_BENIGN
+            return CARE_PASS
+
     def stats(self) -> Dict[str, Any]:
         with self._lock:
             return {
@@ -764,6 +916,7 @@ class StoreAndForwardRingBuffer:
                 "highest_polled_lsn": self._highest_polled_lsn,
                 "compression": self.compressor.codec_name,
                 "compression_ratio": self.compression_ratio,
+                "care_badge": self.care_badge,
             }
 
     def close(self):
@@ -793,3 +946,334 @@ class StoreAndForwardRingBuffer:
 
     def __bool__(self) -> bool:
         return not self._closed
+
+
+def _mp_context():
+    try:
+        return multiprocessing.get_context("fork")
+    except (ValueError, AttributeError):
+        return multiprocessing
+
+
+class StoreAndForwardReaderProcess:
+    def __init__(
+        self,
+        buffer: StoreAndForwardRingBuffer,
+        source_records: Optional[Iterable[Any]] = None,
+        source_callable: Optional[Callable[[], Optional[Any]]] = None,
+        ipc_queue: Optional[Any] = None,
+        stop_event: Optional[Any] = None,
+        poll_interval: float = 0.001,
+        as_process: bool = True,
+    ):
+        self.buffer = buffer
+        self.source_records = list(source_records) if source_records is not None else None
+        self.source_callable = source_callable
+        self.ipc_queue = ipc_queue
+        self.poll_interval = poll_interval
+        self.as_process = as_process
+
+        ctx = _mp_context()
+        self._stop_event = stop_event or (ctx.Event() if as_process else threading.Event())
+        self._done_event = ctx.Event() if as_process else threading.Event()
+        self._total_pushed = ctx.Value("i", 0) if as_process else None
+        self._total_pushed_counter = 0
+        self._proc = None
+
+    def _worker_loop(self):
+        try:
+            if self.source_records is not None:
+                for item in self.source_records:
+                    if self._stop_event.is_set():
+                        break
+                    if isinstance(item, tuple) and len(item) == 2:
+                        rec, lsn = item
+                    elif isinstance(item, dict) and "lsn" in item:
+                        rec, lsn = item, item.get("lsn")
+                    else:
+                        rec, lsn = item, None
+
+                    pushed = False
+                    if self.ipc_queue is not None:
+                        try:
+                            self.ipc_queue.put_nowait((rec, lsn))
+                            pushed = True
+                        except Exception:
+                            pushed = False
+                    if not pushed:
+                        self.buffer.push(rec, lsn=lsn)
+
+                    self._total_pushed_counter += 1
+                    if self._total_pushed is not None:
+                        self._total_pushed.value = self._total_pushed_counter
+                    if self.poll_interval > 0:
+                        time.sleep(self.poll_interval)
+            elif self.source_callable is not None:
+                while not self._stop_event.is_set():
+                    got = self.source_callable()
+                    if got is None:
+                        if self._stop_event.is_set():
+                            break
+                        time.sleep(self.poll_interval)
+                        continue
+                    if isinstance(got, tuple) and len(got) == 2:
+                        rec, lsn = got
+                    elif isinstance(got, dict) and "lsn" in got:
+                        rec, lsn = got, got.get("lsn")
+                    else:
+                        rec, lsn = got, None
+
+                    pushed = False
+                    if self.ipc_queue is not None:
+                        try:
+                            self.ipc_queue.put_nowait((rec, lsn))
+                            pushed = True
+                        except Exception:
+                            pushed = False
+                    if not pushed:
+                        self.buffer.push(rec, lsn=lsn)
+
+                    self._total_pushed_counter += 1
+                    if self._total_pushed is not None:
+                        self._total_pushed.value = self._total_pushed_counter
+                    if self.poll_interval > 0:
+                        time.sleep(self.poll_interval)
+        finally:
+            self.buffer.flush()
+            self._done_event.set()
+
+    def start(self):
+        ctx = _mp_context()
+        if self.as_process:
+            self._proc = ctx.Process(target=self._worker_loop, daemon=True)
+            self._proc.start()
+        else:
+            self._proc = threading.Thread(target=self._worker_loop, daemon=True)
+            self._proc.start()
+        return self
+
+    def stop(self, timeout: float = 5.0):
+        self._stop_event.set()
+        if self._proc is not None:
+            self._proc.join(timeout=timeout)
+            if hasattr(self._proc, "is_alive") and self._proc.is_alive():
+                if hasattr(self._proc, "terminate"):
+                    self._proc.terminate()
+                    self._proc.join(timeout=1.0)
+
+    @property
+    def pid(self) -> Optional[int]:
+        if self._proc is not None and hasattr(self._proc, "pid"):
+            return self._proc.pid
+        return None
+
+    @property
+    def is_alive(self) -> bool:
+        return self._proc is not None and self._proc.is_alive()
+
+    @property
+    def is_done(self) -> bool:
+        return self._done_event.is_set()
+
+    @property
+    def total_pushed(self) -> int:
+        if self._total_pushed is not None:
+            return self._total_pushed.value
+        return self._total_pushed_counter
+
+
+class StoreAndForwardApplierWorker:
+    def __init__(
+        self,
+        buffer: StoreAndForwardRingBuffer,
+        applier_callable: Optional[Callable[[RecordBatch], Any]] = None,
+        ipc_queue: Optional[Any] = None,
+        batch_size: int = 100,
+        poll_timeout: float = 0.5,
+        stop_event: Optional[Any] = None,
+        as_process: bool = True,
+        auto_commit: bool = True,
+    ):
+        self.buffer = buffer
+        self.applier_callable = applier_callable
+        self.ipc_queue = ipc_queue
+        self.batch_size = batch_size
+        self.poll_timeout = poll_timeout
+        self.as_process = as_process
+        self.auto_commit = auto_commit
+
+        ctx = _mp_context()
+        self._stop_event = stop_event or (ctx.Event() if as_process else threading.Event())
+        self._done_event = ctx.Event() if as_process else threading.Event()
+        self._total_applied = ctx.Value("i", 0) if as_process else None
+        self._total_applied_counter = 0
+        self._proc = None
+
+    def _worker_loop(self):
+        try:
+            while not self._stop_event.is_set():
+                batch = self.buffer.poll(batch_size=self.batch_size, timeout=0.01)
+                if not batch and self.ipc_queue is not None:
+                    items = []
+                    while len(items) < self.batch_size:
+                        try:
+                            rec, lsn = self.ipc_queue.get(timeout=0.01)
+                            items.append((rec, lsn))
+                        except Exception:
+                            break
+                    if items:
+                        batch = RecordBatch(items, buffer=self.buffer)
+
+                if not batch:
+                    if self._stop_event.is_set():
+                        break
+                    time.sleep(min(self.poll_timeout, 0.05))
+                    continue
+
+                if self.applier_callable is not None:
+                    self.applier_callable(batch)
+                if self.auto_commit:
+                    batch.commit()
+                self._total_applied_counter += len(batch)
+                if self._total_applied is not None:
+                    self._total_applied.value = self._total_applied_counter
+        finally:
+            self._done_event.set()
+
+    def start(self):
+        ctx = _mp_context()
+        if self.as_process:
+            self._proc = ctx.Process(target=self._worker_loop, daemon=True)
+            self._proc.start()
+        else:
+            self._proc = threading.Thread(target=self._worker_loop, daemon=True)
+            self._proc.start()
+        return self
+
+    def stop(self, timeout: float = 5.0):
+        self._stop_event.set()
+        if self._proc is not None:
+            self._proc.join(timeout=timeout)
+            if hasattr(self._proc, "is_alive") and self._proc.is_alive():
+                if hasattr(self._proc, "terminate"):
+                    self._proc.terminate()
+                    self._proc.join(timeout=1.0)
+
+    @property
+    def pid(self) -> Optional[int]:
+        if self._proc is not None and hasattr(self._proc, "pid"):
+            return self._proc.pid
+        return None
+
+    @property
+    def is_alive(self) -> bool:
+        return self._proc is not None and self._proc.is_alive()
+
+    @property
+    def is_done(self) -> bool:
+        return self._done_event.is_set()
+
+    @property
+    def total_applied(self) -> int:
+        if self._total_applied is not None:
+            return self._total_applied.value
+        return self._total_applied_counter
+
+
+class StoreAndForwardPipeline:
+    def __init__(
+        self,
+        buffer: Optional[StoreAndForwardRingBuffer] = None,
+        spool_dir: Optional[Union[str, Path]] = None,
+        source_records: Optional[Iterable[Any]] = None,
+        source_callable: Optional[Callable] = None,
+        applier_callable: Optional[Callable[[RecordBatch], Any]] = None,
+        max_memory_bytes: Optional[int] = None,
+        segment_size: Optional[int] = None,
+        batch_size: int = 100,
+        poll_timeout: float = 0.5,
+        compression: str = "auto",
+        hop: Any = None,
+        as_process: bool = True,
+    ):
+        if buffer is not None:
+            self.buffer = buffer
+        else:
+            self.buffer = StoreAndForwardRingBuffer(
+                spool_dir=spool_dir,
+                max_memory_bytes=max_memory_bytes,
+                segment_size=segment_size,
+                compression=compression,
+                hop=hop,
+            )
+        self.as_process = as_process
+        ctx = _mp_context()
+        self.ipc_queue = ctx.Queue(maxsize=50) if as_process else None
+        self.reader = StoreAndForwardReaderProcess(
+            buffer=self.buffer,
+            source_records=source_records,
+            source_callable=source_callable,
+            ipc_queue=self.ipc_queue,
+            as_process=as_process,
+        )
+        self.applier = StoreAndForwardApplierWorker(
+            buffer=self.buffer,
+            applier_callable=applier_callable,
+            ipc_queue=self.ipc_queue,
+            batch_size=batch_size,
+            poll_timeout=poll_timeout,
+            as_process=as_process,
+        )
+
+    def start(self):
+        self.reader.start()
+        self.applier.start()
+        return self
+
+    def drain(self, timeout: float = 10.0):
+        start = time.monotonic()
+        while not self.reader.is_done:
+            if (time.monotonic() - start) >= timeout:
+                break
+            time.sleep(0.01)
+        self.buffer.flush()
+        while (not self.buffer.is_empty) or (self.ipc_queue is not None and not self.ipc_queue.empty()):
+            if (time.monotonic() - start) >= timeout:
+                break
+            time.sleep(0.01)
+        self.applier.stop(timeout=1.0)
+        self.reader.stop(timeout=1.0)
+
+    def stop(self, timeout: float = 5.0):
+        self.reader.stop(timeout=timeout)
+        self.applier.stop(timeout=timeout)
+        self.buffer.close()
+
+    @property
+    def care_badge(self) -> str:
+        return self.buffer.care_badge
+
+    def stats(self) -> Dict[str, Any]:
+        s = self.buffer.stats()
+        s["reader_pid"] = self.reader.pid
+        s["applier_pid"] = self.applier.pid
+        s["reader_alive"] = self.reader.is_alive
+        s["applier_alive"] = self.applier.is_alive
+        s["reader_pushed"] = self.reader.total_pushed
+        s["applier_applied"] = self.applier.total_applied
+        return s
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop()
+
+
+def store_and_forward_buffer(hop=None, db=None, **kwargs):
+    """Factory helper for StoreAndForwardRingBuffer."""
+    spool_dir = kwargs.pop("spool_dir", None)
+    if spool_dir is None and hop is not None and db:
+        spool_dir = hop.report_dir(db) / "store_forward"
+    return StoreAndForwardRingBuffer(spool_dir=spool_dir, hop=hop, **kwargs)

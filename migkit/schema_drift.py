@@ -52,6 +52,10 @@ class BackfillTask:
     default_value: Any
     key_column: str = "id"
     batch_size: int = 1000
+    min_key: Optional[int] = None
+    max_key: Optional[int] = None
+    last_cursor: Optional[Any] = None
+    checkpoint_path: Optional[str] = None
     status: str = "PENDING"
     rows_updated: int = 0
     created_at: float = dataclasses.field(default_factory=time.time)
@@ -446,6 +450,9 @@ class BackfillOrchestrator:
         default_value: Any,
         key_column: str = "id",
         batch_size: int = 1000,
+        min_key: Optional[int] = None,
+        max_key: Optional[int] = None,
+        checkpoint_path: Optional[str] = None,
     ) -> BackfillTask:
         task_id = f"backfill_{uuid.uuid4().hex[:12]}"
         task = BackfillTask(
@@ -455,6 +462,9 @@ class BackfillOrchestrator:
             default_value=default_value,
             key_column=key_column,
             batch_size=batch_size,
+            min_key=min_key,
+            max_key=max_key,
+            checkpoint_path=checkpoint_path,
             status="PENDING",
         )
         with self._lock:
@@ -464,23 +474,132 @@ class BackfillOrchestrator:
         return task
 
     def execute_task(self, task: BackfillTask) -> None:
+        import os
+        import json
+        from migkit import durable
+        from migkit.sizing import AIMDChunkSizer
+
         task.status = "RUNNING"
         task.started_at = time.time()
         try:
             val_str = _format_default_value(task.default_value)
-            update_sql = f'UPDATE "{task.table}" SET "{task.column_name}" = {val_str} WHERE "{task.column_name}" IS NULL'
+            key_col = task.key_column or "id"
+
+            cursor_start = None
+            if task.checkpoint_path and os.path.exists(task.checkpoint_path):
+                try:
+                    with open(task.checkpoint_path, "r") as f:
+                        chk = json.load(f)
+                    if chk.get("status") == "COMPLETED":
+                        task.status = "COMPLETED"
+                        task.rows_updated = chk.get("rows_updated", 0)
+                        task.completed_at = time.time()
+                        return
+                    cursor_start = chk.get("cursor")
+                except Exception:
+                    cursor_start = None
+
             if self.conn is not None:
                 cur = self.conn.cursor()
-                cur.execute(update_sql)
-                task.rows_updated = getattr(cur, "rowcount", 0)
-                if hasattr(self.conn, "commit"):
-                    self.conn.commit()
+                min_k, max_k = task.min_key, task.max_key
+                if min_k is None or max_k is None:
+                    try:
+                        cur.execute(f'SELECT MIN("{key_col}"), MAX("{key_col}") FROM "{task.table}" WHERE "{task.column_name}" IS NULL')
+                        row = cur.fetchone()
+                        if row and row[0] is not None and row[1] is not None:
+                            min_k, max_k = row[0], row[1]
+                    except Exception:
+                        min_k, max_k = None, None
+
+                if min_k is not None and max_k is not None and isinstance(min_k, (int, float)):
+                    sizer = AIMDChunkSizer(initial=task.batch_size)
+                    cur_key = cursor_start if cursor_start is not None else min_k
+                    total_updated = 0
+                    while cur_key <= max_k:
+                        batch_rows = sizer.current()
+                        next_key = cur_key + batch_rows
+                        t0 = time.time()
+                        chunk_sql = (
+                            f'UPDATE "{task.table}" SET "{task.column_name}" = {val_str} '
+                            f'WHERE "{task.column_name}" IS NULL '
+                            f'AND "{key_col}" >= {cur_key} AND "{key_col}" < {next_key}'
+                        )
+                        cur.execute(chunk_sql)
+                        cnt = getattr(cur, "rowcount", 0)
+                        total_updated += cnt
+                        if hasattr(self.conn, "commit"):
+                            self.conn.commit()
+                        elapsed = time.time() - t0
+                        sizer.adjust(latency=elapsed, rows=cnt)
+                        task.last_cursor = next_key
+                        task.rows_updated = total_updated
+                        if task.checkpoint_path:
+                            durable.write_json(task.checkpoint_path, {
+                                "task_id": task.task_id,
+                                "table": task.table,
+                                "column": task.column_name,
+                                "cursor": next_key,
+                                "rows_updated": total_updated,
+                                "status": "RUNNING",
+                            })
+                        cur_key = next_key
+                    task.rows_updated = total_updated
+                else:
+                    update_sql = f'UPDATE "{task.table}" SET "{task.column_name}" = {val_str} WHERE "{task.column_name}" IS NULL'
+                    cur.execute(update_sql)
+                    task.rows_updated = getattr(cur, "rowcount", 0)
+                    if hasattr(self.conn, "commit"):
+                        self.conn.commit()
+
             elif self.target_executor is not None:
-                res = self.target_executor(update_sql)
-                if isinstance(res, int):
-                    task.rows_updated = res
+                if task.min_key is not None and task.max_key is not None and isinstance(task.min_key, (int, float)):
+                    sizer = AIMDChunkSizer(initial=task.batch_size)
+                    cur_key = cursor_start if cursor_start is not None else task.min_key
+                    total_updated = 0
+                    while cur_key <= task.max_key:
+                        batch_rows = sizer.current()
+                        next_key = cur_key + batch_rows
+                        t0 = time.time()
+                        chunk_sql = (
+                            f'UPDATE "{task.table}" SET "{task.column_name}" = {val_str} '
+                            f'WHERE "{task.column_name}" IS NULL '
+                            f'AND "{key_col}" >= {cur_key} AND "{key_col}" < {next_key}'
+                        )
+                        res = self.target_executor(chunk_sql)
+                        cnt = res if isinstance(res, int) else 0
+                        total_updated += cnt
+                        elapsed = time.time() - t0
+                        sizer.adjust(latency=elapsed, rows=cnt)
+                        task.last_cursor = next_key
+                        task.rows_updated = total_updated
+                        if task.checkpoint_path:
+                            durable.write_json(task.checkpoint_path, {
+                                "task_id": task.task_id,
+                                "table": task.table,
+                                "column": task.column_name,
+                                "cursor": next_key,
+                                "rows_updated": total_updated,
+                                "status": "RUNNING",
+                            })
+                        cur_key = next_key
+                    task.rows_updated = total_updated
+                else:
+                    update_sql = f'UPDATE "{task.table}" SET "{task.column_name}" = {val_str} WHERE "{task.column_name}" IS NULL'
+                    res = self.target_executor(update_sql)
+                    if isinstance(res, int):
+                        task.rows_updated = res
+
             task.status = "COMPLETED"
             task.completed_at = time.time()
+            if task.checkpoint_path:
+                durable.write_json(task.checkpoint_path, {
+                    "task_id": task.task_id,
+                    "table": task.table,
+                    "column": task.column_name,
+                    "cursor": task.last_cursor,
+                    "rows_updated": task.rows_updated,
+                    "status": "COMPLETED",
+                })
         except Exception as exc:
             task.status = "FAILED"
             task.error = str(exc)
@@ -541,6 +660,10 @@ class SchemaDriftResolver:
         auto_backfill: bool = True,
         backfill_batch_size: int = 1000,
         backfill_orchestrator: Optional[BackfillOrchestrator] = None,
+        source_catalog_inspector: Optional[Callable[[str], Dict[str, Any]]] = None,
+        source_conn: Optional[Any] = None,
+        source_engine: Optional[Any] = None,
+        checkpoint_dir: Optional[Union[str, Any]] = None,
     ):
         self.source_dialect = source_dialect.lower()
         self.target_dialect = target_dialect.lower()
@@ -556,7 +679,76 @@ class SchemaDriftResolver:
             conn=self.conn,
             async_mode=True,
         )
+        self.source_catalog_inspector = source_catalog_inspector
+        self.source_conn = source_conn
+        self.source_engine = source_engine
+        self.checkpoint_dir = checkpoint_dir
         self.resolution_history: List[DriftResolutionResult] = []
+
+    def inspect_source_catalog(self, table: str) -> Optional[Dict[str, Any]]:
+        if self.source_catalog_inspector is not None:
+            try:
+                res = self.source_catalog_inspector(table)
+                if res:
+                    return res
+            except Exception:
+                pass
+        if self.source_conn is not None:
+            res = self._probe_catalog_columns(table)
+            if res:
+                return res
+        if self.source_engine is not None:
+            res = self._probe_engine_columns(table)
+            if res:
+                return res
+        return None
+
+    def _probe_catalog_columns(self, table: str) -> Optional[Dict[str, Any]]:
+        if self.source_conn is None:
+            return None
+        try:
+            parts = table.split(".")
+            sch = parts[0] if len(parts) > 1 else "public"
+            tbl = parts[-1]
+            cur = self.source_conn.cursor()
+            cur.execute(
+                "SELECT column_name, data_type, is_nullable, column_default "
+                "FROM information_schema.columns "
+                "WHERE table_name = %s AND table_schema = %s",
+                (tbl, sch),
+            )
+            rows = cur.fetchall()
+            if not rows:
+                return None
+            cols = {}
+            for col_name, data_type, is_nullable, col_default in rows:
+                cols[col_name] = {
+                    "data_type": data_type.upper(),
+                    "nullable": is_nullable.upper() == "YES" if isinstance(is_nullable, str) else bool(is_nullable),
+                    "default": col_default,
+                }
+            return cols
+        except Exception:
+            return None
+
+    def _probe_engine_columns(self, table: str) -> Optional[Dict[str, Any]]:
+        if self.source_engine is None:
+            return None
+        try:
+            cols = {}
+            if hasattr(self.source_engine, "columns"):
+                raw = self.source_engine.columns("src", getattr(self.source_engine, "db", ""), table)
+                if raw:
+                    for c in raw:
+                        cols[c.name] = {
+                            "data_type": getattr(c, "data_type", "TEXT"),
+                            "nullable": getattr(c, "nullable", True),
+                            "default": getattr(c, "default", None),
+                        }
+                    return cols
+        except Exception:
+            pass
+        return None
 
     def detect_drift_from_columns(
         self,
@@ -669,7 +861,7 @@ class SchemaDriftResolver:
 
     def detect_drift_from_event(self, event: Dict[str, Any]) -> Tuple[Optional[str], List[DriftAction]]:
         table = event.get("table")
-        ev_type = event.get("type", "").upper()
+        ev_type = (event.get("type") or event.get("op") or "").upper()
 
         if "schema" in event and isinstance(event["schema"], dict):
             s_dict = event["schema"]
@@ -685,15 +877,40 @@ class SchemaDriftResolver:
             if tbl:
                 return tbl, self.detect_drift_from_columns(tbl, event["column_definitions"])
 
-        if ev_type in ("INSERT", "UPDATE") and "data" in event and isinstance(event["data"], dict):
+        data_map = event.get("data")
+        if data_map is None and ("values" in event or "key" in event):
+            data_map = {**(event.get("key") or {}), **(event.get("values") or {})}
+
+        if ev_type in ("INSERT", "UPDATE") and data_map and isinstance(data_map, dict):
             if not table:
                 return None, []
             cached_tbl = self.schema_cache.get_table(table)
             if cached_tbl is None:
                 return None, []
 
+            has_potential_drift = False
+            for k, val in data_map.items():
+                if k not in cached_tbl.columns:
+                    has_potential_drift = True
+                    break
+                col = cached_tbl.columns[k]
+                if val is None and col.nullable is False:
+                    has_potential_drift = True
+                    break
+                if isinstance(val, int) and (val > 2147483647 or val < -2147483648):
+                    c_base, _, _ = parse_type_signature(col.data_type)
+                    if c_base in ("INT", "INTEGER", "SMALLINT", "TINYINT", "MEDIUMINT"):
+                        has_potential_drift = True
+                        break
+
+            if not has_potential_drift:
+                return table, []
+
+            catalog_cols = self.inspect_source_catalog(table)
+            if catalog_cols:
+                return table, self.detect_drift_from_columns(table, catalog_cols)
+
             drifts: List[DriftAction] = []
-            data_map = event["data"]
             for k, val in data_map.items():
                 if k not in cached_tbl.columns:
                     inferred_type = "TEXT"
@@ -756,9 +973,10 @@ class SchemaDriftResolver:
                             )
             return table, drifts
 
-        if ev_type == "DDL" or "sql" in event:
+        if ev_type in ("DDL", "SCHEMA", "SCHEMA_CHANGE") or "sql" in event:
             raw_sql = event.get("sql", "")
-            return self._parse_ddl_for_drifts(raw_sql, table)
+            if raw_sql:
+                return self._parse_ddl_for_drifts(raw_sql, table)
 
         return table, []
 
@@ -968,13 +1186,28 @@ class SchemaDriftResolver:
             )
 
             if self.auto_backfill and self.backfill_orchestrator:
+                key_col = "id"
+                cached = self.schema_cache.get_table(table)
+                if cached:
+                    pk_cols = [c.name for c in cached.columns.values() if getattr(c, "is_primary_key", False)]
+                    if pk_cols:
+                        key_col = pk_cols[0]
+                chk_path = None
+                if self.checkpoint_dir:
+                    import os
+                    os.makedirs(str(self.checkpoint_dir), exist_ok=True)
                 for d in drifts:
                     if d.requires_backfill and d.new_default is not None:
+                        if self.checkpoint_dir:
+                            import os
+                            chk_path = os.path.join(str(self.checkpoint_dir), f"{table}_{d.column_name}.backfill.json")
                         t = self.backfill_orchestrator.schedule_backfill(
                             table=table,
                             column_name=d.column_name,
                             default_value=d.new_default,
+                            key_column=key_col,
                             batch_size=self.backfill_batch_size,
+                            checkpoint_path=chk_path,
                         )
                         backfill_tasks.append(t)
 
@@ -1044,6 +1277,76 @@ class SchemaDriftResolver:
             return self.execute_barrier(tbl, drifts, conn=conn)
         return None
 
+    def inspect_batch(
+        self,
+        eng: Any,
+        db: str,
+        changes: List[Dict[str, Any]],
+        log: Optional[Callable[[str], None]] = None,
+    ) -> List[DriftResolutionResult]:
+        from migkit import decide
+        results: List[DriftResolutionResult] = []
+        if not changes:
+            return results
+
+        by_table: Dict[str, List[Dict[str, Any]]] = {}
+        for c in changes:
+            tbl = c.get("table")
+            if tbl:
+                by_table.setdefault(tbl, []).append(c)
+
+        for tbl, tbl_changes in by_table.items():
+            all_drifts: List[DriftAction] = []
+            for ev in tbl_changes:
+                t_name, drifts = self.detect_drift_from_event(ev)
+                if drifts:
+                    all_drifts.extend(drifts)
+
+            if not all_drifts:
+                continue
+
+            seen_drifts: Set[Tuple[str, str, Any]] = set()
+            unique_drifts: List[DriftAction] = []
+            for d in all_drifts:
+                dk = (d.table, d.column_name, d.drift_type)
+                if dk not in seen_drifts:
+                    seen_drifts.add(dk)
+                    unique_drifts.append(d)
+
+            req_backfill = any(d.requires_backfill for d in unique_drifts)
+            incompatible = any(d.drift_type not in (
+                DriftType.NEW_COLUMN, DriftType.TYPE_WIDENING, DriftType.RELAXED_NULLABILITY, DriftType.ADDED_DEFAULT
+            ) for d in unique_drifts)
+
+            has_key = True
+            if hasattr(eng, "neutral_key"):
+                try:
+                    has_key = bool(eng.neutral_key("dst", db, tbl))
+                except Exception:
+                    has_key = True
+
+            facts = decide.Facts({
+                "has_drift": True,
+                "all_inline_safe": not req_backfill and not incompatible,
+                "requires_backfill": req_backfill,
+                "has_key": has_key,
+                "incompatible": incompatible,
+            })
+
+            rungs = schema_evolution_rungs()
+            choice = decide.climb("schema_evolution", rungs, facts=facts)
+
+            if choice.rung.name == "refuse_incompatible_schema_drift":
+                why = choice.why(facts) if callable(choice.why) else choice.why
+                raise SchemaDriftError(f"Incompatible schema drift on {tbl}: {why}")
+
+            if log:
+                log(f"Schema drift detected on {tbl}: executing online schema evolution via {choice.rung.name}")
+            res = self.execute_barrier(tbl, unique_drifts)
+            results.append(res)
+
+        return results
+
     def process_cdc_stream(
         self,
         stream_events: Iterable[Dict[str, Any]],
@@ -1064,9 +1367,86 @@ class SchemaDriftResolver:
                     "backfill_tasks": [t.task_id for t in barrier_res.backfill_tasks],
                 }
 
-            ev_type = event.get("type", "").upper()
+            ev_type = (event.get("type") or event.get("op") or "").upper()
             if ev_type in ("INSERT", "UPDATE", "DELETE"):
                 self.applier.apply_dml(event)
                 yield event
             elif ev_type not in ("DDL", "SCHEMA", "SCHEMA_CHANGE"):
                 yield event
+
+
+def schema_evolution_rungs() -> Tuple[Any, ...]:
+    from migkit import decide
+    return (
+        decide.Rung(
+            "admit_inline_safe_evolution",
+            "admit non-blocking online schema evolution directly without backfill",
+            needs=(
+                decide.Need(
+                    "schema drift detected",
+                    lambda f: bool(f.get("has_drift")),
+                    "no schema drift detected",
+                ),
+                decide.Need(
+                    "all drifts are non-blocking and safe for inline execution",
+                    lambda f: bool(f.get("all_inline_safe", False)),
+                    "drift requires backfill or contains incompatible operations",
+                ),
+                decide.Need(
+                    "no unapproved incompatible drift",
+                    lambda f: not bool(f.get("incompatible", False)),
+                    "incompatible schema mutation detected",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "admit_evolution_with_batched_backfill",
+            "admit schema evolution with asynchronous keyset-chunked backfill",
+            needs=(
+                decide.Need(
+                    "schema drift detected",
+                    lambda f: bool(f.get("has_drift")),
+                    "no schema drift detected",
+                ),
+                decide.Need(
+                    "drift requires default backfill",
+                    lambda f: bool(f.get("requires_backfill", False)),
+                    "no backfill needed",
+                ),
+                decide.Need(
+                    "primary key or unique cursor column available for chunking",
+                    lambda f: bool(f.get("has_key", True)),
+                    "cannot perform keyset chunked backfill without key column",
+                ),
+                decide.Need(
+                    "no unapproved incompatible drift",
+                    lambda f: not bool(f.get("incompatible", False)),
+                    "incompatible schema mutation detected",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_incompatible_schema_drift",
+            "refuse incompatible or destructive schema drift",
+            needs=(),
+        ),
+    )
+
+
+SchemaDriftController = SchemaDriftResolver
+
+
+__all__ = [
+    "SchemaDriftError",
+    "DriftType",
+    "DriftAction",
+    "BackfillTask",
+    "DriftResolutionResult",
+    "BackfillOrchestrator",
+    "SchemaDriftResolver",
+    "SchemaDriftController",
+    "schema_evolution_rungs",
+    "check_type_widening",
+    "map_type_to_dialect",
+    "generate_alter_statements",
+]

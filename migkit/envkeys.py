@@ -128,6 +128,10 @@ VARS = {
                                  " is not on the library path", "text"),
     "MIGKIT_TAIL_APPLY_ALL": Var("apply every change, for measuring what"
                                  " the tail leaves out", "flag", False),
+    "MIGKIT_RING_BUFFER_BYTES": Var("memory ceiling in bytes for store-and-forward"
+                                    " ring buffer", "whole"),
+    "MIGKIT_STORE_FORWARD": Var("enable store-and-forward ring buffer stream",
+                                "flag", False),
     "MIGKIT_ORACLE_READER": Var("one way of reading Oracle's changes"
                                 " forced: logminer or redo-files", "text"),
     "MIGKIT_ORACLE_WRITE": Var("one way of writing into Oracle put first,"

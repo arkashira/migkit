@@ -6,11 +6,23 @@ from pathlib import Path
 
 import pytest
 
+import os
+from migkit import movers
 from migkit.ring_buffer import (
+    CARE_ACTION,
+    CARE_BENIGN,
+    CARE_PASS,
+    CARE_REVIEW,
     RecordBatch,
+    StoreAndForwardApplierWorker,
+    StoreAndForwardPipeline,
+    StoreAndForwardReaderProcess,
     StoreAndForwardRingBuffer,
+    buffer_envelope_rungs,
+    decide_buffer_envelope,
     lsn_le,
     parse_lsn,
+    store_and_forward_buffer,
 )
 
 
@@ -314,3 +326,158 @@ def test_context_manager_and_stats(temp_spool):
         assert len(b) == 2
         b.commit()
         assert buf.committed_watermark == 10
+
+
+def test_dynamic_buffer_envelope_ladder(monkeypatch):
+    rungs = buffer_envelope_rungs()
+    rung_names = [r.name for r in rungs]
+    assert rung_names == [
+        "configured_custom_envelope",
+        "adaptive_host_scaled_envelope",
+        "constrained_minimal_envelope",
+    ]
+
+    mem, seg = decide_buffer_envelope(max_memory_bytes=8 * 1024 * 1024)
+    assert mem == 8 * 1024 * 1024
+    assert seg == 2 * 1024 * 1024
+
+    class FakeHop:
+        options = {"ring_buffer_max_memory": 16 * 1024 * 1024, "ring_buffer_segment_size": 4 * 1024 * 1024}
+
+    mem2, seg2 = decide_buffer_envelope(hop=FakeHop())
+    assert mem2 == 16 * 1024 * 1024
+    assert seg2 == 4 * 1024 * 1024
+
+    monkeypatch.setattr("migkit.sizing._memory", lambda: 4 * 1024 * 1024 * 1024)
+    mem3, seg3 = decide_buffer_envelope()
+    assert mem3 == 1024 * 1024 * 1024
+    assert seg3 == 64 * 1024 * 1024
+
+    monkeypatch.setattr("migkit.sizing._memory", lambda: 100 * 1024 * 1024)
+    mem4, seg4 = decide_buffer_envelope()
+    assert mem4 == 64 * 1024 * 1024
+    assert seg4 == 16 * 1024 * 1024
+
+
+def test_care_badges(temp_spool):
+    buf = StoreAndForwardRingBuffer(spool_dir=temp_spool, max_memory_bytes=2048, segment_size=4096)
+    assert buf.care_badge == CARE_PASS
+    assert buf.stats()["care_badge"] == CARE_PASS
+
+    for i in range(120):
+        buf.push({"i": i, "data": "payload_" * 20}, lsn=i)
+
+    assert buf.care_badge in (CARE_BENIGN, CARE_REVIEW)
+    b = buf.poll(batch_size=120)
+    b.commit()
+    assert buf.care_badge == CARE_PASS
+    buf.close()
+
+
+def test_movers_stream_ways_store_and_forward_rung():
+    ways = movers.stream_ways()
+    sfrb_rung = next((r for r in ways if r.name == "store_and_forward"), None)
+    assert sfrb_rung is not None
+    assert sfrb_rung.leaves and "checkpoint" in sfrb_rung.leaves
+    assert sfrb_rung.footprint == 1
+
+    from migkit import decide
+    kept, _ = decide.prune([sfrb_rung], decide.Facts({"repl": True, "store_and_forward": True}))
+    assert kept == [sfrb_rung]
+
+    _, out = decide.prune([sfrb_rung], decide.Facts({"repl": True, "store_and_forward": False}))
+    assert [r for r, _ in out] == [sfrb_rung]
+
+
+def test_decoupled_reader_and_applier_processes(temp_spool):
+    import multiprocessing
+    ctx = multiprocessing.get_context("fork")
+    m = ctx.Manager()
+    applied = m.list()
+    source_records = [({"seq": i, "val": f"event_{i}"}, 500 + i) for i in range(50)]
+
+    def record_applier(batch):
+        applied.extend(list(batch))
+
+    pipeline = StoreAndForwardPipeline(
+        spool_dir=temp_spool,
+        source_records=source_records,
+        applier_callable=record_applier,
+        max_memory_bytes=4096,
+        segment_size=2048,
+        batch_size=10,
+        as_process=True,
+    )
+
+    with pipeline:
+        assert pipeline.reader.pid is not None
+        assert pipeline.applier.pid is not None
+        assert pipeline.reader.pid != os.getpid()
+        assert pipeline.applier.pid != os.getpid()
+        assert pipeline.reader.pid != pipeline.applier.pid
+        pipeline.drain(timeout=5.0)
+
+    assert len(applied) == 50
+    assert [r["seq"] for r in applied] == list(range(50))
+    watermark_file = temp_spool / "watermark.json"
+    assert watermark_file.exists()
+
+
+def test_source_wal_protection_during_applier_latency(temp_spool):
+    import multiprocessing
+    ctx = multiprocessing.get_context("fork")
+    m = ctx.Manager()
+    applied = m.list()
+    total = 80
+    records = [({"idx": i, "chunk": "cdc_data_" * 15}, 1000 + i) for i in range(total)]
+
+    def slow_applier(batch):
+        time.sleep(0.01)
+        applied.extend(list(batch))
+
+    pipeline = StoreAndForwardPipeline(
+        spool_dir=temp_spool,
+        source_records=records,
+        applier_callable=slow_applier,
+        max_memory_bytes=1024,
+        segment_size=2048,
+        batch_size=10,
+        as_process=True,
+    )
+
+    pipeline.start()
+    t_start = time.monotonic()
+    while not pipeline.reader.is_done:
+        if (time.monotonic() - t_start) > 5.0:
+            break
+        time.sleep(0.01)
+
+    assert pipeline.reader.is_done
+    assert pipeline.reader.total_pushed == total
+
+    pipeline.drain(timeout=8.0)
+    assert len(applied) == total
+    assert [r["idx"] for r in applied] == list(range(total))
+    pipeline.stop()
+
+
+def test_movers_stream_with_store_and_forward(temp_spool):
+    applied = []
+    records = [({"id": i, "msg": f"msg_{i}"}, 200 + i) for i in range(30)]
+
+    def target_writer(batch):
+        applied.extend(batch)
+
+    pipeline = movers.stream_with_store_and_forward(
+        spool_dir=temp_spool,
+        reader_source=records,
+        applier_target=target_writer,
+        max_memory_bytes=4096,
+        batch_size=10,
+        as_process=False,
+        drain_timeout=3.0,
+    )
+
+    assert len(applied) == 30
+    assert pipeline.care_badge == CARE_PASS
+    pipeline.stop()

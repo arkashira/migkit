@@ -852,6 +852,11 @@ def apply_unit(eng, db, at, changes, apply, log=None):
     keyed = all(c.get("key") for c in changes)
     owned = faults.Owned("dst", "tail batch", str(db),
                          json.dumps(at, sort_keys=True, default=str))
+    resolver = getattr(eng, "drift_resolver", None) or getattr(eng, "schema_drift_resolver", None)
+    if resolver is None and hasattr(eng, "hop"):
+        resolver = getattr(eng.hop, "drift_resolver", None) or getattr(eng.hop, "schema_drift_resolver", None)
+    if resolver is not None and hasattr(resolver, "inspect_batch"):
+        resolver.inspect_batch(eng, db, changes, log=log)
     columns = _columns(eng, changes)
 
     def check():

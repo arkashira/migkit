@@ -227,7 +227,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/reverse.py` - (no docstring) Classes: OriginMarker, CDCEvent, FailbackResult, ReverseFailbackLoop, ReverseFailbackController.
 - `migkit/reverse_contract.py` - (no docstring) Classes: ReverseContractError, ZeroLossFailbackIneligibleError, FencePreparationError, LeaseLockError, TypeIncompatibilityError, MappingInvertibilityError.
 - `migkit/revert.py` - The way back, handed over at the same moment as the way forward.
-- `migkit/ring_buffer.py` - (no docstring) Classes: ChunkCompressor, RecordBatch, DiskSegment, StoreAndForwardRingBuffer.
+- `migkit/ring_buffer.py` - (no docstring) Classes: ChunkCompressor, RecordBatch, DiskSegment, StoreAndForwardRingBuffer, StoreAndForwardReaderProcess, StoreAndForwardApplierWorker.
 - `migkit/robust_scheduling.py` - Plan for correlated tail risk and conflicting objectives (Row 591: SMART-N8.robust-scheduling). Classes: CareBadge, RiskPreference, SchedulingStrategy, RobustSchedulingError, UnsafeEndpointHostError, ImpossibleCatchupError.
 - `migkit/rollback.py` - (no docstring) Classes: ExpandContractPhase, RollbackStrategy, AppVersionSpec, SchemaEvolutionStep, RecoveryArtifact, CurrentWriteState.
 - `migkit/rollback_set.py` - (no docstring) Classes: CyclicDependencyError, EffectNotFoundError, RollbackResolutionError, PostconditionStatus, CompensatingActionType, ForwardSafetyStatus.

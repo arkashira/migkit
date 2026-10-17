@@ -26,7 +26,7 @@ A package imports its own rank and the ranks below it, never one above. A rank o
 
 Outside the rule: `tools` (the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them); `data` (the files migkit ships as resources).
 
-## Upward imports still listed: 404
+## Upward imports still listed: 406
 
 ### (not listed)
 
@@ -47,6 +47,8 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/scanplan.py:854` decision -> engines (`engines.base`)
 - `migkit/scanplan.py:1016` decision -> workflows (`leaves`)
 - `migkit/schema.py:1` conversion -> workflows (`indexes`)
+- `migkit/schema_drift.py:480` conversion -> decision (`sizing`)
+- `migkit/schema_drift.py:1287` conversion -> decision (`decide`)
 
 ### a brand's confidence is a rung (`decide.brand_confidence`) the configuration reads once the server's signs are in; the rung moves below configuration
 
@@ -912,7 +914,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### engines reaches `cli` (cli); the shared piece moves below both, or the call is inverted
 
-- `migkit/engines/base.py:7959` engines -> cli (`cli`)
+- `migkit/engines/base.py:7958` engines -> cli (`cli`)
 - `migkit/engines/oracle_pump.py:227` engines -> cli (`cli`)
 
 ### every provider call waits on the egress gate (`cloudapi.gate`, `egress.decide`) before its client is made; the gate moves to a contract below persistence
