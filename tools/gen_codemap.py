@@ -592,7 +592,9 @@ _BY_NAME = {
                  " conflict_semantics mapping_proof reverse_contract"
                  " snapshot_watermark source_role traffic_state"
                  " conversion_ledger ai_proof_loop rule_generalization"
-                 " dynamic_sql_tracer etl_bi_waves query_regression principal_migration",
+                 " dynamic_sql_tracer etl_bi_waves query_regression principal_migration"
+                 " target_tuning_contract history_contract stream_metadata document_model"
+                 " cache_semantics shard_ddl placement_advice",
     "cli": "cli guide ui estate",
 }
 #: a subpackage, whole

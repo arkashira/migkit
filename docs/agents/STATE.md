@@ -312,7 +312,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 
 ## Source layout
 
-451 upward imports still listed (`docs/agents/LAYERS.md`; the list only shrinks); 0 files no package claims (`docs/agents/INVENTORY.md`).
+404 upward imports still listed (`docs/agents/LAYERS.md`; the list only shrinks); 0 files no package claims (`docs/agents/INVENTORY.md`).
 
 Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 4290 ordered pairs of 66 engines; 50 shape lacks, 38 capability lacks, 3112 depth lacks in all; fewest mysql -> postgres (1), most vertica -> saphana (162).
 
@@ -396,7 +396,7 @@ Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 4290 
 
 ## Backlog (688 items, `docs/backlog-index.md`)
 
-DONE 448 - REVIEW 73 - PARTLY 79 - OPEN 67 - BLOCKED 12 - NOT PURSUED 9
+DONE 448 - REVIEW 80 - PARTLY 79 - OPEN 60 - BLOCKED 12 - NOT PURSUED 9
 
 | area | DONE | REVIEW | PARTLY | IN PROGRESS | OPEN | BLOCKED | NOT PURSUED |
 |---|---|---|---|---|---|---|---|
@@ -406,7 +406,7 @@ DONE 448 - REVIEW 73 - PARTLY 79 - OPEN 67 - BLOCKED 12 - NOT PURSUED 9
 | correctness/operations | 1 | 0 | 1 | 0 | 0 | 0 | 0 |
 | correctness/performance | 0 | 0 | 1 | 0 | 0 | 0 | 0 |
 | cutover | 21 | 2 | 1 | 0 | 0 | 0 | 0 |
-| decision engine | 2 | 48 | 0 | 0 | 50 | 0 | 0 |
+| decision engine | 2 | 55 | 0 | 0 | 43 | 0 | 0 |
 | ease of use | 35 | 3 | 6 | 0 | 0 | 1 | 1 |
 | engines | 48 | 0 | 12 | 0 | 2 | 3 | 1 |
 | maintainability | 10 | 0 | 2 | 0 | 2 | 0 | 0 |

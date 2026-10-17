@@ -22,7 +22,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - [`docs/agents/INVENTORY.md`](INVENTORY.md) - every file of `migkit/` and `tools/`: its responsibility package, owner domain, size, importers, the packages it reaches, the programs it wraps and the tests that reach it
 - [`docs/agents/LAYERS.md`](LAYERS.md) - the layering rule (a package imports its own rank and below) and every upward import still listed, with its reason
 
-## `migkit/` (239 modules)
+## `migkit/` (246 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/ack_lattice.py` - (no docstring) Classes: PipelineStage, MonotoneRegressionError, SourceAckRefusedError, CutoverRefusedError, CutoverAuthorization, PositionLattice.
@@ -49,6 +49,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/blockseed.py` - A seed carried as the blocks of a volume snapshot (backlog LT.P2). Classes: Refused, Carried.
 - `migkit/bsontype.py` - A MongoDB value compared as its BSON type and its value, both.
 - `migkit/bulkways.py` - The whole-database ways of the keyed engines, ranked by what each has measured on the hop (backlog F7.rshake, F7.mm2).
+- `migkit/cache_semantics.py` - (no docstring) Classes: CacheSemanticsError, UnsafeTestHostError, LeaseLockError, LateFullResyncForbiddenError, ReverseSyncFlushForbiddenError, RoutingSyncCouplingError.
 - `migkit/cancel_recovery.py` - (no docstring) Classes: SnapshotTxState, TxValidationError, TxStateError, DiagnosticEvidence, SnapshotTx, SnapshotTxStore.
 - `migkit/canon.py` - One text rendering of a value that two different engines both produce. Classes: Added, Kept, Limits.
 - `migkit/canon_oracle.py` - (no docstring) Classes: ScalePolicy, SpacePolicy, CollationPolicy, SignedZeroPolicy, DriftKind, DriftResult.
@@ -88,6 +89,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/described.py` - What a table migkit made on a store that keeps no column types is: its columns' classes and its key, kept beside the store's endpoint on thi
 - `migkit/diagnostics.py` - A bundle to report a problem with, holding nothing to hand over. Classes: Reading, ProbeAccumulator.
 - `migkit/digests.py` - Every table's digest as a check took it, kept so anyone can take it again (backlog R23.1).
+- `migkit/document_model.py` - Normalized-to-document transformation and update/delete propagation verifier (Row 636: RCH28.document-model). Classes: CareBadge, RelationMultiplicity, OrderSemantics, DeletePropagationPolicy, TypeConversionKind, VerificationFetchStrategy.
 - `migkit/drainmark.py` - A drain proved by a mark written on the source, where the stream keeps no position migkit can hold it to.
 - `migkit/drift.py` - Did the source's shape change while it was being moved.
 - `migkit/dsbulk.py` - A Cassandra or ScyllaDB table copied by the bulk loader (backlog F7.dsbulk), beside migkit's own copier by token ranges.
@@ -118,6 +120,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/ha.py` - The mover highly available: a standby that takes a hop's move over from the last position committed, and the proof that one machine wrote at Classes: Holding.
 - `migkit/handoff_overlap.py` - (no docstring) Classes: HandoffError, HandoffGapError, HandoffFencingError, HandoffContractExpiredError, HandoffContractStateError, SnapshotLifetime.
 - `migkit/handwork.py` - What the migration will not do for you, counted and named. Classes: Inventory.
+- `migkit/history_contract.py` - Distinguish current-state migration from complete change history (Row 634: RCH26.history-contract). Classes: CareBadge, HistoryGoal, CaptureMechanism, DeletionSemantics, PreCutoffMode, OperationType.
 - `migkit/hopkeys.py` - Every key a hop may say, in one place, and the configuration checked against it before anything runs (backlog R21). Classes: Key, Problem.
 - `migkit/huawei_sdk.py` - Huawei Cloud's API for migkit, run in the environment its SDK lives in.
 - `migkit/identity_semantics.py` - (no docstring) Classes: IdentitySemanticsError, IdentityContractViolationError, NonInjectiveKeyError, KeyStrategy, CollationSemantics, BulkApplyResult.
@@ -162,6 +165,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/pgslot.py` - Reading what a PostgreSQL logical slot says, when it says it in text. Classes: Stream.
 - `migkit/physical.py` - Physical where the source allows it, logical everywhere else (backlog R19 lever 1): the target seeded from a copy of the source's pages, the Classes: Unread, Facts, PgFacts, MyFacts.
 - `migkit/pieces.py` - Large values: one way for every engine to size, read, write and hash them (backlog P0-PARITY; R10 and R22 did it for PostgreSQL, MySQL and O Classes: Limit, Sizing, Hashed, hashing, Way, Sql.
+- `migkit/placement_advice.py` - Connect assessment to measured target topology and sizing (Row 639: RCH31.placement-advice). Classes: CareBadge, TargetTopologyKind, DistributionStrategy, EvidenceTruth, PlacementAdviceError, ActiveLeaseConflictError.
 - `migkit/planner.py` - Which way each table goes, decided from facts about it, and why. Classes: Decision, Phase, Ewma, CatchUp, Overlap, TopologyRun.
 - `migkit/principal_migration.py` - Principal security semantics migration (Row 632: RCH24.principal-migration). Classes: CareBadge, EngineDialect, PrincipalType, SecurityType, ConflictAction, DuplicateAccountResolution.
 - `migkit/private_proof.py` - (no docstring) Classes: PrivateProofError, DebtSeverity, DebtCategory, VerificationStatus, SaltEpoch, SaltRotationManager.
@@ -212,6 +216,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/session.py` - One run of migkit: the command an operator started on a hop, and what is kept of it (backlog R23.1, R23.8, R23.10). Classes: Decisions.
 - `migkit/setaside.py` - What a load takes off a target to put back afterwards, kept on disk per process. Classes: SetAside.
 - `migkit/shadow_resync.py` - (no docstring) Classes: ShadowResyncError, InsufficientHeadroomError, ValidationFailedError, AtomicSwapCrashError, RollbackError, InvalidStrategyError.
+- `migkit/shard_ddl.py` - (no docstring) Classes: CareBadge, DDLProgressMode, BarrierStatus, ShardDDLError, UnrepresentableShardDDLError, ShardDeadlockError.
 - `migkit/shared.py` - Where the machines of one hop agree: records each written only over the version that was read (backlog W1). Classes: Directory, Target.
 - `migkit/ship.py` - A seed shipped on media, where the link is too narrow to copy the data in time (the owner's scope, 2026-10-01: "data too large for the link" Classes: Unfit, BadPart, Different, Times, Full, Done.
 - `migkit/sizing.py` - How many things a move does at once, worked out rather than asked for. Classes: Plan, RoundTrip, Loss, Held, Strain, Limit.
@@ -223,6 +228,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/stall.py` - A copy whose link holds and passes nothing is given up on. Classes: Stalled, Guard, Watch.
 - `migkit/standby.py` - Reading a side that is a replica, and what that does to the answer.
 - `migkit/state.py` - Pluggable state backend, terraform-style. Classes: LocalStore, S3Store, Taken, S3RunState, Mirror, TailMirror.
+- `migkit/stream_metadata.py` - Move event consumers and schemas with stream bytes (Row 635: RCH27.stream-metadata). Classes: CareBadge, OffsetCapability, CleanupPolicy, PromotionPhase, ConsumerGroupState, SchemaFormat.
 - `migkit/streamout.py` - Changes delivered as messages into a stream, in the shapes consumers expect (backlog 35): what a message is, whatever carries it - a Kafka t
 - `migkit/subset.py` - Copies for testing (backlog R23, 5): the rows chosen and every row they refer to, masked where the hop says, into a staging or developer dat Classes: Rule, Plan.
 - `migkit/support_reproducer.py` - (no docstring) Classes: PrivacyScanReport, PrivacyScanner, SyntheticFixture, SyntheticFixtureGenerator, DiagnosticBundle, SupportReproducer.
@@ -232,6 +238,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/tailtables.py` - A running tail's tables, each in a state of its own (backlog L1, L4, L5, L6; research: leapfrog live tail 2026-09-28, section 1.3). Classes: Store, Spool, TableSet.
 - `migkit/tailwhere.py` - Where a quiet tail stands, from what a following engine's server answers in one bounded round: the helpers an engine's `tail_where` is built
 - `migkit/tally.py` - Rows counted and fingerprinted as they pass through a copy. Classes: Tally.
+- `migkit/target_tuning_contract.py` - Treat ingest tuning as a temporary durability contract (Row 633: RCH25.target-tuning-contract). Classes: CareBadge, SettingScope, TuningKind, ContractPhase, TargetTuningContractError, UnsafeTargetHostError.
 - `migkit/telemetry.py` - Product telemetry: what migkit did, never what it carried (backlog P0-PRODUCT-TELEMETRY). Classes: Rejected, Run, Decision, Progress, Resources, Recovery.
 - `migkit/throttle.py` - Keep verification from becoming the outage it went looking for. Classes: Health, Throttle.
 - `migkit/tls.py` - Whether a connection to a server can be verified, asked of the server.

@@ -11,6 +11,8 @@ from tests.rung_branches import HOLDS, REFUSES, branch, watched, why
 PROVES_RUNGS = [
     ("util", "_estimate_rungs", "eta.window", "holds"),
     ("util", "_estimate_rungs", "eta.window", "refuses"),
+    ("util", "_estimate_rungs", "eta.initial", "holds"),
+    ("util", "_estimate_rungs", "eta.initial", "refuses"),
     ("util", "_estimate_rungs", "eta.kept", "holds"),
     ("util", "_estimate_rungs", "eta.kept", "refuses"),
     ("util", "_estimate_rungs", "eta.none", "holds"),
@@ -25,8 +27,8 @@ PROVES_RUNGS = [
 ]
 
 
-def _eta(measured, kept):
-    facts = decide.Facts({"measured": measured, "warmup": 3},
+def _eta(measured, kept, instant=False):
+    facts = decide.Facts({"measured": measured, "warmup": 3, "instant": instant},
                          kept_rate=lambda: kept)
     with watched() as seen:
         got = decide.climb("when the copy ends", util._estimate_rungs(),
@@ -38,9 +40,16 @@ def test_a_warmed_up_run_estimates_on_its_own_units():
     got, seen = _eta(5, None)
     assert got.rung.name == "eta.window"
     assert branch(seen, "eta.window") == [HOLDS]
+    assert branch(seen, "eta.initial") == [REFUSES]
     assert branch(seen, "eta.kept") == [REFUSES]
     assert why(seen, "eta.kept") == "this run has measured enough of its own"
     assert branch(seen, "eta.none") == [HOLDS]
+
+
+def test_instant_cold_start_estimates_on_first_unit():
+    got, seen = _eta(1, None, instant=True)
+    assert got.rung.name == "eta.initial"
+    assert branch(seen, "eta.initial") == [HOLDS]
 
 
 def test_before_the_warm_up_an_earlier_runs_rate_is_taken():

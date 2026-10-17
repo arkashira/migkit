@@ -16,6 +16,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+import tests.rung_branches
 
 from migkit import decide
 from migkit.retention_controller import (
@@ -34,6 +35,18 @@ from migkit.retention_controller import (
     RetentionForecaster,
     RetentionMetrics,
 )
+
+PROVES_RUNGS = [
+    ("retention_action", "stop_and_reseed", "holds"),
+    ("retention_action", "stop_and_reseed", "refuses"),
+    ("retention_action", "expand_capacity", "holds"),
+    ("retention_action", "expand_capacity", "refuses"),
+    ("retention_action", "throttle_safe_stages", "holds"),
+    ("retention_action", "throttle_safe_stages", "refuses"),
+    ("retention_action", "speed_copy", "holds"),
+    ("retention_action", "speed_copy", "refuses"),
+    ("retention_action", "steady", "holds"),
+]
 
 
 @pytest.fixture
@@ -449,3 +462,25 @@ def test_pure_unix_terse_output_and_badges(tmp_dir):
     assert "cons=" in report
     assert "spool=" in report
     assert "disk_free=" in report
+
+
+def test_retention_action_rungs_watched():
+    with tests.rung_branches.watched() as seen:
+        decide.retention_action({
+            "stop_required": True,
+            "expansion_available": 100,
+            "throttle_safe": True,
+            "can_speed": True,
+            "drain_needed": True,
+        })
+        decide.retention_action({
+            "stop_required": False,
+            "expansion_available": 0,
+            "throttle_safe": False,
+            "can_speed": False,
+            "drain_needed": False,
+        })
+    for name in ("stop_and_reseed", "expand_capacity", "throttle_safe_stages", "speed_copy"):
+        assert set(tests.rung_branches.branch(seen, name)) == {"holds", "refuses"}
+    assert "holds" in tests.rung_branches.branch(seen, "steady")
+

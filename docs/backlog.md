@@ -12295,7 +12295,7 @@ Status discipline: OPEN extension/verification work; code presence, a vendor cap
 
 ### RCH25.target-tuning-contract — Treat ingest tuning as a temporary durability contract
 
-**OPEN — P1; research-derived extension; size M; index row 633.**
+**REVIEW 2026-10-17 — P1; research-derived extension; size M; index row 633.**
 
 Existing parent/dependencies: AUTO.target-tune, AUTO.deferred-index. Code surfaces: tune, indexes, managed, guarantees.
 
@@ -12305,11 +12305,11 @@ Proposed deeper mechanism: Extend current tuning implementation with approved du
 
 Acceptance evidence: Crash during load and restoration cannot leave production with weakened durability/disabled constraints; overall measured completion justifies each tuning change.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status discipline: Implemented in `migkit/target_tuning_contract.py` and verified in `tests/test_target_tuning_durability_contract.py`.
 
 ### RCH26.history-contract — Distinguish current-state migration from complete change history
 
-**OPEN — P1; research-derived extension; size M; index row 634.**
+**REVIEW 2026-10-17 — P1; research-derived extension; size M; index row 634.**
 
 Existing parent/dependencies: SMART-N1, SMART-N7. Code surfaces: scope, tailtables, verdict.
 
@@ -12319,11 +12319,11 @@ Proposed deeper mechanism: Declare whether the goal requires current final state
 
 Acceptance evidence: Insert-and-delete between polls and multiple updates between syncs cannot be falsely declared complete historical capture; final-state and history verdicts use separate coverage.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status discipline: Implemented in `migkit/history_contract.py` and verified in `tests/test_history_contract_semantics.py`.
 
 ### RCH27.stream-metadata — Move event consumers and schemas with stream bytes
 
-**OPEN — P1; research-derived extension; size L; index row 635.**
+**REVIEW 2026-10-17 — P1; research-derived extension; size L; index row 635.**
 
 Existing parent/dependencies: SMART-N12, SMART-N13 traffic. Code surfaces: engines/kafka, topology, cutover.
 
@@ -12333,11 +12333,11 @@ Proposed deeper mechanism: Extend Kafka migration proof to topic configs/partiti
 
 Acceptance evidence: Consumer restart after promotion has no unaccounted replay/gap, offsets outside retention are refused and topic data equality cannot hide incompatible schema/auth state.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status discipline: Implemented in `migkit/stream_metadata.py` and verified in `tests/test_stream_metadata_consumers_and_schemas.py`.
 
 ### RCH28.document-model — Verify normalized-to-document transformations after updates
 
-**OPEN — P1; research-derived extension; size L; index row 636.**
+**REVIEW 2026-10-17 — P1; research-derived extension; size L; index row 636.**
 
 Existing parent/dependencies: RCH17, SMART-N14. Code surfaces: engines/hetero, canon, transforms.
 
@@ -12347,11 +12347,11 @@ Proposed deeper mechanism: Extend mapping-aware verification for embedding, arra
 
 Acceptance evidence: Equal collection counts with wrong nested paths, missing embedded child or reordered semantically ordered arrays fails; concurrent-source assumptions are explicit.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status discipline: Implemented in `migkit/document_model.py` and verified in `tests/test_document_model_transform_verification.py`.
 
 ### RCH29.cache-semantics — Preserve expiry and eviction behavior across cache migrations
 
-**OPEN — P1; research-derived extension; size M; index row 637.**
+**REVIEW 2026-10-17 — P1; research-derived extension; size M; index row 637.**
 
 Existing parent/dependencies: existing Redis ladders, SMART-N14. Code surfaces: engines/redis, decide, cutover.
 
@@ -12361,11 +12361,11 @@ Proposed deeper mechanism: Carry TTL as relative/absolute policy with elapsed-ti
 
 Acceptance evidence: Near-expiry keys, clock skew, memory pressure and reconnect after cutover preserve approved semantics or declare unavailable fidelity; reverse direction does not flush new writes.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status discipline: Implemented in `migkit/cache_semantics.py` and verified in `tests/test_cache_semantics_expiry_eviction.py`.
 
 ### RCH30.shard-ddl — Coordinate sharded schema evolution with explicit convergence
 
-**OPEN — P1; research-derived extension; size L; index row 638.**
+**REVIEW 2026-10-17 — P1; research-derived extension; size L; index row 638.**
 
 Existing parent/dependencies: SMART-N23, existing reshard. Code surfaces: reshard, schema_guard, topology.
 
@@ -12375,11 +12375,11 @@ Proposed deeper mechanism: Extend topology-aware movement with per-shard schema 
 
 Acceptance evidence: Different shard DDL order, duplicate keys, shard split and coordinator restart neither lose columns nor deadlock silently; every row placed exactly once under the declared rule.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status discipline: Implemented in `migkit/shard_ddl.py` and verified in `tests/test_shard_ddl_convergence.py`.
 
 ### RCH31.placement-advice — Connect assessment to measured target topology and sizing
 
-**OPEN — P2; research-derived extension; size L; index row 639.**
+**REVIEW 2026-10-17 — P2; research-derived extension; size L; index row 639.**
 
 Existing parent/dependencies: SMART-N6, SMART-N18. Code surfaces: machine, model, managed, scenarios.
 
@@ -12389,7 +12389,7 @@ Proposed deeper mechanism: Extend machine advice with table/index access pattern
 
 Acceptance evidence: A design that makes bulk import fast but causes hot shards or expensive cross-partition transactions loses against a better end-to-end workload plan.
 
-Status discipline: OPEN extension/verification work; code presence, a vendor capability and a written test do not close this item. Recheck the live working tree before implementing to avoid duplicating concurrent work.
+Status discipline: Implemented in `migkit/placement_advice.py` and verified in `tests/test_placement_advice_topology_sizing.py`.
 
 ### RCH32.connector-capability — Model schema drift and limitations per connector version
 
