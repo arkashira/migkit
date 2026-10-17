@@ -22,6 +22,10 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 
+from . import decide
+
+SPECIFICITY_TIE_EPSILON: float = 0.001
+
 
 class CareBadge(str, Enum):
     ACTION = "ACTION"
@@ -823,8 +827,9 @@ class RuleGeneralizationEngine:
                     discrepancies.append(f"Case {tc.case_id} evaluation failed: {ex}")
                     continue
             else:
-                # Default mock evaluation: pass if syntax ok
-                res = tc.expected_output
+                fails += 1
+                discrepancies.append(f"Case {tc.case_id} evaluation failed: neither custom_executor nor eval_fn provided")
+                continue
 
             # Compare res to expected output
             if self._compare_values(res, tc.expected_output):
@@ -1023,7 +1028,7 @@ class RuleGeneralizationEngine:
         candidates = [r.rule_id for r in sorted_rules]
 
         # Check for ambiguity
-        if abs(top_rule.specificity_score - second_rule.specificity_score) < 0.001:
+        if abs(top_rule.specificity_score - second_rule.specificity_score) < SPECIFICITY_TIE_EPSILON:
             # Equal specificity score: check if transformations produce identical result
             sql1 = top_rule.apply_rewrite(routine.baseline_sql)
             sql2 = second_rule.apply_rewrite(routine.baseline_sql)
@@ -1118,13 +1123,7 @@ class RuleGeneralizationEngine:
         """Rolls back an active rule to the deterministic baseline immediately."""
         rule = self.rules.get(rule_id)
         if not rule:
-            return RollbackResult(
-                rule_id=rule_id,
-                badge=CareBadge.REVIEW,
-                restored_routines_count=0,
-                verified_baseline_match=False,
-                details=f"Rule {rule_id} not found in engine registry",
-            )
+            raise RuleGeneralizationError(f"Rule {rule_id} not found in engine registry")
 
         rule.status = RuleStatus.ROLLED_BACK
         rule.revoked_at_epoch = time.time()
@@ -1306,3 +1305,96 @@ def format_unix_report(report_dict: Dict[str, Any]) -> str:
             lines.append(f"{k.upper():<20}: {v}")
     lines.append("----------------------------------------------------------------")
     return "\n".join(lines)
+
+
+def rule_generalization_rungs() -> Tuple[decide.Rung, ...]:
+    """Decide ladder for rule generalization admission and safety (Row 628: RCH20)."""
+    return (
+        decide.Rung(
+            "admitted",
+            "admit generalized rule verified by shadow evaluation and zero withheld regressions",
+            needs=(
+                decide.Need(
+                    "evaluated against shadow workload",
+                    lambda f: bool(f.get("evaluated")),
+                    "{rung} requires rule to be evaluated against shadow workload",
+                ),
+                decide.Need(
+                    "target family supported",
+                    lambda f: bool(f.get("family_supported", True)),
+                    "{rung} requires target object family to be supported",
+                ),
+                decide.Need(
+                    "zero withheld regressions",
+                    lambda f: int(f.get("withheld_failures", 0)) == 0,
+                    "{rung} requires zero regressions across withheld test suites",
+                ),
+                decide.Need(
+                    "shadow output conforms",
+                    lambda f: int(f.get("shadow_divergence_count", 0)) == 0,
+                    "{rung} requires shadow output to conform without unintended alterations",
+                ),
+                decide.Need(
+                    "no unresolved conflicts",
+                    lambda f: int(f.get("conflicts_unresolved", 0)) == 0,
+                    "{rung} requires all competing rule conflicts to be resolved",
+                ),
+                decide.Need(
+                    "rollback verified",
+                    lambda f: bool(f.get("rollback_validated", True)),
+                    "{rung} requires atomic rollback to be preflighted and verified",
+                ),
+            ),
+            because="rule passed shadow evaluation across all suites with zero regressions and verified rollback",
+        ),
+        decide.Rung(
+            "shadow_divergence_review",
+            "flag rule for REVIEW due to non-breaking shadow divergence or tie in specificity",
+            needs=(
+                decide.Need(
+                    "evaluated against shadow workload",
+                    lambda f: bool(f.get("evaluated")),
+                    "{rung} requires rule to be evaluated against shadow workload",
+                ),
+                decide.Need(
+                    "zero withheld regressions",
+                    lambda f: int(f.get("withheld_failures", 0)) == 0,
+                    "{rung} requires zero regressions across withheld test suites",
+                ),
+                decide.Need(
+                    "shadow divergence or specificity tie present",
+                    lambda f: int(f.get("shadow_divergence_count", 0)) > 0 or bool(f.get("specificity_tie")),
+                    "{rung} requires shadow divergence or specificity tie to flag for review",
+                ),
+            ),
+            because="rule produced non-regressive shadow divergence or specificity tie requiring human review",
+        ),
+        decide.Rung(
+            "rollback_untested_review",
+            "flag rule for REVIEW due to unverified atomic rollback preflight",
+            needs=(
+                decide.Need(
+                    "evaluated against shadow workload",
+                    lambda f: bool(f.get("evaluated")),
+                    "{rung} requires rule to be evaluated against shadow workload",
+                ),
+                decide.Need(
+                    "rollback unverified",
+                    lambda f: not bool(f.get("rollback_validated", True)),
+                    "{rung} requires rollback to be unverified to flag for rollback review",
+                ),
+            ),
+            because="rule passed tests but atomic rollback preflight is unverified",
+        ),
+        decide.Rung(
+            "rejection_action",
+            "reject rule generalization with ACTION care badge",
+            because="rule caused regression on withheld suites, family mismatch, or unhandled conflicts",
+        ),
+    )
+
+
+def decide_rule_generalization(facts: Dict[str, Any]) -> decide.Choice:
+    """Climbs rule_generalization_rungs decide ladder."""
+    return decide.climb("Rule generalization admission", rule_generalization_rungs(), facts)
+

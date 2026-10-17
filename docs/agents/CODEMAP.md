@@ -22,7 +22,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - [`docs/agents/INVENTORY.md`](INVENTORY.md) - every file of `migkit/` and `tools/`: its responsibility package, owner domain, size, importers, the packages it reaches, the programs it wraps and the tests that reach it
 - [`docs/agents/LAYERS.md`](LAYERS.md) - the layering rule (a package imports its own rank and below) and every upward import still listed, with its reason
 
-## `migkit/` (287 modules)
+## `migkit/` (288 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/ack_lattice.py` - (no docstring) Classes: PipelineStage, MonotoneRegressionError, SourceAckRefusedError, CutoverRefusedError, CutoverAuthorization, PositionLattice.
@@ -31,7 +31,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/addresses.py` - A hop from two addresses (backlog R21).
 - `migkit/advisors.py` - (no docstring)
 - `migkit/agent_control.py` - Expose resumable constrained migration operations to agents (Row 641: RCH33.agent-control). Classes: CareBadge, AgentPhase, AdmissionVerdict, AgentControlError, UnsupportedInterfaceVersionError, ScopeWideningRefusedError.
-- `migkit/ai_proof_loop.py` - AI Proof Loop with independent executable evidence (RCH19.ai-proof-loop). Classes: CareBadge, ProofStatus, SemanticFaultType, TransactionState, AiAnnotation, CandidateProvenance.
+- `migkit/ai_proof_loop.py` - AI Proof Loop with independent executable evidence (RCH19.ai-proof-loop). Classes: AiProofLoopError, InexecutableCandidateError, LeaseLockHeldError, CorruptCheckpointError, CareBadge, ProofStatus.
 - `migkit/anchor.py` - Signed checkpoints of the audit record, kept in a bucket that cannot be rewritten (backlog R5.anchor). Classes: Refused, Blocked.
 - `migkit/anti_corruption.py` - Test the verifier against its own blind spots (backlog RCH39, row 647). Classes: World, Defect, Verifier, Outcome, Report.
 - `migkit/application_readiness.py` - Prove application-visible readiness beyond data equality (Row 601: SMART-N18.application-readiness). Classes: CareBadge, WorkloadEvidenceStatus, ReadinessTier, ApplicationReadinessError, UnsafeEndpointError, UnsafeExecutionError.
@@ -85,7 +85,8 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/context_learning.py` - Transfer measurements without false confidence (Row 586: SMART-N3.context-learning). Classes: CareBadge, ContextLearningError, UnsafeEndpointHostError, CorruptedMeasurementError, VerificationLeaseError, UncalibratedIntervalError.
 - `migkit/continuous_scope.py` - Maintain exact scope and proof while objects and data change (Row 599: SMART-N16.continuous-scope). Classes: CareBadge, ObjectStatus, LifecycleEventKind, ProofStatus, HandoffStatus, RecoveryStatus.
 - `migkit/control_upgrade.py` - (no docstring) Classes: StateSchemaVersion, InvariantViolationError, UpgradeRollbackError, HopDefinition, AdapterCheckpoint, DurableControlState.
-- `migkit/conversion_ledger.py` - Scope-distinct conversion ledger (RCH18.conversion-ledger). Classes: CareBadge, ArtefactKind, ArtefactCriticality, LifecycleStage, DebtType, DebtRecord.
+- `migkit/conversion_ledger.py` - Scope-distinct conversion ledger (RCH18.conversion-ledger). Classes: ConversionLedgerError, CorruptLockError, LockAcquisitionError, CareBadge, ArtefactKind, ArtefactCriticality.
+- `migkit/convert.py` - Stored code conversion and rule generalization integration (Row 628: RCH20).
 - `migkit/copybook.py` - COBOL copybooks, and the records they describe, read and written exactly. Classes: CopybookError, Unreadable, Figurative, Item, Picture, Leaf.
 - `migkit/cost_envelope.py` - (no docstring) Classes: CostEnvelopeError, BudgetExceededAction, RateSource, CostDimension, PlanType, CostUnknown.
 - `migkit/costmodel.py` - What a way costs, as a function of the work, with how sure that is (backlog P0-SMART, items 1, 2, 6 and learning across hops). Classes: Estimate, Fit, Knowledge, CostModel.
@@ -109,7 +110,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/drift.py` - Did the source's shape change while it was being moved.
 - `migkit/dsbulk.py` - A Cassandra or ScyllaDB table copied by the bulk loader (backlog F7.dsbulk), beside migkit's own copier by token ranges.
 - `migkit/durable.py` - State that survives a crash and a power loss, written one way. Classes: Torn.
-- `migkit/dynamic_sql_tracer.py` - Trace dynamic SQL and external application dependencies (backlog RCH21, row 629). Classes: CareBadge, DependencySourceKind, ResolutionState, CallSite, RuntimeTrace, TableShape.
+- `migkit/dynamic_sql_tracer.py` - Trace dynamic SQL and external application dependencies (backlog RCH21, row 629). Classes: DynamicSQLTracerError, CorruptLockError, LockAcquisitionError, CorruptCheckpointError, DynamicSQLParseError, CareBadge.
 - `migkit/editions.py` - An edition change: the same engine, sold or built as another edition (backlog P0-SCENARIOS - "SQL Server Web edition to Datacenter (Enterpri Classes: Edition, Feature, Use.
 - `migkit/effect_checkpoint.py` - (no docstring) Classes: EngineSemantics, EffectCheckpointError, CheckpointReconstructionError, OwnershipViolationError, RetentionExpiredError, AtomicTransactionError.
 - `migkit/egress.py` - What leaves the machine, and the one gate it goes through (audit 2026-10-01, SEC12, SEC20, W8).
@@ -174,7 +175,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/logddl.py` - A DDL statement as a change log carries it, read for the tables it touches and what it does to each (`canon.ddl`).
 - `migkit/machine.py` - The machine to run on, and the class the target needs (backlog R22, item 6). Classes: Machine, Stages, Advice, Spent.
 - `migkit/managed.py` - Every managed database service in one catalogue, read one way for any pair (the owner, 2026-10-01: "any <-> any from the start"). Classes: Service, Side, Plan.
-- `migkit/mapping_proof.py` - Composed mapping proof for load and CDC (RCH17.mapping-proof). Classes: CareBadge, LossinessCategory, MultiplicityKind, ChangeOp, Discrepancy, StageLineage.
+- `migkit/mapping_proof.py` - Composed mapping proof for load and CDC (RCH17.mapping-proof). Classes: CareBadge, MappingProofError, MappingPredicateEvaluationError, LossinessCategory, MultiplicityKind, ChangeOp.
 - `migkit/marks.py` - How a two-way tail tells its own writes apart on a side: the rungs (backlog R3, decided 2026-09-27).
 - `migkit/masking.py` - Values from the rows, masked where the hop asks, wherever a person or a report sees them (G2).
 - `migkit/merkle.py` - Hierarchical in-database recursive Merkle tree folding (SUPER.merkle-fold). Classes: DiscordantRange, MerkleNode, MerkleTree, MerkleTreeFolder, VerificationSlice, VerificationSliceManager.
@@ -203,7 +204,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/provider_path.py` - Differentiate provider-native and generic migration paths (Row 609: RCH01.provider-path). Classes: CareBadge, MigrationPathKind, SecondaryObjectKind, SecondaryValidationStrategy, ProviderResourceKind, ProviderResourceState.
 - `migkit/proxy.py` - Pooler and proxy coordinators and seamless cutover traffic shifting. Classes: ProxyShiftResult, BaseProxyCoordinator, PgBouncerCoordinator, ProxySQLCoordinator, EnvoyXdsCoordinator.
 - `migkit/query_guard.py` - (no docstring) Classes: CareBadge, QueryPattern, ExecutionPlan, ParityIssue, IndexRecommendation, QueryParityReport.
-- `migkit/query_regression.py` - Continuous query regression and behavioral performance envelope gating (RCH23, row 631). Classes: QueryRegressionError, UnsafeEndpointError, SyntheticBenchmarkLabelError, WorkloadNotApprovedError, ParameterDistribution, WorkloadQuery.
+- `migkit/query_regression.py` - Continuous query regression and behavioral performance envelope gating (RCH23, row 631). Classes: RegressionThresholds, QueryRegressionError, UnsafeEndpointError, SyntheticBenchmarkLabelError, WorkloadNotApprovedError, ParameterDistribution.
 - `migkit/quiet_source.py` - (no docstring) Classes: SourceEvent, HeartbeatAuditRecord, QuietSourceProgress, AdvanceResult, QuietSourceManager.
 - `migkit/ranges.py` - A large table copied as ranges of its key, side by side. Classes: ReadPool, Slots, WorkerGone, Pending, Keyless, Stats.
 - `migkit/ratchet.py` - (no docstring) Classes: RatchetError, SlotMissingError, SnapshotAuthorizationError, HeadroomDeficitError, RatchetItem, HeadroomRatchetPlan.

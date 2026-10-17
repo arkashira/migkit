@@ -1302,3 +1302,15 @@ def _target_catalog(eng, db):
     r = drift.side_reader(eng, "dst")
     got = drift.shape(r, "dst", db) if r is not None else None
     return drift.catalog_of(got) if got else None
+
+
+def wave_prerequisites(planner=None, table_names=None):
+    """Computes joint database, ETL, and BI wave prerequisites (Row 630: RCH22)."""
+    from . import etl_bi_waves
+    p = planner or etl_bi_waves.ETLBIWavePlanner()
+    if table_names:
+        for t in table_names:
+            p.add_table_to_scope(t)
+    return p.compile_waves()
+
+

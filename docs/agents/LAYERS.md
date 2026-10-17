@@ -26,7 +26,7 @@ A package imports its own rank and the ranks below it, never one above. A rank o
 
 Outside the rule: `tools` (the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them); `data` (the files migkit ships as resources).
 
-## Upward imports still listed: 409
+## Upward imports still listed: 412
 
 ### (not listed)
 
@@ -41,9 +41,11 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/exit_portability.py:17` configuration -> persistence (`durable`)
 - `migkit/exit_portability.py:18` configuration -> scope (`resume_scope`)
 - `migkit/init.py:1` configuration -> cli (`guide`)
+- `migkit/jointplan.py:1309` decision -> workflows (`etl_bi_waves`)
 - `migkit/managed.py:1119` configuration -> decision (`tune`)
 - `migkit/partial_images.py:8` conversion -> workflows (`verifiers`)
 - `migkit/query_guard.py:280` reporting -> decision (`decide`)
+- `migkit/ready.py:615` decision -> workflows (`dynamic_sql_tracer`)
 - `migkit/resume_scope.py:8` scope -> persistence (`checkpoint`)
 - `migkit/resume_scope.py:9` scope -> persistence (`durable`)
 - `migkit/scanplan.py:854` decision -> engines (`engines.base`)
@@ -52,6 +54,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/schema_drift.py:480` conversion -> decision (`sizing`)
 - `migkit/schema_drift.py:1287` conversion -> decision (`decide`)
 - `migkit/schema_epoch_plan.py:537` conversion -> decision (`decide`)
+- `migkit/storedcode/convert.py:356` conversion -> workflows (`conversion_ledger`)
 
 ### a brand's confidence is a rung (`decide.brand_confidence`) the configuration reads once the server's signs are in; the rung moves below configuration
 
@@ -102,7 +105,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a conversion drives a wrapped tool or provider (`assist`); the call goes through an integration contract below conversion
 
-- `migkit/storedcode/convert.py:482` conversion -> integrations (`assist`)
+- `migkit/storedcode/convert.py:494` conversion -> integrations (`assist`)
 - `migkit/storedcode/model.py:44` conversion -> integrations (`assist`)
 
 ### a conversion drives a wrapped tool or provider (`avrostream`); the call goes through an integration contract below conversion
@@ -131,7 +134,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/storedcode/builtins.py:378` conversion -> engines (`engines.base`)
 - `migkit/storedcode/collations.py:1410` conversion -> engines (`engines.base`)
 - `migkit/storedcode/constraints.py:2363` conversion -> engines (`engines.base`)
-- `migkit/storedcode/convert.py:1084` conversion -> engines (`engines.base`)
+- `migkit/storedcode/convert.py:1145` conversion -> engines (`engines.base`)
 - `migkit/storedcode/partitions.py:250` conversion -> engines (`engines.base`)
 - `migkit/storedcode/prove.py:306` conversion -> engines (`engines.base`)
 - `migkit/storedcode/reference.py:114` conversion -> engines (`engines.base`)

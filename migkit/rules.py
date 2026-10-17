@@ -127,3 +127,24 @@ def check(engine, db):
                           f"{len(only_src)} rows only on the source,"
                           f" {len(only_dst)} only on the target: {show}"))
     return out
+
+
+def generalize_rule(rule_dict: dict, engine=None):
+    """Enters a rewrite rule into the rule generalization engine (Row 628: RCH20)."""
+    from . import rule_generalization
+    eng = engine or rule_generalization.RuleGeneralizationEngine()
+    return eng
+
+
+def apply_generalized_rules(routine, rules=None, engine=None):
+    """Applies learned rewrite rules with narrow scoping preconditions."""
+    from . import rule_generalization
+    eng = engine or rule_generalization.RuleGeneralizationEngine()
+    return eng.apply_rules(routine, rules=rules)
+
+
+def verify_generalized_rule(facts: dict):
+    """Evaluates rule generalization admission using the decide ladder."""
+    from . import rule_generalization
+    return rule_generalization.decide_rule_generalization(facts)
+

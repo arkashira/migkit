@@ -13,11 +13,43 @@ import copy
 import datetime
 import hashlib
 import json
+import os
+from pathlib import Path
 import re
 import time
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
+
+from . import decide
+from . import durable
+
+DEFAULT_MODEL_DESTINATION = "127.0.0.1:11434"
+DEFAULT_MUTATION_KILL_RATE_THRESHOLD = 0.8
+DEFAULT_RETRY_BUDGET = 3
+DEFAULT_RETRY_TIMEOUT_SECONDS = 30.0
+DEFAULT_APPROVED_DESTINATIONS = frozenset({
+    "127.0.0.1:11434",
+    "127.0.0.1:8000",
+    "10.0.0.1:8080",
+    "10.0.0.2:8080",
+})
+
+
+class AiProofLoopError(Exception):
+    """Base exception for AI proof loop operations."""
+
+
+class InexecutableCandidateError(AiProofLoopError, ValueError):
+    """Raised when candidate has no executable callable."""
+
+
+class LeaseLockHeldError(AiProofLoopError):
+    """Raised when active lease lock (.run.lock) is held by another process."""
+
+
+class CorruptCheckpointError(AiProofLoopError):
+    """Raised when durable checkpoint file is corrupted."""
 
 
 class CareBadge(str, Enum):
@@ -859,7 +891,7 @@ class AiProofLoopEngine:
     ) -> Tuple[bool, List[Discrepancy], Optional[Dict[str, Any]], Optional[MutationReport]]:
         """Runs candidate in sandbox against frozen fixture; compares effects and minimizes counterexamples."""
         if not candidate.callable_obj:
-            raise ValueError(f"Candidate {candidate.candidate_id} has no executable callable")
+            raise InexecutableCandidateError(f"Candidate {candidate.candidate_id} has no executable callable")
 
         discrepancies: List[Discrepancy] = []
         minimized_ce: Optional[Dict[str, Any]] = None
@@ -908,10 +940,28 @@ class AiProofLoopEngine:
         base_inputs: Optional[Sequence[Dict[str, Any]]] = None,
         synthetic_mutants: Optional[List[Tuple[str, Callable[..., Any]]]] = None,
         destination: str = "127.0.0.1:11434",
+        checkpoint_dir: Optional[Union[str, Path]] = None,
     ) -> ProofResult:
         """Orchestrates deterministic check first, followed by bounded AI synthesis if authorized."""
         t_start = time.time()
         base_inps = base_inputs or [{"a": 1, "b": 2}, {"a": 10, "b": 20}]
+
+        # Check O(1) durable checkpoint store if provided
+        store: Optional[ProofCheckpointStore] = None
+        if checkpoint_dir:
+            store = ProofCheckpointStore(checkpoint_dir)
+            if store.is_completed(routine_name):
+                ckpt = store.load(routine_name)
+                if ckpt:
+                    return ProofResult(
+                        badge=ckpt.badge,
+                        status=ckpt.status,
+                        routine_name=routine_name,
+                        attempts_made=ckpt.attempts_made,
+                        duration_seconds=ckpt.duration_seconds,
+                        minimized_counterexample=ckpt.minimized_counterexample,
+                        reasons=ckpt.reasons or ["Restored from durable checkpoint in O(1)"],
+                    )
         fixture = self.create_frozen_fixture(routine_name, base_inps)
         source_checksum = hashlib.sha256(source_code.encode("ascii")).hexdigest()
 
@@ -1076,3 +1126,276 @@ class AiProofLoopEngine:
             duration_seconds=time.time() - t_start,
             reasons=[f"Retry budget exhausted: failed after {attempt} attempts"],
         )
+
+
+def ai_candidate_acceptance_rungs() -> Tuple[decide.Rung, ...]:
+    """Decide ladder for AI candidate acceptance with measured Needs (Row 627: RCH19)."""
+    return (
+        decide.Rung(
+            "deterministic_verified",
+            "accept deterministic conversion verified by executable proof and strong mutation score",
+            needs=(
+                decide.Need(
+                    "deterministic candidate passed without discrepancy",
+                    lambda f: bool(f.get("deterministic_pass")),
+                    "{rung} requires deterministic candidate to match all observable effects",
+                ),
+                decide.Need(
+                    "sandbox execution strictly isolated",
+                    lambda f: bool(f.get("sandbox_isolated", True)),
+                    "{rung} requires clean sandbox execution isolation",
+                ),
+                decide.Need(
+                    "mutation kill rate meets minimum threshold",
+                    lambda f: float(f.get("mutation_score", 0.0)) >= float(f.get("min_mutation_kill_rate", 0.8)),
+                    "{rung} requires mutation kill rate >= min_mutation_kill_rate",
+                ),
+            ),
+            because="deterministic baseline passes all observable effects and fixture mutation tests without AI synthesis",
+        ),
+        decide.Rung(
+            "ai_synthesis_verified",
+            "accept AI synthesized candidate verified by executable proof and strong mutation score",
+            needs=(
+                decide.Need(
+                    "synthesis authorized by policy",
+                    lambda f: bool(f.get("synthesis_authorized")),
+                    "{rung} requires explicit policy authorization for AI candidate synthesis",
+                ),
+                decide.Need(
+                    "destination approved and payload sanitized",
+                    lambda f: bool(f.get("destination_approved")) and bool(f.get("payload_sanitized")),
+                    "{rung} requires approved model destination and sanitized payload without PII or credentials",
+                ),
+                decide.Need(
+                    "candidate passed without discrepancy",
+                    lambda f: bool(f.get("executable_pass")),
+                    "{rung} requires candidate to match all observable effects in isolated sandbox",
+                ),
+                decide.Need(
+                    "sandbox execution strictly isolated",
+                    lambda f: bool(f.get("sandbox_isolated", True)),
+                    "{rung} requires clean sandbox execution isolation",
+                ),
+                decide.Need(
+                    "mutation kill rate meets minimum threshold",
+                    lambda f: float(f.get("mutation_score", 0.0)) >= float(f.get("min_mutation_kill_rate", 0.8)),
+                    "{rung} requires mutation kill rate >= min_mutation_kill_rate",
+                ),
+            ),
+            because="AI candidate passed all observable effects in sandbox and proved strong fixture resilience",
+        ),
+        decide.Rung(
+            "weak_fixture_review",
+            "flag candidate for manual REVIEW due to weak test fixtures (mutants survived)",
+            needs=(
+                decide.Need(
+                    "candidate passed observable effects",
+                    lambda f: bool(f.get("executable_pass")) or bool(f.get("deterministic_pass")),
+                    "{rung} requires candidate to pass all fixture inputs without discrepancy",
+                ),
+                decide.Need(
+                    "sandbox execution strictly isolated",
+                    lambda f: bool(f.get("sandbox_isolated", True)),
+                    "{rung} requires clean sandbox execution isolation",
+                ),
+                decide.Need(
+                    "fixture mutation kill rate below threshold",
+                    lambda f: float(f.get("mutation_score", 0.0)) < float(f.get("min_mutation_kill_rate", 0.8)),
+                    "{rung} requires mutation kill rate to fall below threshold",
+                ),
+            ),
+            because="candidate matched test inputs but low mutation kill rate indicates weak test fixtures that may permit subtle regressions",
+        ),
+        decide.Rung(
+            "counterexample_minimization_retry",
+            "minimize counterexample and retry bounded synthesis with remaining retry budget",
+            needs=(
+                decide.Need(
+                    "synthesis authorized by policy",
+                    lambda f: bool(f.get("synthesis_authorized")),
+                    "{rung} requires AI synthesis authorization",
+                ),
+                decide.Need(
+                    "observable discrepancy detected",
+                    lambda f: bool(f.get("has_discrepancy")),
+                    "{rung} requires observable discrepancy between source and candidate",
+                ),
+                decide.Need(
+                    "remaining retry budget available",
+                    lambda f: int(f.get("remaining_attempts", 0)) > 0,
+                    "{rung} requires remaining retry attempts within budget",
+                ),
+                decide.Need(
+                    "counterexample minimized",
+                    lambda f: bool(f.get("counterexample_minimized")),
+                    "{rung} requires counterexample to be delta-debug minimized",
+                ),
+            ),
+            because="discrepancy isolated and minimized to smallest counterexample for next synthesis attempt",
+        ),
+        decide.Rung(
+            "rejection_action",
+            "reject candidate conversion with ACTION care badge",
+            because="no candidate verified by independent executable evidence; human intervention required",
+        ),
+    )
+
+
+def decide_ai_candidate_acceptance(facts: Dict[str, Any]) -> decide.Choice:
+    """Climbs ai_candidate_acceptance_rungs decide ladder."""
+    return decide.climb("AI candidate acceptance selection", ai_candidate_acceptance_rungs(), facts)
+
+
+@dataclass
+class DurableProofCheckpoint:
+    """Universal typed durable checkpoint for proof loop execution (O(1) resume)."""
+    routine_name: str
+    status: ProofStatus
+    badge: CareBadge
+    attempts_made: int
+    mutation_kill_rate: float
+    selected_candidate_id: Optional[str] = None
+    minimized_counterexample: Optional[Dict[str, Any]] = None
+    reasons: List[str] = field(default_factory=list)
+    duration_seconds: float = 0.0
+    updated_at: float = field(default_factory=time.time)
+    completed: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "routine_name": self.routine_name,
+            "status": self.status.value,
+            "badge": self.badge.value,
+            "attempts_made": self.attempts_made,
+            "mutation_kill_rate": self.mutation_kill_rate,
+            "selected_candidate_id": self.selected_candidate_id,
+            "minimized_counterexample": self.minimized_counterexample,
+            "reasons": self.reasons,
+            "duration_seconds": self.duration_seconds,
+            "updated_at": self.updated_at,
+            "completed": self.completed,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> DurableProofCheckpoint:
+        return cls(
+            routine_name=d["routine_name"],
+            status=ProofStatus(d["status"]),
+            badge=CareBadge(d["badge"]),
+            attempts_made=d.get("attempts_made", 0),
+            mutation_kill_rate=d.get("mutation_kill_rate", 0.0),
+            selected_candidate_id=d.get("selected_candidate_id"),
+            minimized_counterexample=d.get("minimized_counterexample"),
+            reasons=d.get("reasons", []),
+            duration_seconds=d.get("duration_seconds", 0.0),
+            updated_at=d.get("updated_at", 0.0),
+            completed=d.get("completed", False),
+        )
+
+    def save(self, filepath: Union[str, Path]) -> None:
+        durable.write_json(filepath, self.to_dict(), indent=2)
+
+    @classmethod
+    def load(cls, filepath: Union[str, Path]) -> Optional[DurableProofCheckpoint]:
+        p = Path(filepath)
+        if not p.exists():
+            return None
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return cls.from_dict(data)
+        except (OSError, ValueError, KeyError):
+            return None
+
+
+class ProofCheckpointStore:
+    """Manages O(1) skipping of completed routines and durable state checkpoints."""
+    def __init__(self, checkpoint_dir: Union[str, Path]):
+        self.checkpoint_dir = Path(checkpoint_dir)
+
+    def _routine_path(self, routine_name: str) -> Path:
+        clean_name = re.sub(r"[^a-zA-Z0-9_-]", "_", routine_name)
+        return self.checkpoint_dir / f"proof_{clean_name}.json"
+
+    def is_completed(self, routine_name: str) -> bool:
+        ckpt = self.load(routine_name)
+        return bool(ckpt and ckpt.completed and ckpt.badge in (CareBadge.PASS, CareBadge.BENIGN))
+
+    def save(self, checkpoint: DurableProofCheckpoint) -> None:
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint.save(self._routine_path(checkpoint.routine_name))
+
+    def load(self, routine_name: str) -> Optional[DurableProofCheckpoint]:
+        return DurableProofCheckpoint.load(self._routine_path(routine_name))
+
+
+class ActiveVerificationLeaseLock:
+    """Active verification lease lock (.run.lock) with heartbeat preventing duplicate runs."""
+    def __init__(self, lock_dir: Union[str, Path], lease_term_seconds: float = 30.0):
+        self.lock_dir = Path(lock_dir)
+        self.lock_file = self.lock_dir / ".run.lock"
+        self.lease_term_seconds = lease_term_seconds
+        self.holder_id = f"{os.getpid()}@{os.uname().nodename}:{time.time()}"
+        self.acquired = False
+
+    def acquire(self) -> None:
+        now = time.time()
+        self.lock_dir.mkdir(parents=True, exist_ok=True)
+        if self.lock_file.exists():
+            try:
+                with open(self.lock_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                expires = float(data.get("expires", 0))
+                holder = data.get("holder", "unknown")
+                if now < expires and holder != self.holder_id:
+                    raise LeaseLockHeldError(f"Active verification lease held by {holder} until {expires}")
+            except (OSError, ValueError):
+                pass
+        record = {
+            "holder": self.holder_id,
+            "expires": now + self.lease_term_seconds,
+            "heartbeat": now,
+        }
+        durable.write_json(self.lock_file, record, indent=2)
+        self.acquired = True
+
+    def heartbeat(self) -> None:
+        if not self.acquired:
+            return
+        now = time.time()
+        record = {
+            "holder": self.holder_id,
+            "expires": now + self.lease_term_seconds,
+            "heartbeat": now,
+        }
+        durable.write_json(self.lock_file, record, indent=2)
+
+    def release(self) -> None:
+        if self.acquired and self.lock_file.exists():
+            try:
+                self.lock_file.unlink()
+            except OSError:
+                pass
+            self.acquired = False
+
+
+def verify_repair_transformation(
+    routine_name: str,
+    source_fn: Callable[..., Any],
+    source_code: str,
+    repaired_candidate: CodeCandidate,
+    base_inputs: Optional[Sequence[Dict[str, Any]]] = None,
+    authorization: Optional[AuthorizationPolicy] = None,
+    checkpoint_dir: Optional[Union[str, Path]] = None,
+) -> ProofResult:
+    """Entry point for repair engines (repair_fence, repairways) to verify repaired code."""
+    engine = AiProofLoopEngine(authorization=authorization)
+    return engine.run_proof_loop(
+        routine_name=routine_name,
+        source_fn=source_fn,
+        source_code=source_code,
+        deterministic_candidate=repaired_candidate,
+        base_inputs=base_inputs,
+        checkpoint_dir=checkpoint_dir,
+    )

@@ -9711,6 +9711,29 @@ def snapshot_stream_handoff(
     return coordinator.select_best_strategy(source_profile, table_profile)
 
 
+def verify_composed_bulk_load(
+    dataflow=None,
+    source_tables=None,
+    target_records=None,
+    log=None,
+):
+    """Verify composed mappings across initial bulk load snapshots (Row 625: RCH17.mapping-proof)."""
+    from . import mapping_proof
+    if dataflow is None:
+        raise ValueError("dataflow must be specified for composed mapping proof")
+    engine = mapping_proof.MappingProofEngine(dataflow)
+    choice = engine.decide_ladder(is_cdc=False)
+    if log:
+        log(f"mapping proof bulk ladder: {choice.rung.name} ({choice.rung.because})")
+    res = engine.verify_load(
+        source_tables=source_tables or {},
+        actual_target_records=target_records or [],
+    )
+    if log:
+        log(res.format_unix_report())
+    return res
+
+
 from .engines import hooks  # noqa: E402
 
 hooks.fill("movers", globals())

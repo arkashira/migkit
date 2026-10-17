@@ -29,6 +29,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
+from . import decide, durable
+
 CARE_ACTION = "ACTION"
 CARE_REVIEW = "REVIEW"
 CARE_BENIGN = "BENIGN"
@@ -43,6 +45,17 @@ BENCHMARK_TYPE_SYNTHETIC = "SYNTHETIC_ENVELOPE"
 LABEL_PRODUCTION_PERFORMANCE = "PRODUCTION_PERFORMANCE"
 
 SAFE_TEST_HOSTS = {"127.0.0.1", "localhost", "0.0.0.0", "::1"}
+
+
+@dataclasses.dataclass
+class RegressionThresholds:
+    """Configurable thresholds for query performance and behavioral regression gating."""
+    max_p95_ratio: float = 1.5
+    max_p99_ratio: float = 2.0
+    max_cost_ratio: float = 1.5
+    max_contention_rate: float = 0.05
+    max_cardinality_delta: int = 0
+
 
 
 class QueryRegressionError(RuntimeError):
@@ -1063,3 +1076,198 @@ class QueryRegressionGate:
             plan_regression_queries=plan_regression_queries,
             reasons=reasons,
         )
+
+
+def query_regression_envelope_rungs(thresholds: Optional[RegressionThresholds] = None) -> Tuple[decide.Rung, ...]:
+    """Decide ladder for query regression and behavioral performance envelope gating (Row 631: RCH23)."""
+    t = thresholds or RegressionThresholds()
+    return (
+        decide.Rung(
+            "certified_within_envelope",
+            "certify query performance envelope and behavioral parity within approved limits",
+            needs=(
+                decide.Need(
+                    "benchmark executed",
+                    lambda f: bool(f.get("executed")),
+                    "{rung} requires workload benchmark execution",
+                ),
+                decide.Need(
+                    "cold cache tested",
+                    lambda f: bool(f.get("cold_cache_tested", True)),
+                    "{rung} requires cold cache isolation testing",
+                ),
+                decide.Need(
+                    "zero collation divergence",
+                    lambda f: int(f.get("collation_mismatch_count", 0)) == 0,
+                    "{rung} requires zero collation sorting/equality mismatches",
+                ),
+                decide.Need(
+                    "latency p95 within envelope",
+                    lambda f: float(f.get("latency_p95_ratio", 1.0)) <= float(f.get("max_p95_ratio", t.max_p95_ratio)),
+                    "{rung} requires p95 latency delta within SLA threshold",
+                ),
+                decide.Need(
+                    "latency p99 within envelope",
+                    lambda f: float(f.get("latency_p99_ratio", 1.0)) <= float(f.get("max_p99_ratio", t.max_p99_ratio)),
+                    "{rung} requires p99 tail latency delta within SLA threshold",
+                ),
+                decide.Need(
+                    "explain cost bounded",
+                    lambda f: float(f.get("cost_ratio", 1.0)) <= float(f.get("max_cost_ratio", t.max_cost_ratio)),
+                    "{rung} requires explain cost delta to be bounded",
+                ),
+                decide.Need(
+                    "no regressive full table scans",
+                    lambda f: not bool(f.get("became_seq_scan")),
+                    "{rung} requires no regressive index to seq scan transitions",
+                ),
+                decide.Need(
+                    "result set cardinality identical",
+                    lambda f: int(f.get("cardinality_divergence", 0)) == 0,
+                    "{rung} requires result set row count parity",
+                ),
+                decide.Need(
+                    "zero temp file disk spills",
+                    lambda f: int(f.get("temp_disk_spills", 0)) == 0,
+                    "{rung} requires zero query temp disk memory spills",
+                ),
+                decide.Need(
+                    "historical baseline available",
+                    lambda f: bool(f.get("has_baseline", True)),
+                    "{rung} requires historical baseline availability",
+                ),
+                decide.Need(
+                    "remediations priced and verified",
+                    lambda f: not bool(f.get("needs_unpriced_index")),
+                    "{rung} requires candidate remediations to be priced and verified",
+                ),
+                decide.Need(
+                    "zero implicit cast hazards",
+                    lambda f: int(f.get("implicit_casts", 0)) == 0,
+                    "{rung} requires zero implicit cast performance hazards",
+                ),
+            ),
+            because="query result semantics and performance envelope certified within approved limits",
+        ),
+        decide.Rung(
+            "p99_tail_latency_review",
+            "flag query for REVIEW due to p99 tail latency spike",
+            needs=(
+                decide.Need(
+                    "benchmark executed",
+                    lambda f: bool(f.get("executed")),
+                    "{rung} requires workload benchmark execution",
+                ),
+                decide.Need(
+                    "zero collation divergence",
+                    lambda f: int(f.get("collation_mismatch_count", 0)) == 0,
+                    "{rung} requires zero collation sorting/equality mismatches",
+                ),
+                decide.Need(
+                    "p99 tail latency spike present",
+                    lambda f: float(f.get("latency_p99_ratio", 1.0)) > float(f.get("max_p99_ratio", t.max_p99_ratio)),
+                    "{rung} requires p99 tail latency spike to flag for review",
+                ),
+            ),
+            because="p99 tail latency exceeds SLA threshold, manual performance review required",
+        ),
+        decide.Rung(
+            "explain_cost_increase_review",
+            "flag query for REVIEW due to increased query optimizer explain cost",
+            needs=(
+                decide.Need(
+                    "benchmark executed",
+                    lambda f: bool(f.get("executed")),
+                    "{rung} requires workload benchmark execution",
+                ),
+                decide.Need(
+                    "zero collation divergence",
+                    lambda f: int(f.get("collation_mismatch_count", 0)) == 0,
+                    "{rung} requires zero collation sorting/equality mismatches",
+                ),
+                decide.Need(
+                    "explain cost ratio increased",
+                    lambda f: float(f.get("cost_ratio", 1.0)) > float(f.get("max_cost_ratio", t.max_cost_ratio)),
+                    "{rung} requires explain cost ratio increase to flag for review",
+                ),
+            ),
+            because="query optimizer explain cost increased on target engine, plan review required",
+        ),
+        decide.Rung(
+            "implicit_cast_hazard_review",
+            "flag query for REVIEW due to implicit type coercion warnings",
+            needs=(
+                decide.Need(
+                    "benchmark executed",
+                    lambda f: bool(f.get("executed")),
+                    "{rung} requires workload benchmark execution",
+                ),
+                decide.Need(
+                    "zero collation divergence",
+                    lambda f: int(f.get("collation_mismatch_count", 0)) == 0,
+                    "{rung} requires zero collation sorting/equality mismatches",
+                ),
+                decide.Need(
+                    "implicit cast warnings present",
+                    lambda f: int(f.get("implicit_casts", 0)) > 0,
+                    "{rung} requires implicit cast warnings to flag for review",
+                ),
+            ),
+            because="implicit type coercion warning detected that may inhibit index usage",
+        ),
+        decide.Rung(
+            "unpriced_index_remediation_review",
+            "flag query for REVIEW due to unpriced or unverified candidate index remediation",
+            needs=(
+                decide.Need(
+                    "benchmark executed",
+                    lambda f: bool(f.get("executed")),
+                    "{rung} requires workload benchmark execution",
+                ),
+                decide.Need(
+                    "zero collation divergence",
+                    lambda f: int(f.get("collation_mismatch_count", 0)) == 0,
+                    "{rung} requires zero collation sorting/equality mismatches",
+                ),
+                decide.Need(
+                    "unpriced index remediation present",
+                    lambda f: bool(f.get("needs_unpriced_index")),
+                    "{rung} requires unpriced index remediation to flag for review",
+                ),
+            ),
+            because="candidate index remediation identified but pricing or verification is pending",
+        ),
+        decide.Rung(
+            "missing_baseline_review",
+            "flag query for REVIEW due to missing historical performance baseline",
+            needs=(
+                decide.Need(
+                    "benchmark executed",
+                    lambda f: bool(f.get("executed")),
+                    "{rung} requires workload benchmark execution",
+                ),
+                decide.Need(
+                    "zero collation divergence",
+                    lambda f: int(f.get("collation_mismatch_count", 0)) == 0,
+                    "{rung} requires zero collation sorting/equality mismatches",
+                ),
+                decide.Need(
+                    "historical baseline missing",
+                    lambda f: not bool(f.get("has_baseline", True)),
+                    "{rung} requires missing historical baseline to flag for review",
+                ),
+            ),
+            because="no historical performance baseline available on target workload",
+        ),
+        decide.Rung(
+            "severe_regression_action",
+            "reject cutover with ACTION care badge due to behavioral mismatch or severe latency/plan regression",
+            because="unbenchmarked workload, collation change, p95 latency spike, seq scan regression, row count divergence, or disk spills detected; cutover blocked with ACTION",
+        ),
+    )
+
+
+def decide_query_regression_envelope(facts: Dict[str, Any], thresholds: Optional[RegressionThresholds] = None) -> decide.Choice:
+    """Climbs query_regression_envelope_rungs decide ladder."""
+    return decide.climb("Query regression performance envelope", query_regression_envelope_rungs(thresholds), facts)
+

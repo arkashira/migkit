@@ -12,9 +12,12 @@ import hashlib
 import hmac
 import json
 import time
+from pathlib import Path
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
+
+from migkit import decide, durable
 
 
 class CareBadge(str, Enum):
@@ -22,6 +25,31 @@ class CareBadge(str, Enum):
     REVIEW = "REVIEW"
     BENIGN = "BENIGN"
     PASS = "PASS"
+
+
+class MappingProofError(RuntimeError):
+    """Base error for mapping proof operations."""
+    pass
+
+
+class MappingPredicateEvaluationError(MappingProofError):
+    """Raised when a filter predicate raises an unhandled exception.
+
+    Carries care badge ACTION to prevent corrupt or erroneous rows from being silently excluded.
+    """
+    badge: CareBadge = CareBadge.ACTION
+
+    def __init__(
+        self,
+        message: str,
+        stage_id: str = "",
+        row: Optional[Dict[str, Any]] = None,
+        cause: Optional[Exception] = None,
+    ):
+        super().__init__(message)
+        self.stage_id = stage_id
+        self.row = row
+        self.cause = cause
 
 
 class LossinessCategory(str, Enum):
@@ -174,8 +202,13 @@ class FilterStage(DataflowStage):
     def matches(self, row: Dict[str, Any]) -> bool:
         try:
             return bool(self.predicate(row))
-        except Exception:
-            return False
+        except Exception as e:
+            raise MappingPredicateEvaluationError(
+                f"[ACTION] Predicate evaluation failed in stage '{self.stage_id}': {e}",
+                stage_id=self.stage_id,
+                row=row,
+                cause=e,
+            ) from e
 
     def apply(self, rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         passed: List[Dict[str, Any]] = []
@@ -595,18 +628,17 @@ class CheckpointState:
     source_snapshots: Dict[str, Dict[str, Dict[str, Any]]]
     event_count: int
 
-    def serialize(self) -> str:
-        return json.dumps({
+    def to_dict(self) -> Dict[str, Any]:
+        return {
             "last_processed_offset": self.last_processed_offset,
             "dataflow_checksum": self.dataflow_checksum,
             "target_state": self.target_state,
             "source_snapshots": self.source_snapshots,
             "event_count": self.event_count,
-        })
+        }
 
     @classmethod
-    def deserialize(cls, payload: str) -> CheckpointState:
-        data = json.loads(payload)
+    def from_dict(cls, data: Dict[str, Any]) -> CheckpointState:
         return cls(
             last_processed_offset=data["last_processed_offset"],
             dataflow_checksum=data["dataflow_checksum"],
@@ -614,6 +646,31 @@ class CheckpointState:
             source_snapshots=data["source_snapshots"],
             event_count=data["event_count"],
         )
+
+    def save(self, path: Union[str, Path]) -> Path:
+        """Durable atomic write using migkit.durable.write_json."""
+        p = Path(path)
+        durable.write_json(p, self.to_dict(), indent=2)
+        return p
+
+    @classmethod
+    def load(cls, path: Union[str, Path]) -> CheckpointState:
+        """Durable state read using migkit.durable.read_state with torn detection."""
+        p = Path(path)
+        data = durable.read_state(p, "state")
+        if data is None:
+            raise FileNotFoundError(f"Checkpoint state file not found: {p}")
+        if not isinstance(data, dict):
+            raise ValueError(f"Corrupt checkpoint state in {p}: expected dict, got {type(data).__name__}")
+        return cls.from_dict(data)
+
+    def serialize(self) -> str:
+        return json.dumps(self.to_dict())
+
+    @classmethod
+    def deserialize(cls, payload: str) -> CheckpointState:
+        data = json.loads(payload)
+        return cls.from_dict(data)
 
 
 class CDCExecutionEngine:
@@ -781,6 +838,14 @@ class CDCExecutionEngine:
             event_count=self.events_applied,
         )
 
+    def save_checkpoint(self, path: Union[str, Path]) -> Path:
+        """Persist checkpoint state durably using migkit.durable."""
+        return self.create_checkpoint().save(path)
+
+    def load_checkpoint(self, path: Union[str, Path]) -> None:
+        """Restore checkpoint state durably using migkit.durable."""
+        self.restore_checkpoint(CheckpointState.load(path))
+
     def restore_checkpoint(self, checkpoint: CheckpointState) -> None:
         if checkpoint.dataflow_checksum != self.dataflow.checksum():
             raise ValueError("Checkpoint checksum mismatch with active dataflow pipeline")
@@ -836,6 +901,7 @@ class MappingProofEngine:
 
     def __init__(self, dataflow: MappingDataflow):
         self.dataflow = dataflow
+        self.cdc_engine: Optional[CDCExecutionEngine] = None
 
     def _make_key(self, row: Dict[str, Any]) -> str:
         parts = [str(row.get(col, "")) for col in self.dataflow.target_key_cols]
@@ -1054,3 +1120,163 @@ class MappingProofEngine:
         expected_target = cdc_engine.get_target_state()
         primary_cnt = len(cdc_engine._source_state.get(self.dataflow.source_entities[0], {}))
         return self.verify(expected_target, actual_target_records, primary_cnt, all_source_columns)
+
+    def decide_ladder(
+        self,
+        is_cdc: bool = True,
+        source_cols: Optional[Dict[str, Sequence[str]]] = None,
+    ) -> decide.Choice:
+        """Evaluates dataflow facts and climbs mapping_proof_rungs."""
+        cov = self.dataflow.compute_coverage(source_cols or {})
+        has_lossless = not any(
+            isinstance(st, FilterStage)
+            or (isinstance(st, MaskStage) and st.method not in ("fpe", "reversible_token"))
+            or (isinstance(st, TransformStage) and st.lossiness != LossinessCategory.LOSSLESS)
+            or (isinstance(st, RenameStage) and st.drop_unmapped)
+            for st in self.dataflow.stages
+        )
+        is_safe = all(
+            not isinstance(st, TransformStage)
+            or st.coercion_checker is not None
+            or st.lossiness == LossinessCategory.LOSSLESS
+            for st in self.dataflow.stages
+        )
+        facts = {
+            "schema_fidelity_pct": cov.coverage_pct,
+            "schema_fully_covered": cov.is_fully_covered,
+            "has_lossless_transforms": has_lossless,
+            "is_transformation_safe": is_safe,
+            "is_cdc_compatible": is_cdc,
+        }
+        return decide_mapping_proof(facts)
+
+
+def mapping_proof_rungs() -> Tuple[decide.Rung, ...]:
+    """Decide ladder for composed mapping proof verification (Row 625: RCH17)."""
+    return (
+        decide.Rung(
+            "lossless_bijection_proof",
+            "lossless 1:1 schema mapping proof with zero lossiness and full reversibility",
+            needs=(
+                decide.Need(
+                    "schema fidelity",
+                    lambda f: float(f.get("schema_fidelity_pct", 0.0)) >= 100.0,
+                    "{rung} requires 100% schema fidelity with all fields accounted for",
+                ),
+                decide.Need(
+                    "transformation safety",
+                    lambda f: bool(f.get("has_lossless_transforms", False)),
+                    "{rung} requires fully lossless, reversible transformations",
+                ),
+                decide.Need(
+                    "cdc compatibility",
+                    lambda f: bool(f.get("is_cdc_compatible", False)),
+                    "{rung} requires streaming CDC operation and filter boundary compatibility",
+                ),
+            ),
+            because="proves bijective equivalence across both load and streaming CDC without data loss",
+        ),
+        decide.Rung(
+            "governed_lossy_transformation_proof",
+            "governed lossy transformation proof with declared lossiness manifest and coercion bounds",
+            needs=(
+                decide.Need(
+                    "schema fidelity",
+                    lambda f: float(f.get("schema_fidelity_pct", 0.0)) >= 90.0,
+                    "{rung} requires high schema coverage with unmapped fields declared",
+                ),
+                decide.Need(
+                    "transformation safety",
+                    lambda f: bool(f.get("is_transformation_safe", False)),
+                    "{rung} requires bounded, declared transformations with coercion checkers",
+                ),
+                decide.Need(
+                    "cdc compatibility",
+                    lambda f: bool(f.get("is_cdc_compatible", False)),
+                    "{rung} requires streaming CDC operation and filter boundary compatibility",
+                ),
+            ),
+            because="proves target state correctness under declared filter exclusions, masks, and bounded numeric coercions",
+        ),
+        decide.Rung(
+            "denormalized_embedding_proof",
+            "relational-to-document parent-child embedding proof with multiplicity verification",
+            needs=(
+                decide.Need(
+                    "schema fidelity",
+                    lambda f: float(f.get("schema_fidelity_pct", 0.0)) >= 80.0,
+                    "{rung} requires schema coverage of embedded entities and keys",
+                ),
+                decide.Need(
+                    "cdc compatibility",
+                    lambda f: bool(f.get("is_cdc_compatible", False)),
+                    "{rung} requires child CDC updates to trigger parent re-materialization",
+                ),
+            ),
+            because="proves 1:N parent document embedding consistency across batch load and child mutation stream",
+        ),
+        decide.Rung(
+            "snapshot_only_fallback_proof",
+            "fallback bulk load snapshot proof with lossiness discrepancy audit",
+            because="verifies initial bulk snapshot when CDC streaming transformation proofs refuse",
+        ),
+    )
+
+
+def decide_mapping_proof(facts: Dict[str, Any]) -> decide.Choice:
+    """Climbs mapping_proof_rungs decide ladder."""
+    return decide.climb("mapping proof selection", mapping_proof_rungs(), facts)
+
+
+def apply_cdc_mapping_proof(
+    evaluator: Any,
+    changes: List[Dict[str, Any]],
+    db: Optional[str] = None,
+    at: Any = None,
+    log: Optional[Callable[[str], None]] = None,
+) -> List[Dict[str, Any]]:
+    """Evaluates composed mappings and boundary transitions on CDC changes in tailctl (Row 625: RCH17)."""
+    if not changes:
+        return changes
+    if isinstance(evaluator, MappingProofEngine):
+        cdc_eng = getattr(evaluator, "cdc_engine", None)
+        if cdc_eng is None:
+            cdc_eng = CDCExecutionEngine(evaluator.dataflow, {})
+            evaluator.cdc_engine = cdc_eng
+    elif isinstance(evaluator, CDCExecutionEngine):
+        cdc_eng = evaluator
+    else:
+        return changes
+
+    op_map = {
+        "insert": ChangeOp.INSERT,
+        "update": ChangeOp.UPDATE,
+        "delete": ChangeOp.DELETE,
+    }
+
+    offset_base = 0
+    if isinstance(at, int):
+        offset_base = at
+    elif isinstance(at, str) and at.isdigit():
+        offset_base = int(at)
+
+    for idx, c in enumerate(changes):
+        tbl = str(c.get("table") or c.get("entity") or "")
+        op_str = str(c.get("type") or c.get("op") or "insert").lower()
+        op = op_map.get(op_str, ChangeOp.INSERT)
+        row = c.get("row") or c.get("after")
+        before = c.get("before")
+        seq = c.get("offset") or c.get("sequence_offset") or (offset_base + idx + 1)
+        event = CDCChangeEvent(
+            sequence_offset=int(seq),
+            entity=tbl,
+            op=op,
+            before=before if isinstance(before, dict) else None,
+            after=row if isinstance(row, dict) else None,
+        )
+        cdc_eng.apply_event(event)
+
+    if log:
+        log(f"mapping proof cdc applied {len(changes)} events at offset {at}")
+    return changes
+

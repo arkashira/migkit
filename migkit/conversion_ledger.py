@@ -12,13 +12,31 @@ can hide excluded or unparsed objects.
 from __future__ import annotations
 
 import enum
+import errno
 import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+
+from migkit import decide, durable
+
+
+class ConversionLedgerError(Exception):
+    """Base exception for conversion ledger failures."""
+    pass
+
+
+class CorruptLockError(ConversionLedgerError):
+    """Raised when an existing lease/lock file cannot be parsed, to prevent clobbering."""
+    pass
+
+
+class LockAcquisitionError(ConversionLedgerError):
+    """Raised when lease/lock file cannot be read or acquired."""
+    pass
 
 
 class CareBadge(str, enum.Enum):
@@ -515,17 +533,113 @@ class ReadinessVerdict:
         return "\n".join(lines)
 
 
+def conversion_scope_rungs() -> Tuple[decide.Rung, ...]:
+    """Decide ladder for migration scope readiness and debt gating (Row 626: RCH18)."""
+    return (
+        decide.Rung(
+            "certified_readiness_pass",
+            "complete lifecycle verification with zero unparsed critical routines and zero unresolved debt",
+            needs=(
+                decide.Need(
+                    "zero unparsed critical routines",
+                    lambda f: int(f.get("unparsed_critical_count", 0)) == 0,
+                    "{rung} requires all critical routines to be parsed",
+                ),
+                decide.Need(
+                    "zero active action debts",
+                    lambda f: int(f.get("action_debt_count", 0)) == 0,
+                    "{rung} requires zero active ACTION debts",
+                ),
+                decide.Need(
+                    "zero active review debts",
+                    lambda f: int(f.get("review_debt_count", 0)) == 0,
+                    "{rung} requires zero active REVIEW debts",
+                ),
+                decide.Need(
+                    "all submitted artefacts parsed",
+                    lambda f: int(f.get("parsed_count", 0)) >= int(f.get("submitted_count", 0)),
+                    "{rung} requires 100% of submitted artefacts to be parsed",
+                ),
+                decide.Need(
+                    "all parsed artefacts converted",
+                    lambda f: int(f.get("converted_count", 0)) >= int(f.get("parsed_count", 0)),
+                    "{rung} requires 100% of parsed artefacts to be converted",
+                ),
+            ),
+            because="all artefacts successfully converted with zero debt and full lifecycle coverage",
+        ),
+        decide.Rung(
+            "provisional_readiness_review",
+            "critical routines parsed with zero ACTION debt; inspectable REVIEW debt tolerated under non-strict review",
+            needs=(
+                decide.Need(
+                    "zero unparsed critical routines",
+                    lambda f: int(f.get("unparsed_critical_count", 0)) == 0,
+                    "{rung} requires all critical routines to be parsed",
+                ),
+                decide.Need(
+                    "zero active action debts",
+                    lambda f: int(f.get("action_debt_count", 0)) == 0,
+                    "{rung} requires zero active ACTION debts",
+                ),
+                decide.Need(
+                    "non-strict review allowed",
+                    lambda f: not bool(f.get("strict_reviews", False)),
+                    "{rung} refuses cutover when strict review policy is enabled with pending REVIEW debts",
+                ),
+            ),
+            because="all critical routines converted with zero ACTION debt; REVIEW debts tolerated for inspection",
+        ),
+        decide.Rung(
+            "critical_routine_blocked_action",
+            "one or more critical routines failed or skipped parsing; blocks complete readiness unconditionally",
+            needs=(
+                decide.Need(
+                    "critical unparsed routines present",
+                    lambda f: int(f.get("unparsed_critical_count", 0)) > 0,
+                    "{rung} requires at least one unparsed critical routine",
+                ),
+            ),
+            because="unparsed critical routine blocks cutover readiness even if 100% of parsed code converted",
+        ),
+        decide.Rung(
+            "action_debt_blocked_action",
+            "unresolved ACTION debt or unparsed code blocks conversion readiness",
+            because="unresolved ACTION debts or unparsed code require explicit remediation before cutover",
+        ),
+    )
+
+
+def decide_conversion_scope(facts: Dict[str, Any]) -> decide.Choice:
+    """Climbs conversion_scope_rungs decide ladder."""
+    return decide.climb("conversion scope evaluation", conversion_scope_rungs(), facts)
+
+
 class ActiveLeaseLock:
     """Mutual exclusion active lease lock (.run.lock) preventing duplicate runs."""
 
     def __init__(self, lock_file: Path, term_seconds: float = 30.0):
-        self.lock_file = lock_file
+        self.lock_file = Path(lock_file)
         self.term_seconds = float(term_seconds)
         self._fd: Optional[int] = None
         self._acquired = False
 
     def acquire(self) -> bool:
-        self.lock_file.parent.mkdir(parents=True, exist_ok=True)
+        durable.private_dir(self.lock_file.parent)
+        if self.lock_file.exists():
+            try:
+                with open(self.lock_file, "r", encoding="ascii") as f:
+                    content = f.read().strip()
+                if content:
+                    payload = json.loads(content)
+                    expires = float(payload.get("expires_at", 0))
+                    if time.time() < expires:
+                        return False
+            except json.JSONDecodeError as exc:
+                raise CorruptLockError(f"Corrupt lease file at {self.lock_file}: {exc}") from exc
+            except OSError as exc:
+                raise LockAcquisitionError(f"Cannot read lease file at {self.lock_file}: {exc}") from exc
+
         try:
             fd = os.open(str(self.lock_file), os.O_CREAT | os.O_RDWR, 0o600)
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -543,8 +657,10 @@ class ActiveLeaseLock:
             self._fd = fd
             self._acquired = True
             return True
-        except (OSError, BlockingIOError):
-            return False
+        except (BlockingIOError, OSError) as exc:
+            if isinstance(exc, BlockingIOError) or getattr(exc, "errno", None) in (errno.EACCES, errno.EAGAIN):
+                return False
+            raise LockAcquisitionError(f"Failed to acquire lock on {self.lock_file}: {exc}") from exc
 
     def renew(self) -> bool:
         if not self._acquired or self._fd is None:
@@ -906,23 +1022,18 @@ class ConversionLedger:
         )
 
     def evaluate_readiness(self, strict_reviews: bool = False) -> ReadinessVerdict:
-        """Evaluates readiness for cutover.
-
-        Guarantees that:
-        1. If one critical routine is unparsed, complete readiness is BLOCKED (ACTION),
-           even if 100% of parsed code converted.
-        2. Any active ACTION debt blocks readiness.
-        3. Dynamic SQL, encrypted code, and unsupported encodings are explicit debts.
-        """
+        """Evaluates readiness for cutover using conversion_scope_rungs decide ladder."""
         metrics = self.compute_metrics()
         blockers: List[str] = []
         warnings: List[str] = []
+        unparsed_critical_count = 0
 
         # 1. Critical routine parsing check
         for r in self._records.values():
             if r.identity.criticality == ArtefactCriticality.CRITICAL:
                 parsed_ok = r.stage_outcomes.get(LifecycleStage.PARSED.value, False)
                 if not parsed_ok:
+                    unparsed_critical_count += 1
                     blockers.append(
                         f"CRITICAL routine '{r.identity.qualified_name}' failed or skipped parsing (stage: {r.current_stage.value})"
                     )
@@ -939,20 +1050,34 @@ class ConversionLedger:
                         f"Unresolved REVIEW debt [{d.debt_type.value}] on '{r.identity.qualified_name}': {d.reason}"
                     )
 
-        # 3. Overall readiness decision
-        if blockers:
-            is_ready = False
-            badge = CareBadge.ACTION
-        elif warnings and strict_reviews:
-            is_ready = False
-            badge = CareBadge.REVIEW
-        elif warnings:
-            # Tolerated review debt
-            is_ready = True
-            badge = CareBadge.REVIEW
-        else:
+        # 3. Decide ladder climb
+        facts = {
+            "submitted_count": metrics.submitted,
+            "extracted_count": metrics.extracted,
+            "parsed_count": metrics.parsed,
+            "converted_count": metrics.converted,
+            "deployed_count": metrics.deployed,
+            "executed_count": metrics.executed,
+            "covered_count": metrics.covered,
+            "unparsed_critical_count": unparsed_critical_count,
+            "action_debt_count": metrics.action_debt_count,
+            "review_debt_count": metrics.review_debt_count,
+            "strict_reviews": strict_reviews,
+        }
+        choice = decide_conversion_scope(facts)
+
+        if choice.path == "certified_readiness_pass":
             is_ready = True
             badge = CareBadge.PASS
+        elif choice.path == "provisional_readiness_review":
+            is_ready = True
+            badge = CareBadge.REVIEW
+        elif choice.path == "critical_routine_blocked_action":
+            is_ready = False
+            badge = CareBadge.ACTION
+        else:  # action_debt_blocked_action
+            is_ready = False
+            badge = CareBadge.ACTION if (metrics.action_debt_count > 0 or unparsed_critical_count > 0) else CareBadge.REVIEW
 
         return ReadinessVerdict(
             is_ready=is_ready,
@@ -971,29 +1096,24 @@ class ConversionLedger:
         return "\n".join(lines)
 
     def save_to_file(self, file_path: Path) -> None:
-        """Persists the complete conversion ledger to disk atomically."""
+        """Persists the complete conversion ledger to disk atomically with durable fsync."""
         file_path = Path(file_path)
-        file_path.parent.mkdir(parents=True, exist_ok=True)
         data = {
             "ledger_id": self.ledger_id,
             "saved_at": time.time(),
             "debt_counter": self._debt_counter,
             "records": [r.to_dict() for r in self._records.values()],
         }
-        tmp_path = file_path.with_suffix(".tmp")
-        with open(tmp_path, "w", encoding="ascii") as f:
-            json.dump(data, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, file_path)
+        durable.write_json(file_path, data, indent=2, full=True)
 
     def load_from_file(self, file_path: Path) -> None:
         """Loads and reconstructs the conversion ledger from disk in O(1) state reconstruction."""
         file_path = Path(file_path)
         if not file_path.exists():
             raise FileNotFoundError(f"Ledger file not found: {file_path}")
-        with open(file_path, "r", encoding="ascii") as f:
-            data = json.load(f)
+        data = durable.read_state(file_path, kind="state")
+        if data is None or not isinstance(data, dict):
+            raise durable.Torn(f"{file_path} cannot be read whole or is empty")
 
         self.ledger_id = data.get("ledger_id", "default")
         self._debt_counter = int(data.get("debt_counter", 0))
@@ -1013,3 +1133,16 @@ class ConversionLedger:
         if not rec:
             raise KeyError(f"Canonical artefact ID '{canonical_id}' not found in ledger")
         return rec
+
+
+def ledger_for_hop(hop, db: str) -> ConversionLedger:
+    """Returns an active ConversionLedger for a given migration hop and database."""
+    report_dir = hop.report_dir(db)
+    ledger_path = report_dir / "conversion-ledger.json"
+    ledger = ConversionLedger(
+        ledger_id=f"{getattr(hop, 'name', 'hop')}_{db}",
+        base_dir=report_dir,
+    )
+    if ledger_path.exists():
+        ledger.load_from_file(ledger_path)
+    return ledger

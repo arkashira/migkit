@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 import time
 
+from migkit import decide, durable
 from migkit.conversion_ledger import (
     ActiveLeaseLock,
     ArtefactCriticality,
@@ -22,13 +23,28 @@ from migkit.conversion_ledger import (
     ArtefactRecord,
     CareBadge,
     ConversionLedger,
+    CorruptLockError,
+    LockAcquisitionError,
     DebtRecord,
     DebtType,
     DenominatorRatio,
     LifecycleStage,
     ReadinessVerdict,
     ScopeMetrics,
+    conversion_scope_rungs,
+    decide_conversion_scope,
 )
+from tests.rung_branches import HOLDS, REFUSES, branch, watched
+
+PROVES_RUNGS = [
+    ("conversion_ledger", "conversion_scope_rungs", "certified_readiness_pass", "holds"),
+    ("conversion_ledger", "conversion_scope_rungs", "certified_readiness_pass", "refuses"),
+    ("conversion_ledger", "conversion_scope_rungs", "provisional_readiness_review", "holds"),
+    ("conversion_ledger", "conversion_scope_rungs", "provisional_readiness_review", "refuses"),
+    ("conversion_ledger", "conversion_scope_rungs", "critical_routine_blocked_action", "holds"),
+    ("conversion_ledger", "conversion_scope_rungs", "critical_routine_blocked_action", "refuses"),
+    ("conversion_ledger", "conversion_scope_rungs", "action_debt_blocked_action", "holds"),
+]
 
 
 def test_scope_accounting_keeps_distinct_stages(tmp_path: Path):
@@ -637,4 +653,82 @@ def test_binary_artefact_submission_and_hash(tmp_path: Path):
     )
     assert art.identity.source_hash != ""
     assert art.current_stage == LifecycleStage.SUBMITTED
+
+
+def test_conversion_scope_decide_rungs_coverage():
+    """Proves all 7 branches of conversion_scope_rungs under watched()."""
+    with watched() as seen:
+        # 1. Clean run: all submitted parsed and converted, 0 critical unparsed, 0 debts
+        # -> certified_readiness_pass holds
+        c1 = decide_conversion_scope({
+            "submitted_count": 5,
+            "parsed_count": 5,
+            "converted_count": 5,
+            "unparsed_critical_count": 0,
+            "action_debt_count": 0,
+            "review_debt_count": 0,
+            "strict_reviews": False,
+        })
+        assert c1.path == "certified_readiness_pass"
+
+        # 2. Tolerated review debt: review_debt_count > 0, strict_reviews=False
+        # -> certified_readiness_pass refuses (review debt > 0), provisional_readiness_review holds
+        c2 = decide_conversion_scope({
+            "submitted_count": 5,
+            "parsed_count": 5,
+            "converted_count": 5,
+            "unparsed_critical_count": 0,
+            "action_debt_count": 0,
+            "review_debt_count": 1,
+            "strict_reviews": False,
+        })
+        assert c2.path == "provisional_readiness_review"
+
+        # 3. Unparsed critical routine: unparsed_critical_count > 0
+        # -> certified refuses, provisional refuses, critical_routine_blocked_action holds
+        c3 = decide_conversion_scope({
+            "submitted_count": 5,
+            "parsed_count": 4,
+            "converted_count": 4,
+            "unparsed_critical_count": 1,
+            "action_debt_count": 0,
+            "review_debt_count": 0,
+            "strict_reviews": False,
+        })
+        assert c3.path == "critical_routine_blocked_action"
+
+        # 4. Action debt present with 0 unparsed critical routines: action_debt_count > 0, unparsed_critical=0
+        # -> certified refuses, provisional refuses, critical refuses, action_debt_blocked_action holds
+        c4 = decide_conversion_scope({
+            "submitted_count": 5,
+            "parsed_count": 5,
+            "converted_count": 5,
+            "unparsed_critical_count": 0,
+            "action_debt_count": 1,
+            "review_debt_count": 0,
+            "strict_reviews": False,
+        })
+        assert c4.path == "action_debt_blocked_action"
+
+    assert set(branch(seen, "certified_readiness_pass")) == {HOLDS, REFUSES}
+    assert set(branch(seen, "provisional_readiness_review")) == {HOLDS, REFUSES}
+    assert set(branch(seen, "critical_routine_blocked_action")) == {HOLDS, REFUSES}
+    assert branch(seen, "action_debt_blocked_action") == [HOLDS]
+
+
+def test_active_lease_corrupt_lock_raises_corrupt_lock_error(tmp_path: Path):
+    lock_file = tmp_path / ".run.lock"
+    lock_file.write_text("{NOT_VALID_JSON:;;;}")
+    lease = ActiveLeaseLock(lock_file, term_seconds=10.0)
+    with pytest.raises(CorruptLockError) as excinfo:
+        lease.acquire()
+    assert "Corrupt lease file" in str(excinfo.value)
+
+
+def test_durable_torn_state_raises_torn(tmp_path: Path):
+    ledger_file = tmp_path / "conversion-ledger.json"
+    ledger_file.write_text("{INCOMPLETE_JSON_TORN")
+    ledger = ConversionLedger(ledger_id="torn_test", base_dir=tmp_path)
+    with pytest.raises(SystemExit):  # durable.Torn exits/raises SystemExit or durable.Torn
+        ledger.load_from_file(ledger_file)
 

@@ -23,6 +23,7 @@ import json
 import pytest
 
 from migkit.ai_proof_loop import (
+    ActiveVerificationLeaseLock,
     AiAnnotation,
     AiProofLoopEngine,
     AuthorizationPolicy,
@@ -32,19 +33,39 @@ from migkit.ai_proof_loop import (
     CounterexampleMinimizer,
     DestinationPolicy,
     Discrepancy,
+    DurableProofCheckpoint,
     EffectsComparator,
     ExecutionEffect,
     FrozenInputFixture,
+    InexecutableCandidateError,
     IsolatedSandbox,
+    LeaseLockHeldError,
     MutantRecord,
     MutationAssessor,
     MutationReport,
+    ProofCheckpointStore,
     ProofResult,
     ProofStatus,
     RegressionFixtureBank,
     SemanticFaultType,
     TransactionState,
+    ai_candidate_acceptance_rungs,
+    decide_ai_candidate_acceptance,
+    verify_repair_transformation,
 )
+from tests.rung_branches import HOLDS, REFUSES, branch, watched
+
+PROVES_RUNGS = [
+    ("ai_proof_loop", "ai_candidate_acceptance_rungs", "deterministic_verified", "holds"),
+    ("ai_proof_loop", "ai_candidate_acceptance_rungs", "deterministic_verified", "refuses"),
+    ("ai_proof_loop", "ai_candidate_acceptance_rungs", "ai_synthesis_verified", "holds"),
+    ("ai_proof_loop", "ai_candidate_acceptance_rungs", "ai_synthesis_verified", "refuses"),
+    ("ai_proof_loop", "ai_candidate_acceptance_rungs", "weak_fixture_review", "holds"),
+    ("ai_proof_loop", "ai_candidate_acceptance_rungs", "weak_fixture_review", "refuses"),
+    ("ai_proof_loop", "ai_candidate_acceptance_rungs", "counterexample_minimization_retry", "holds"),
+    ("ai_proof_loop", "ai_candidate_acceptance_rungs", "counterexample_minimization_retry", "refuses"),
+    ("ai_proof_loop", "ai_candidate_acceptance_rungs", "rejection_action", "holds"),
+]
 
 
 # -----------------------------------------------------------------------------
@@ -864,4 +885,149 @@ def test_text_code_mutant_generation_and_compilation():
     assert report.total_mutants > 0
     assert report.killed_mutants > 0
     assert report.kill_rate > 0.0
+
+
+def test_ai_candidate_acceptance_decide_rungs_coverage():
+    with watched() as seen:
+        # 1. Deterministic candidate verified -> deterministic_verified holds
+        c1 = decide_ai_candidate_acceptance({
+            "deterministic_pass": True,
+            "sandbox_isolated": True,
+            "mutation_score": 0.95,
+            "min_mutation_kill_rate": 0.8,
+        })
+        assert c1.path == "deterministic_verified"
+
+        # 2. Deterministic candidate fails, AI synthesis verified -> ai_synthesis_verified holds
+        c2 = decide_ai_candidate_acceptance({
+            "deterministic_pass": False,
+            "synthesis_authorized": True,
+            "destination_approved": True,
+            "payload_sanitized": True,
+            "executable_pass": True,
+            "sandbox_isolated": True,
+            "mutation_score": 0.85,
+            "min_mutation_kill_rate": 0.8,
+        })
+        assert c2.path == "ai_synthesis_verified"
+
+        # 3. Candidate passes but mutation kill rate weak -> weak_fixture_review holds
+        c3 = decide_ai_candidate_acceptance({
+            "deterministic_pass": False,
+            "synthesis_authorized": True,
+            "destination_approved": True,
+            "payload_sanitized": True,
+            "executable_pass": True,
+            "sandbox_isolated": True,
+            "mutation_score": 0.4,
+            "min_mutation_kill_rate": 0.8,
+        })
+        assert c3.path == "weak_fixture_review"
+
+        # 4. Discrepancy observed, attempts remaining -> counterexample_minimization_retry holds
+        c4 = decide_ai_candidate_acceptance({
+            "deterministic_pass": False,
+            "synthesis_authorized": True,
+            "destination_approved": True,
+            "payload_sanitized": True,
+            "executable_pass": False,
+            "has_discrepancy": True,
+            "remaining_attempts": 2,
+            "counterexample_minimized": True,
+            "sandbox_isolated": True,
+            "mutation_score": 0.0,
+            "min_mutation_kill_rate": 0.8,
+        })
+        assert c4.path == "counterexample_minimization_retry"
+
+        # 5. Unauthorized, budget exhausted -> rejection_action holds
+        c5 = decide_ai_candidate_acceptance({
+            "deterministic_pass": False,
+            "synthesis_authorized": False,
+            "executable_pass": False,
+            "has_discrepancy": True,
+            "remaining_attempts": 0,
+            "counterexample_minimized": False,
+            "sandbox_isolated": False,
+            "mutation_score": 0.0,
+            "min_mutation_kill_rate": 0.8,
+        })
+        assert c5.path == "rejection_action"
+
+    assert set(branch(seen, "deterministic_verified")) == {HOLDS, REFUSES}
+    assert set(branch(seen, "ai_synthesis_verified")) == {HOLDS, REFUSES}
+    assert set(branch(seen, "weak_fixture_review")) == {HOLDS, REFUSES}
+    assert set(branch(seen, "counterexample_minimization_retry")) == {HOLDS, REFUSES}
+    assert branch(seen, "rejection_action") == [HOLDS]
+
+
+def test_durable_checkpoint_o1_skip_completed(tmp_path):
+    store = ProofCheckpointStore(tmp_path / "checkpoints")
+    assert not store.is_completed("calculate_tax")
+
+    ckpt = DurableProofCheckpoint(
+        routine_name="calculate_tax",
+        status=ProofStatus.VERIFIED,
+        badge=CareBadge.PASS,
+        attempts_made=1,
+        mutation_kill_rate=0.9,
+        selected_candidate_id="tax_candidate_1",
+        completed=True,
+    )
+    store.save(ckpt)
+
+    assert store.is_completed("calculate_tax")
+    loaded = store.load("calculate_tax")
+    assert loaded is not None
+    assert loaded.status == ProofStatus.VERIFIED
+    assert loaded.badge == CareBadge.PASS
+    assert loaded.attempts_made == 1
+
+
+def test_active_lease_lock_mutual_exclusion(tmp_path):
+    lock_dir = tmp_path / "lease"
+    lease1 = ActiveVerificationLeaseLock(lock_dir, lease_term_seconds=10.0)
+    lease1.acquire()
+    assert lease1.acquired is True
+
+    lease2 = ActiveVerificationLeaseLock(lock_dir, lease_term_seconds=10.0)
+    with pytest.raises(LeaseLockHeldError):
+        lease2.acquire()
+
+    lease1.release()
+    assert lease1.acquired is False
+    lease2.acquire()
+    assert lease2.acquired is True
+    lease2.release()
+
+
+def test_mutation_compilation_errors_not_swallowed_and_reports_action():
+    report = MutationAssessor.assess_candidate(
+        candidate_code="def fn(args):\n    return args['x'] + 1\n",
+        candidate_fn=lambda args: args["x"] + 1,
+        fixture=FrozenInputFixture("f1", [{"x": 1}]),
+        sandbox=IsolatedSandbox(),
+    )
+    assert report.badge in (CareBadge.ACTION, CareBadge.REVIEW)
+
+
+def test_repair_fence_wiring_to_ai_proof_loop():
+    from migkit.repair_fence import coordinate_repair_proof_verification
+    def src(a=0):
+        return a + 10
+    cand = CodeCandidate(
+        candidate_id="cand_repair_01",
+        code="def f(a=0):\n    return a + 10",
+        callable_obj=src,
+    )
+    res = coordinate_repair_proof_verification(
+        routine_name="repair_add",
+        source_fn=src,
+        source_code="def src(a=0):\n    return a + 10",
+        deterministic_candidate=cand,
+        base_inputs=[{"a": 1}],
+    )
+    assert res.badge == CareBadge.PASS
+    assert res.status == ProofStatus.VERIFIED
+
 

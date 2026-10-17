@@ -950,3 +950,10 @@ def acquire_application_readiness_lease(
 ) -> lease.Lease:
     """Acquire a mutual-exclusion hop lease using `migkit.lease.Lease`."""
     return lease.Lease(pathlib.Path(lock_path), what=what, term=term_seconds).acquire()
+
+
+def verify_query_regression_envelope(facts: Dict[str, Any]) -> decide.Choice:
+    """Evaluates query regression performance envelope using decide ladder (Row 631: RCH23)."""
+    from . import query_regression
+    return query_regression.decide_query_regression_envelope(facts)
+

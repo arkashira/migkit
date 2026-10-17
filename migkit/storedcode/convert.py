@@ -344,7 +344,7 @@ def _order(routines):
 class Conversion:
     """One database's views and routines, converted."""
 
-    def __init__(self, pair, db, propose=True):
+    def __init__(self, pair, db, propose=True, ledger=None):
         from . import mysql_pg
         from .prove import expressions, routines_of, taken
         self.pair = pair
@@ -353,6 +353,17 @@ class Conversion:
         self.src = pair.src_engine.SQL_DIALECT
         self.dst = pair.dst_engine.SQL_DIALECT
         self.local = localizer(pair, db)
+        from ..conversion_ledger import ConversionLedger
+        report_dir = None
+        if hasattr(pair, "hop") and hasattr(pair.hop, "report_dir"):
+            try:
+                report_dir = pair.hop.report_dir(db)
+            except Exception:
+                report_dir = None
+        self.ledger = ledger if ledger is not None else ConversionLedger(
+            ledger_id=f"{getattr(pair.hop, 'name', 'hop')}_{db}" if hasattr(pair, "hop") else f"hop_{db}",
+            base_dir=report_dir,
+        )
         # a view's own statement, for the converters that read one
         views = [Routine(kind="view", name=pair._leaf(n), body=sql,
                          definition=f"CREATE VIEW {pair._leaf(n)} AS {sql}",
@@ -470,6 +481,7 @@ class Conversion:
                 made = translator(self.pair, self.ctx, r)
                 out.append((r.name, made.sql, ""))
                 self._record(r, "converted, not proved", "translator")
+                self._register_in_ledger(r, stage="converted", success=True, rung="translator", target_code=made.sql)
             except Refused as e:
                 out.append(self._not_converted(r, str(e)))
         return out
@@ -495,6 +507,7 @@ class Conversion:
         head = f"-- {r.kind} {r.name} not converted: {why}"
         kept = self._offered(r)
         self._record(r, "not converted", None, reasons=[why])
+        self._register_in_ledger(r, stage="converted", success=False, error=why)
         if kept:
             rung, made = kept
             why_not = self.why_not or ("no sandbox is named for this hop"
@@ -902,6 +915,7 @@ class Conversion:
                 + (f" ({verdict.coverage})" if verdict.coverage else ""))
         if made.residue:
             mark += "\n-- left for a person: " + "; ".join(made.residue)
+        self._register_in_ledger(r, stage="executed", success=(verdict.status == "ok"), rung=c.name, target_code=made.sql, error=verdict.reason if verdict.status != "ok" else None)
         return (r.name, f"{made.sql}\n{mark}", "" if verdict.status == "ok"
                 else verdict.reason)
 
@@ -959,21 +973,68 @@ class Conversion:
 
     def write(self, out_path):
         from . import effort
-        try:
-            out_path.write_text(json.dumps(
-                {"effort": effort.summary(self.records, self.routines,
-                                          self.costs, self.seconds,
-                                          self.src),
-                 "routines": self.records,
-                 "sandbox": "used" if self.used else
-                 (self.why_not or "not named"),
-                 **({"sequences": self.sequences} if self.sequences
-                    else {}),
-                 **({"draft_fixes": self.draft_fixes} if self.draft_fixes
-                    else {})},
-                indent=1, default=str))
-        except OSError:
-            pass
+        from .. import durable
+        payload = {
+            "effort": effort.summary(self.records, self.routines,
+                                     self.costs, self.seconds,
+                                     self.src),
+            "routines": self.records,
+            "sandbox": "used" if self.used else
+            (self.why_not or "not named"),
+            **({"sequences": self.sequences} if self.sequences else {}),
+            **({"draft_fixes": self.draft_fixes} if self.draft_fixes else {}),
+            "scope_metrics": self.ledger.compute_metrics().to_dict(),
+            "readiness_verdict": self.ledger.evaluate_readiness().to_dict(),
+        }
+        durable.write_json(out_path, payload, indent=1)
+        if hasattr(self.ledger, "save_to_file"):
+            ledger_path = out_path.parent / "conversion-ledger.json"
+            self.ledger.save_to_file(ledger_path)
+
+    def _register_in_ledger(self, r, stage=None, success=True, rung=None, target_code=None, error=None):
+        from ..conversion_ledger import ArtefactKind, ArtefactCriticality, CareBadge, DebtType
+        kind_map = {
+            "procedure": ArtefactKind.PROCEDURE,
+            "function": ArtefactKind.FUNCTION,
+            "view": ArtefactKind.VIEW,
+            "trigger": ArtefactKind.TRIGGER,
+            "package": ArtefactKind.PACKAGE,
+            "package_body": ArtefactKind.PACKAGE_BODY,
+            "event": ArtefactKind.PROCEDURE,
+        }
+        kind = kind_map.get(getattr(r, "kind", ""), ArtefactKind.PROCEDURE)
+        content = getattr(r, "definition", None) or getattr(r, "body", None)
+        crit = ArtefactCriticality.HIGH if getattr(r, "kind", "") in ("procedure", "package") else ArtefactCriticality.MEDIUM
+        cid = self.ledger.compute_canonical_id(self.db, r.name, kind, content)
+        self.ledger.submit_artefact(
+            name=r.name,
+            kind=kind,
+            schema=self.db,
+            content=content,
+            criticality=crit,
+            canonical_id=cid,
+        )
+        self.ledger.mark_extracted(cid)
+        if stage == "parsed":
+            if success:
+                self.ledger.mark_parsed(cid)
+            else:
+                self.ledger.record_parse_debt(cid, DebtType.SYNTAX_ERROR, str(error or "Parse error"), CareBadge.ACTION)
+        elif stage == "converted":
+            self.ledger.mark_parsed(cid)
+            if success and target_code:
+                self.ledger.mark_converted(cid, target_code=target_code, rung=rung)
+            else:
+                self.ledger.record_conversion_debt(cid, DebtType.CONVERSION_REFUSED, str(error or "Refused"), CareBadge.ACTION)
+        elif stage == "executed":
+            self.ledger.mark_parsed(cid)
+            if target_code:
+                self.ledger.mark_converted(cid, target_code=target_code, rung=rung)
+            if success:
+                self.ledger.mark_executed(cid)
+                self.ledger.mark_covered(cid, coverage_ratio=1.0)
+            else:
+                self.ledger.record_debt(cid, DebtType.VERIFICATION_FAILED, CareBadge.ACTION, str(error or "Diff"))
 
 
 def _pg_version(runner):

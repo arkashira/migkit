@@ -53,7 +53,28 @@ from migkit.query_regression import (
     WorkloadProfile,
     WorkloadQuery,
     is_safe_test_host,
+    RegressionThresholds,
+    decide_query_regression_envelope,
+    query_regression_envelope_rungs,
 )
+from tests.rung_branches import HOLDS, REFUSES, branch, watched
+
+PROVES_RUNGS = [
+    ("query_regression", "query_regression_envelope_rungs", "certified_within_envelope", "holds"),
+    ("query_regression", "query_regression_envelope_rungs", "certified_within_envelope", "refuses"),
+    ("query_regression", "query_regression_envelope_rungs", "p99_tail_latency_review", "holds"),
+    ("query_regression", "query_regression_envelope_rungs", "p99_tail_latency_review", "refuses"),
+    ("query_regression", "query_regression_envelope_rungs", "explain_cost_increase_review", "holds"),
+    ("query_regression", "query_regression_envelope_rungs", "explain_cost_increase_review", "refuses"),
+    ("query_regression", "query_regression_envelope_rungs", "implicit_cast_hazard_review", "holds"),
+    ("query_regression", "query_regression_envelope_rungs", "implicit_cast_hazard_review", "refuses"),
+    ("query_regression", "query_regression_envelope_rungs", "unpriced_index_remediation_review", "holds"),
+    ("query_regression", "query_regression_envelope_rungs", "unpriced_index_remediation_review", "refuses"),
+    ("query_regression", "query_regression_envelope_rungs", "missing_baseline_review", "holds"),
+    ("query_regression", "query_regression_envelope_rungs", "missing_baseline_review", "refuses"),
+    ("query_regression", "query_regression_envelope_rungs", "severe_regression_action", "holds"),
+]
+
 
 
 @pytest.fixture
@@ -551,3 +572,117 @@ def test_pure_unix_terse_report_and_care_badges():
     assert "readiness=APP_READY_UNCONDITIONAL" in report
     # No non-ASCII characters or emojis
     assert all(ord(c) < 128 for c in report)
+
+
+def test_query_regression_envelope_rungs_coverage():
+    with watched() as seen:
+        # 1. certified_within_envelope holds
+        f1 = {
+            "executed": True,
+            "cold_cache_tested": True,
+            "collation_mismatch_count": 0,
+            "latency_p95_ratio": 1.0,
+            "latency_p99_ratio": 1.0,
+            "cost_ratio": 1.0,
+            "became_seq_scan": False,
+            "cardinality_divergence": 0,
+            "temp_disk_spills": 0,
+            "has_baseline": True,
+            "needs_unpriced_index": False,
+            "implicit_casts": 0,
+        }
+        c1 = decide_query_regression_envelope(f1)
+        assert c1.rung.name == "certified_within_envelope"
+
+        # 2. certified_within_envelope refuses (collation_mismatch_count=1),
+        # all review rungs refuse (they require collation_mismatch_count == 0)
+        # severe_regression_action holds
+        f2 = {
+            "executed": True,
+            "collation_mismatch_count": 1,
+            "latency_p99_ratio": 3.0,
+            "cost_ratio": 2.0,
+            "implicit_casts": 1,
+            "needs_unpriced_index": True,
+            "has_baseline": False,
+        }
+        c2 = decide_query_regression_envelope(f2)
+        assert c2.rung.name == "severe_regression_action"
+
+        # 3. p99_tail_latency_review holds
+        f3 = {
+            "executed": True,
+            "collation_mismatch_count": 0,
+            "latency_p99_ratio": 3.0,
+            "max_p99_ratio": 2.0,
+        }
+        c3 = decide_query_regression_envelope(f3)
+        assert c3.rung.name == "p99_tail_latency_review"
+
+        # 4. explain_cost_increase_review holds
+        f4 = {
+            "executed": True,
+            "collation_mismatch_count": 0,
+            "latency_p99_ratio": 1.0,
+            "cost_ratio": 2.5,
+            "max_cost_ratio": 1.5,
+        }
+        c4 = decide_query_regression_envelope(f4)
+        assert c4.rung.name == "explain_cost_increase_review"
+
+        # 5. implicit_cast_hazard_review holds
+        f5 = {
+            "executed": True,
+            "collation_mismatch_count": 0,
+            "latency_p99_ratio": 1.0,
+            "cost_ratio": 1.0,
+            "implicit_casts": 2,
+        }
+        c5 = decide_query_regression_envelope(f5)
+        assert c5.rung.name == "implicit_cast_hazard_review"
+
+        # 6. unpriced_index_remediation_review holds
+        f6 = {
+            "executed": True,
+            "collation_mismatch_count": 0,
+            "latency_p99_ratio": 1.0,
+            "cost_ratio": 1.0,
+            "implicit_casts": 0,
+            "needs_unpriced_index": True,
+        }
+        c6 = decide_query_regression_envelope(f6)
+        assert c6.rung.name == "unpriced_index_remediation_review"
+
+        # 7. missing_baseline_review holds
+        f7 = {
+            "executed": True,
+            "collation_mismatch_count": 0,
+            "latency_p99_ratio": 1.0,
+            "cost_ratio": 1.0,
+            "implicit_casts": 0,
+            "needs_unpriced_index": False,
+            "has_baseline": False,
+        }
+        c7 = decide_query_regression_envelope(f7)
+        assert c7.rung.name == "missing_baseline_review"
+
+
+def test_application_readiness_query_regression_wiring():
+    from migkit import application_readiness
+    facts = {
+        "executed": True,
+        "cold_cache_tested": True,
+        "collation_mismatch_count": 0,
+        "latency_p95_ratio": 1.0,
+        "latency_p99_ratio": 1.0,
+        "cost_ratio": 1.0,
+        "became_seq_scan": False,
+        "cardinality_divergence": 0,
+        "temp_disk_spills": 0,
+        "has_baseline": True,
+        "needs_unpriced_index": False,
+        "implicit_casts": 0,
+    }
+    choice = application_readiness.verify_query_regression_envelope(facts)
+    assert choice.rung.name == "certified_within_envelope"
+

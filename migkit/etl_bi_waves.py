@@ -31,6 +31,9 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
+from . import decide, durable
+
+
 # Care badges
 CARE_ACTION = "ACTION"
 CARE_REVIEW = "REVIEW"
@@ -1175,3 +1178,74 @@ class DecisionEngineVerificationWrapper:
 def tempfile_dir_fallback() -> Path:
     import tempfile
     return Path(tempfile.gettempdir()) / "migkit_etl_bi_waves"
+
+
+def migration_wave_readiness_rungs() -> Tuple[decide.Rung, ...]:
+    """Decide ladder for database, ETL, and BI migration wave readiness (Row 630: RCH22)."""
+    return (
+        decide.Rung(
+            "ready_for_cutover",
+            "certify whole-workload migration wave ready for cutover",
+            needs=(
+                decide.Need(
+                    "etl bi parsers registered",
+                    lambda f: bool(f.get("all_parsers_registered", True)),
+                    "{rung} requires all ETL and BI artefact parsers to be registered",
+                ),
+                decide.Need(
+                    "topological prerequisites satisfied",
+                    lambda f: bool(f.get("prerequisites_satisfied", True)),
+                    "{rung} requires all wave prerequisites and upstream tables to be verified",
+                ),
+                decide.Need(
+                    "merkle diff zero",
+                    lambda f: int(f.get("merkle_diff_count", 0)) == 0,
+                    "{rung} requires zero Merkle boundary divergence across transformed artefacts",
+                ),
+                decide.Need(
+                    "downstream consumers drained",
+                    lambda f: float(f.get("consumer_lag_seconds", 0.0)) <= float(f.get("max_allowed_lag", 1.0)),
+                    "{rung} requires downstream consumers drained within lag threshold",
+                ),
+            ),
+            because="all database tables, ETL pipelines, and BI assets in wave verified with zero Merkle diff",
+        ),
+        decide.Rung(
+            "consumer_lag_review",
+            "flag wave for REVIEW due to unresolved downstream consumer lag",
+            needs=(
+                decide.Need(
+                    "etl bi parsers registered",
+                    lambda f: bool(f.get("all_parsers_registered", True)),
+                    "{rung} requires all ETL and BI artefact parsers to be registered",
+                ),
+                decide.Need(
+                    "topological prerequisites satisfied",
+                    lambda f: bool(f.get("prerequisites_satisfied", True)),
+                    "{rung} requires all wave prerequisites and upstream tables to be verified",
+                ),
+                decide.Need(
+                    "merkle diff zero",
+                    lambda f: int(f.get("merkle_diff_count", 0)) == 0,
+                    "{rung} requires zero Merkle boundary divergence across transformed artefacts",
+                ),
+                decide.Need(
+                    "consumer lag exceeds threshold",
+                    lambda f: float(f.get("consumer_lag_seconds", 0.0)) > float(f.get("max_allowed_lag", 1.0)),
+                    "{rung} requires consumer lag to exceed threshold to flag for review",
+                ),
+            ),
+            because="wave data verified but downstream consumers have lag requiring review before cutover",
+        ),
+        decide.Rung(
+            "wave_unready_action",
+            "reject cutover with ACTION care badge due to unregistered parsers, unmet prerequisites, or Merkle divergence",
+            because="unregistered ETL/BI parsers, unmet topological prerequisites, or Merkle divergence detected; cutover blocked with ACTION",
+        ),
+    )
+
+
+def decide_migration_wave_readiness(facts: Dict[str, Any]) -> decide.Choice:
+    """Climbs migration_wave_readiness_rungs decide ladder."""
+    return decide.climb("Migration wave readiness assessment", migration_wave_readiness_rungs(), facts)
+

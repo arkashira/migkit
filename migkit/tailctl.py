@@ -901,6 +901,12 @@ def apply_unit(eng, db, at, changes, apply, log=None):
     if retention_checker is not None:
         from .retention_controller import audit_spool_retention_fence
         audit_spool_retention_fence(retention_checker, hop_name=getattr(eng, "name", "apply"))
+    mapping_prover = getattr(eng, "mapping_proof", None)
+    if mapping_prover is None and hasattr(eng, "hop"):
+        mapping_prover = getattr(eng.hop, "mapping_proof", None)
+    if mapping_prover is not None:
+        from .mapping_proof import apply_cdc_mapping_proof
+        changes = apply_cdc_mapping_proof(mapping_prover, changes, db=db, at=at, log=log)
     checkpointer = getattr(eng, "effect_checkpointer", None)
     if checkpointer is None and hasattr(eng, "hop"):
         checkpointer = getattr(eng.hop, "effect_checkpointer", None)

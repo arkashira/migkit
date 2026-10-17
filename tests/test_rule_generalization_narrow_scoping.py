@@ -44,8 +44,22 @@ from migkit.rule_generalization import (
     TypeSignatureConstraint,
     VersionConstraint,
     WithheldSuiteReport,
+    decide_rule_generalization,
     format_unix_report,
+    rule_generalization_rungs,
 )
+from tests.rung_branches import HOLDS, REFUSES, branch, watched
+
+PROVES_RUNGS = [
+    ("rule_generalization", "rule_generalization_rungs", "admitted", "holds"),
+    ("rule_generalization", "rule_generalization_rungs", "admitted", "refuses"),
+    ("rule_generalization", "rule_generalization_rungs", "shadow_divergence_review", "holds"),
+    ("rule_generalization", "rule_generalization_rungs", "shadow_divergence_review", "refuses"),
+    ("rule_generalization", "rule_generalization_rungs", "rollback_untested_review", "holds"),
+    ("rule_generalization", "rule_generalization_rungs", "rollback_untested_review", "refuses"),
+    ("rule_generalization", "rule_generalization_rungs", "rejection_action", "holds"),
+]
+
 
 
 def _make_decimal_calc_routine(
@@ -972,4 +986,56 @@ def test_to_dict_serialization_completeness():
     loaded = json.loads(dumped)
     assert loaded["rule_id"] == rule.rule_id
     assert loaded["dialect_constraint"]["target_version"]["min_version"] == "14.0"
+
+
+def test_rule_generalization_rungs_coverage():
+    with watched() as seen:
+        # 1. admitted holds
+        f1 = {
+            "evaluated": True,
+            "family_supported": True,
+            "withheld_failures": 0,
+            "shadow_divergence_count": 0,
+            "conflicts_unresolved": 0,
+            "rollback_validated": True,
+        }
+        c1 = decide_rule_generalization(f1)
+        assert c1.rung.name == "admitted"
+
+        # 2. admitted refuses, shadow_divergence_review refuses, rollback_untested_review refuses -> rejection_action holds
+        f2 = {
+            "evaluated": True,
+            "family_supported": True,
+            "withheld_failures": 1,
+            "shadow_divergence_count": 0,
+            "specificity_tie": False,
+            "rollback_validated": True,
+        }
+        c2 = decide_rule_generalization(f2)
+        assert c2.rung.name == "rejection_action"
+
+        # 3. admitted refuses, shadow_divergence_review holds
+        f3 = {
+            "evaluated": True,
+            "family_supported": True,
+            "withheld_failures": 0,
+            "shadow_divergence_count": 1,
+            "conflicts_unresolved": 0,
+            "rollback_validated": True,
+        }
+        c3 = decide_rule_generalization(f3)
+        assert c3.rung.name == "shadow_divergence_review"
+
+        # 4. admitted refuses, shadow_divergence_review refuses, rollback_untested_review holds
+        f4 = {
+            "evaluated": True,
+            "family_supported": True,
+            "withheld_failures": 0,
+            "shadow_divergence_count": 0,
+            "conflicts_unresolved": 0,
+            "rollback_validated": False,
+        }
+        c4 = decide_rule_generalization(f4)
+        assert c4.rung.name == "rollback_untested_review"
+
 

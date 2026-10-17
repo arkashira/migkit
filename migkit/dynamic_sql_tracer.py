@@ -21,10 +21,34 @@ import hashlib
 import json
 import os
 import re
+import socket
 import time
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
+
+from . import decide
+
+
+class DynamicSQLTracerError(Exception):
+    """Base error for dynamic SQL tracing operations."""
+
+
+class CorruptLockError(DynamicSQLTracerError):
+    """Raised when an active lease lock file contains corrupt data."""
+
+
+class LockAcquisitionError(DynamicSQLTracerError):
+    """Raised when active verification lease lock cannot be acquired."""
+
+
+class CorruptCheckpointError(DynamicSQLTracerError, ValueError):
+    """Raised when checkpoint state is invalid or checksum mismatches."""
+
+
+class DynamicSQLParseError(DynamicSQLTracerError):
+    """Raised when dynamic SQL or AST cannot be parsed."""
+
 
 
 # Care badges
@@ -1418,7 +1442,7 @@ class DynamicSqlTracerRegistry:
         if checksum:
             computed = hashlib.sha256(json.dumps(data, indent=2, sort_keys=True).encode("ascii")).hexdigest()
             if computed != checksum:
-                raise ValueError("Checkpoint corrupted: checksum mismatch")
+                raise CorruptCheckpointError(f"Checkpoint corrupted: checksum mismatch ({computed} != {checksum})")
 
         sc = SchemaContract.from_dict(data.get("schema_contract", {}))
         registry = cls(schema_contract=sc)
@@ -1444,19 +1468,19 @@ class DynamicSqlTracerRegistry:
             try:
                 with open(lock_file, "r", encoding="ascii") as f:
                     lock_info = json.load(f)
-                ts = float(lock_info.get("timestamp", 0.0))
-                pid = int(lock_info.get("pid", -1))
-                if (now - ts) < timeout_sec:
-                    # Still active lease
-                    return False
-            except Exception:
-                pass
+            except Exception as e:
+                raise CorruptLockError(f"Active verification lease lock is corrupt: {e}") from e
+            ts = float(lock_info.get("timestamp", 0.0))
+            pid = int(lock_info.get("pid", -1))
+            if (now - ts) < timeout_sec:
+                # Still active lease
+                return False
 
         # Write new lease
         lease_data = {
             "pid": os.getpid(),
             "timestamp": now,
-            "host": "127.0.0.1",
+            "host": socket.gethostname(),
         }
         tmp_lock = lock_file.with_suffix(".tmp")
         with open(tmp_lock, "w", encoding="ascii") as f:
@@ -1473,3 +1497,96 @@ class DynamicSqlTracerRegistry:
             except Exception:
                 pass
             self._lease_lock_file = None
+
+
+def dynamic_sql_dependency_rungs() -> Tuple[decide.Rung, ...]:
+    """Decide ladder for dynamic SQL and application dependencies (Row 629: RCH21)."""
+    return (
+        decide.Rung(
+            "verified",
+            "certify dynamic SQL and application dependencies bounded and verified against schema contract",
+            needs=(
+                decide.Need(
+                    "ast parsed or traced",
+                    lambda f: bool(f.get("is_parsed")),
+                    "{rung} requires AST parsing or approved runtime trace",
+                ),
+                decide.Need(
+                    "all tables bound to schema",
+                    lambda f: int(f.get("unbound_table_count", 0)) == 0,
+                    "{rung} requires all referenced tables to be bound to schema contract",
+                ),
+                decide.Need(
+                    "raw fragments parameterized",
+                    lambda f: not bool(f.get("has_unparameterized_fragments")),
+                    "{rung} requires raw SQL fragments to be parameterized",
+                ),
+                decide.Need(
+                    "affected objects within wave",
+                    lambda f: bool(f.get("all_objects_in_current_wave", True)),
+                    "{rung} requires all dependent objects to belong to the active migration wave",
+                ),
+                decide.Need(
+                    "schema contract verified",
+                    lambda f: bool(f.get("contract_verified", True)),
+                    "{rung} requires schema contract compatibility verification",
+                ),
+                decide.Need(
+                    "target connection resolvable",
+                    lambda f: bool(f.get("target_resolvable", True)),
+                    "{rung} requires target connection resolution",
+                ),
+            ),
+            because="all dynamic SQL dependencies are bounded, traced, and verified against schema contract",
+        ),
+        decide.Rung(
+            "fragment_parameterization_review",
+            "flag dependencies for REVIEW due to unparameterized fragments or pending schema contract",
+            needs=(
+                decide.Need(
+                    "ast parsed or traced",
+                    lambda f: bool(f.get("is_parsed")),
+                    "{rung} requires AST parsing or approved runtime trace",
+                ),
+                decide.Need(
+                    "all tables bound to schema",
+                    lambda f: int(f.get("unbound_table_count", 0)) == 0,
+                    "{rung} requires all referenced tables to be bound to schema contract",
+                ),
+                decide.Need(
+                    "unparameterized fragments require review",
+                    lambda f: bool(f.get("has_unparameterized_fragments")) or not bool(f.get("contract_verified", True)),
+                    "{rung} requires unparameterized fragments or pending contract to flag for review",
+                ),
+            ),
+            because="unparameterized raw SQL fragments or pending schema contract require review before cutover",
+        ),
+        decide.Rung(
+            "dynamic_target_review",
+            "flag dependencies for REVIEW due to unresolved dynamic target connection",
+            needs=(
+                decide.Need(
+                    "ast parsed or traced",
+                    lambda f: bool(f.get("is_parsed")),
+                    "{rung} requires AST parsing or approved runtime trace",
+                ),
+                decide.Need(
+                    "unresolvable target connection",
+                    lambda f: not bool(f.get("target_resolvable", True)),
+                    "{rung} requires unresolvable target connection to flag for review",
+                ),
+            ),
+            because="dynamic target connection cannot be statically proven, manual review required",
+        ),
+        decide.Rung(
+            "unresolved_dependency_action",
+            "reject cutover with ACTION care badge due to unparsed code or unbound schema objects",
+            because="unparsed code, unbound tables, or cross-wave dependencies detected; cutover blocked with ACTION",
+        ),
+    )
+
+
+def decide_dynamic_sql_dependency(facts: Dict[str, Any]) -> decide.Choice:
+    """Climbs dynamic_sql_dependency_rungs decide ladder."""
+    return decide.climb("Dynamic SQL dependency assessment", dynamic_sql_dependency_rungs(), facts)
+

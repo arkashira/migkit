@@ -44,7 +44,24 @@ from migkit.dynamic_sql_tracer import (
     extract_parameter_markers,
     extract_sql_columns,
     extract_sql_tables,
+    CorruptCheckpointError,
+    CorruptLockError,
+    DynamicSQLParseError,
+    decide_dynamic_sql_dependency,
+    dynamic_sql_dependency_rungs,
 )
+from tests.rung_branches import HOLDS, REFUSES, branch, watched
+
+PROVES_RUNGS = [
+    ("dynamic_sql_tracer", "dynamic_sql_dependency_rungs", "verified", "holds"),
+    ("dynamic_sql_tracer", "dynamic_sql_dependency_rungs", "verified", "refuses"),
+    ("dynamic_sql_tracer", "dynamic_sql_dependency_rungs", "fragment_parameterization_review", "holds"),
+    ("dynamic_sql_tracer", "dynamic_sql_dependency_rungs", "fragment_parameterization_review", "refuses"),
+    ("dynamic_sql_tracer", "dynamic_sql_dependency_rungs", "dynamic_target_review", "holds"),
+    ("dynamic_sql_tracer", "dynamic_sql_dependency_rungs", "dynamic_target_review", "refuses"),
+    ("dynamic_sql_tracer", "dynamic_sql_dependency_rungs", "unresolved_dependency_action", "holds"),
+]
+
 
 
 @pytest.fixture
@@ -613,3 +630,70 @@ def test_readiness_coverage_unix_report():
     # Verify 100% pure ASCII, zero emojis
     assert report.isascii() is True
     assert all(ord(c) < 128 for c in report)
+
+
+def test_dynamic_sql_dependency_rungs_coverage():
+    with watched() as seen:
+        # 1. verified holds
+        f1 = {
+            "is_parsed": True,
+            "unbound_table_count": 0,
+            "has_unparameterized_fragments": False,
+            "all_objects_in_current_wave": True,
+            "contract_verified": True,
+            "target_resolvable": True,
+        }
+        c1 = decide_dynamic_sql_dependency(f1)
+        assert c1.rung.name == "verified"
+
+        # 2. verified refuses, fragment_parameterization_review refuses, dynamic_target_review refuses -> unresolved_dependency_action holds
+        f2 = {
+            "is_parsed": True,
+            "unbound_table_count": 1,
+            "has_unparameterized_fragments": False,
+            "all_objects_in_current_wave": True,
+            "contract_verified": True,
+            "target_resolvable": True,
+        }
+        c2 = decide_dynamic_sql_dependency(f2)
+        assert c2.rung.name == "unresolved_dependency_action"
+
+        # 3. verified refuses, fragment_parameterization_review holds
+        f3 = {
+            "is_parsed": True,
+            "unbound_table_count": 0,
+            "has_unparameterized_fragments": True,
+            "all_objects_in_current_wave": True,
+            "contract_verified": True,
+            "target_resolvable": True,
+        }
+        c3 = decide_dynamic_sql_dependency(f3)
+        assert c3.rung.name == "fragment_parameterization_review"
+
+        # 4. verified refuses, fragment_parameterization_review refuses, dynamic_target_review holds
+        f4 = {
+            "is_parsed": True,
+            "unbound_table_count": 0,
+            "has_unparameterized_fragments": False,
+            "all_objects_in_current_wave": True,
+            "contract_verified": True,
+            "target_resolvable": False,
+        }
+        c4 = decide_dynamic_sql_dependency(f4)
+        assert c4.rung.name == "dynamic_target_review"
+
+
+def test_corrupt_lock_and_checkpoint_errors(tmp_dir):
+    # Corrupt lock file
+    lock_file = tmp_dir / ".run.lock"
+    lock_file.write_text("NOT_VALID_JSON{{{")
+    reg = DynamicSqlTracerRegistry()
+    with pytest.raises(CorruptLockError):
+        reg.acquire_lease(tmp_dir)
+
+    # Corrupt checkpoint
+    chk_file = tmp_dir / "chk.json"
+    chk_file.write_text(json.dumps({"checksum": "bad_hash", "payload": {"foo": "bar"}}))
+    with pytest.raises(CorruptCheckpointError):
+        DynamicSqlTracerRegistry.load_checkpoint(chk_file)
+

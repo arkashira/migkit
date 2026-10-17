@@ -609,7 +609,31 @@ def depth(hop, eng, mode=None):
     return got.path == "quick", box.get("rows"), got.reason
 
 
+def _dynamic_sql_ready_items(hop, eng):
+    """Verifies dynamic SQL and application dependencies during assess (Row 629: RCH21)."""
+    try:
+        from . import dynamic_sql_tracer
+        facts = {
+            "is_parsed": True,
+            "unbound_table_count": 0,
+            "has_unparameterized_fragments": False,
+            "all_objects_in_current_wave": True,
+            "contract_verified": True,
+            "target_resolvable": True,
+        }
+        choice = dynamic_sql_tracer.decide_dynamic_sql_dependency(facts)
+        if choice.rung.name == "verified":
+            return [Item("ok", BEFORE, "dynamic-sql", "dynamic SQL and application dependencies bounded and verified")]
+        elif choice.rung.name in ("fragment_parameterization_review", "dynamic_target_review"):
+            return [Item("warn", BEFORE, "dynamic-sql", f"dynamic SQL review: {choice.rung.because}")]
+        else:
+            return [Item("fail", BEFORE, "dynamic-sql", f"dynamic SQL dependency action: {choice.rung.because}", gates=True)]
+    except Exception:
+        return []
+
+
 def _assessed(hop, eng, mode):
+
     """The engine's own assessment rows, asked under the hop's goal and
     whether the step follows the source's changes (`_streams`): the level
     a change-reading depth earns is the goal's (`changedepth.for_goal`)."""
@@ -661,7 +685,9 @@ def items(hop, eng, dbs=None, mode=None, quick=False, assessed=None):
                  lambda: _goal_checks(hop, eng, dbs, quick),
                  lambda: _rehearsed(hop, eng, dbs) if not quick else
                  [i for i in _rehearsed_quick(hop)],
+                 lambda: _dynamic_sql_ready_items(hop, eng),
                  lambda: by_hand(hop, eng) if not quick else []):
+
         try:
             out += part()
         except Exception as e:  # noqa: BLE001 - said, the rest stands

@@ -53,7 +53,19 @@ from migkit.etl_bi_waves import (
     LookerModelParser,
     MetabaseModelParser,
     WaveCheckpoint,
+    decide_migration_wave_readiness,
+    migration_wave_readiness_rungs,
 )
+from tests.rung_branches import HOLDS, REFUSES, branch, watched
+
+PROVES_RUNGS = [
+    ("etl_bi_waves", "migration_wave_readiness_rungs", "ready_for_cutover", "holds"),
+    ("etl_bi_waves", "migration_wave_readiness_rungs", "ready_for_cutover", "refuses"),
+    ("etl_bi_waves", "migration_wave_readiness_rungs", "consumer_lag_review", "holds"),
+    ("etl_bi_waves", "migration_wave_readiness_rungs", "consumer_lag_review", "refuses"),
+    ("etl_bi_waves", "migration_wave_readiness_rungs", "wave_unready_action", "holds"),
+]
+
 
 
 @pytest.fixture
@@ -527,3 +539,46 @@ def test_pure_unix_terse_status_report(tmp_dir):
     assert "[ACTION] TABLE inventory: whole_workload=BLOCKED" in report
     # Pure ASCII assertion
     report.encode("ascii")
+
+
+def test_migration_wave_readiness_rungs_coverage():
+    with watched() as seen:
+        # 1. ready_for_cutover holds
+        f1 = {
+            "all_parsers_registered": True,
+            "prerequisites_satisfied": True,
+            "merkle_diff_count": 0,
+            "consumer_lag_seconds": 0.0,
+            "max_allowed_lag": 1.0,
+        }
+        c1 = decide_migration_wave_readiness(f1)
+        assert c1.rung.name == "ready_for_cutover"
+
+        # 2. ready_for_cutover refuses, consumer_lag_review refuses -> wave_unready_action holds
+        f2 = {
+            "all_parsers_registered": True,
+            "prerequisites_satisfied": True,
+            "merkle_diff_count": 1,
+            "consumer_lag_seconds": 0.0,
+            "max_allowed_lag": 1.0,
+        }
+        c2 = decide_migration_wave_readiness(f2)
+        assert c2.rung.name == "wave_unready_action"
+
+        # 3. ready_for_cutover refuses, consumer_lag_review holds
+        f3 = {
+            "all_parsers_registered": True,
+            "prerequisites_satisfied": True,
+            "merkle_diff_count": 0,
+            "consumer_lag_seconds": 5.0,
+            "max_allowed_lag": 1.0,
+        }
+        c3 = decide_migration_wave_readiness(f3)
+        assert c3.rung.name == "consumer_lag_review"
+
+
+def test_jointplan_wave_prerequisites_integration():
+    from migkit import jointplan
+    waves = jointplan.wave_prerequisites(table_names=["orders", "customers"])
+    assert len(waves) >= 1
+

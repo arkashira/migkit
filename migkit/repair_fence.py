@@ -1412,3 +1412,27 @@ def coordinate_repair_resync(
         start_lsn=start_lsn,
     )
 
+
+def coordinate_repair_proof_verification(
+    routine_name: str,
+    source_fn: Any,
+    source_code: str,
+    deterministic_candidate: Optional[Any] = None,
+    synthesis_generator: Optional[Any] = None,
+    base_inputs: Optional[Sequence[Dict[str, Any]]] = None,
+    checkpoint_dir: Optional[Any] = None,
+    **kwargs: Any,
+) -> Any:
+    """Coordinate independent executable evidence verification for repair transformations (Row 627: RCH19)."""
+    from . import ai_proof_loop
+    engine = ai_proof_loop.AiProofLoopEngine(**kwargs)
+    return engine.run_proof_loop(
+        routine_name=routine_name,
+        source_fn=source_fn,
+        source_code=source_code,
+        deterministic_candidate=deterministic_candidate,
+        synthesis_generator=synthesis_generator,
+        base_inputs=base_inputs,
+        checkpoint_dir=checkpoint_dir,
+    )
+

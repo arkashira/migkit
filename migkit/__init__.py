@@ -25,6 +25,7 @@ __all__ = (
     "continuous_scope",
     "control_upgrade",
     "conversion_ledger",
+    "convert",
     "cost_envelope",
     "decision_compute",
     "decomp_budget",
