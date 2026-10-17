@@ -1124,3 +1124,9 @@ def runtime_profile(eng, db, **kw):
     from .tune import runtime_profile as _rp
     return _rp(eng, db, **kw)
 
+
+def TargetHardwareTuner(*args, **kw):
+    from .tune import TargetHardwareTuner as _THT
+    return _THT(*args, **kw)
+
+

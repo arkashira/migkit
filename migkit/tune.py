@@ -174,9 +174,11 @@ class ProfileResult(list):
         self.analyze_thread = analyze_thread
 
 
-def bulk_profile(eng, db, journal_path=None, side="dst", apply=True, **kw):
+def bulk_profile(eng, db, journal_path=None, side="dst", apply=True, overrides=None, **kw):
     family = _family(eng)
-    bulk_cfg = BULK_SETTINGS.get(family, POSTGRES_BULK)
+    bulk_cfg = dict(BULK_SETTINGS.get(family, POSTGRES_BULK))
+    if overrides and isinstance(overrides, dict):
+        bulk_cfg.update(overrides)
     j_path = _journal_path(eng, db, journal_path)
 
     existing = None
@@ -224,7 +226,7 @@ def _run_analyze(eng, db, family, side="dst"):
         pass
 
 
-def runtime_profile(eng, db, journal_path=None, side="dst", apply=True, background=True, **kw):
+def runtime_profile(eng, db, journal_path=None, side="dst", apply=True, background=True, force_defaults=False, **kw):
     family = _family(eng)
     j_path = _journal_path(eng, db, journal_path)
 
@@ -239,13 +241,18 @@ def runtime_profile(eng, db, journal_path=None, side="dst", apply=True, backgrou
     if existing and existing.get("previous_settings"):
         prev = dict(existing["previous_settings"])
     else:
-        prev = dict(defaults)
+        live = _read_current_settings(eng, db, family) if eng and not isinstance(eng, str) else None
+        if live:
+            prev = live
+        else:
+            prev = dict(defaults)
 
     statements = _generate_restore_statements(family, prev)
     restore_stmts = [s for s in statements if not s.upper().startswith("ANALYZE")]
 
     if apply:
-        _apply_statements(eng, db, restore_stmts, side=side)
+        if existing or force_defaults:
+            _apply_statements(eng, db, restore_stmts, side=side)
 
     analyze_thread = None
     if apply:
@@ -263,3 +270,27 @@ def runtime_profile(eng, db, journal_path=None, side="dst", apply=True, backgrou
         durable.write_json(j_path, existing)
 
     return ProfileResult(statements, prev, previous=prev, journal_path=j_path, analyze_thread=analyze_thread)
+
+
+class TargetHardwareTuner:
+    """Automated Target Hardware & Parameter Tuning Flip (AUTO.target-tune)."""
+
+    def __init__(self, journal_path=None, apply=True, background=True, overrides=None):
+        self.journal_path = journal_path
+        self.apply = apply
+        self.background = background
+        self.overrides = overrides or {}
+
+    def apply_bulk(self, eng, db=None):
+        res = bulk_profile(eng, db, journal_path=self.journal_path, apply=self.apply, overrides=self.overrides)
+        res.applied = res.statements
+        return res
+
+    def apply_runtime(self, eng, db=None, force_defaults=False):
+        res = runtime_profile(
+            eng, db, journal_path=self.journal_path, apply=self.apply,
+            background=self.background, force_defaults=force_defaults
+        )
+        res.applied = res.statements
+        return res
+

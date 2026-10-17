@@ -600,15 +600,15 @@ class AutopilotOrchestrator:
     def _step_target_tune_bulk(self) -> Dict[str, Any]:
         self._target_tuned = True
         target_eng = getattr(self.hop, "target_engine", getattr(self.hop, "dst", None))
-        if self.tuner is not None:
-            res = self.tuner.apply_bulk(target_eng, db=getattr(self.hop, "target_db", None))
-            statements = getattr(res, "applied", [])
-            return {"tuning": "bulk", "statements": statements, "care_badge": CareBadge.PASS.value}
-        from . import target_tuning_contract
-        target_host = getattr(self.hop, "target_host", "127.0.0.1")
-        if not target_tuning_contract.is_safe_test_host(target_host):
-            raise target_tuning_contract.UnsafeTargetHostError(f"Target host {target_host} is not a safe test host")
-        return {"tuning": "bulk", "applied": ["work_mem=64MB", "synchronous_commit=off"], "care_badge": CareBadge.PASS.value}
+        if self.tuner is None:
+            from .tune import TargetHardwareTuner
+            self.tuner = TargetHardwareTuner(
+                journal_path=(self.state_dir / "target-tune-journal.json") if self.state_dir else None,
+                apply=bool(target_eng is not None and not getattr(self, "dry_run", False)),
+            )
+        res = self.tuner.apply_bulk(target_eng, db=getattr(self.hop, "target_db", None))
+        statements = getattr(res, "applied", [])
+        return {"tuning": "bulk", "statements": statements, "care_badge": CareBadge.PASS.value}
 
     def _step_deferred_index_drop(self) -> Dict[str, Any]:
         if self.schema_lifecycle is not None:
@@ -645,12 +645,16 @@ class AutopilotOrchestrator:
 
     def _step_target_tune_restore(self) -> Dict[str, Any]:
         target_eng = getattr(self.hop, "target_engine", getattr(self.hop, "dst", None))
-        if self.tuner is not None:
-            res = self.tuner.apply_runtime(target_eng, db=getattr(self.hop, "target_db", None))
-            self._target_tuned = False
-            return {"tuning": "runtime", "applied": getattr(res, "applied", []), "care_badge": CareBadge.PASS.value}
+        if self.tuner is None:
+            from .tune import TargetHardwareTuner
+            self.tuner = TargetHardwareTuner(
+                journal_path=(self.state_dir / "target-tune-journal.json") if self.state_dir else None,
+                apply=bool(target_eng is not None and not getattr(self, "dry_run", False)),
+            )
+        res = self.tuner.apply_runtime(target_eng, db=getattr(self.hop, "target_db", None))
         self._target_tuned = False
-        return {"tuning": "runtime", "restored": True, "care_badge": CareBadge.PASS.value}
+        statements = getattr(res, "applied", [])
+        return {"tuning": "runtime", "applied": statements, "care_badge": CareBadge.PASS.value}
 
     def _step_cdc_replication(self) -> Dict[str, Any]:
         if self.cdc_engine is not None:

@@ -289,7 +289,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/transaction_dag.py` - Parallel transaction DAG replay with explicit dependency guarantees (RCH03.transaction-dag). Classes: CareBadge, DependencyKind, TransactionAtomicityError, LeaseConflictError, ForeignKeyConstraint, DependencyEdge.
 - `migkit/transforms.py` - A column written other than as it was read, and proved as written (backlog P0-SCOPE.7: column transforms the check understands).
 - `migkit/troubleshooting.py` - The troubleshooting guide, read off the code (backlog 42).
-- `migkit/tune.py` - Automated Target Hardware & Parameter Tuning Flip (AUTO.target-tune). Classes: ProfileResult.
+- `migkit/tune.py` - Automated Target Hardware & Parameter Tuning Flip (AUTO.target-tune). Classes: ProfileResult, TargetHardwareTuner.
 - `migkit/tuning.py` - Numbers set by reasoning, tuned from what runs measure (backlog P0-DEPTH, item 3, built with P0-SMART's knowledge base). Classes: Tunable, Dimension, Setting, Bound, Cause, Adjustment.
 - `migkit/tunnel.py` - A path to a server that cannot be reached directly, opened by migkit. Classes: Tunnel, BastionConfig, ForwardingHandle, WireGuardConfig, WireGuardMesh, AutoBastionTunnelManager.
 - `migkit/twoway.py` - Two ways at once through migkit's own tails (backlog R3, P0-DEPTH 2). Classes: Rule, TableRules, Rules, Settled.

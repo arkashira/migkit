@@ -181,3 +181,38 @@ def test_managed_module_integration(tmp_path):
 
     res_runtime = managed.runtime_profile("postgres", "db", journal_path=journal, apply=False)
     assert any("ANALYZE;" in s for s in res_runtime)
+
+
+def test_target_hardware_tuner_interface_and_overrides(tmp_path):
+    from migkit.tune import TargetHardwareTuner
+
+    journal = tmp_path / "tuner-journal.json"
+    eng = MockEngine(family="postgres", settings={"maintenance_work_mem": "512MB"})
+    tuner = TargetHardwareTuner(journal_path=journal, apply=True, background=False, overrides={"maintenance_work_mem": "4GB"})
+
+    # Bulk apply
+    res_b = tuner.apply_bulk(eng, db="appdb")
+    assert any("maintenance_work_mem = '4GB'" in s for s in res_b.applied)
+    executed_sqls = [stmt for side, db, stmt in eng.executed]
+    assert any("maintenance_work_mem = '4GB'" in s for s in executed_sqls)
+
+    eng.executed.clear()
+    # Runtime restore
+    res_r = tuner.apply_runtime(eng, db="appdb")
+    assert any("maintenance_work_mem = '512MB'" in s for s in res_r.applied)
+    executed_sqls_r = [stmt for side, db, stmt in eng.executed]
+    assert any("maintenance_work_mem = '512MB'" in s for s in executed_sqls_r)
+
+
+def test_runtime_profile_without_journal_does_not_overwrite_target_by_default(tmp_path):
+    nonexistent = tmp_path / "absent.json"
+    eng = MockEngine(family="postgres", settings={"maintenance_work_mem": "16GB"})
+
+    # apply=True without journal and without force_defaults should NOT run restore_stmts on eng
+    runtime_profile(eng, "appdb", journal_path=nonexistent, apply=True, background=False, force_defaults=False)
+    executed_sqls = [stmt for side, db, stmt in eng.executed]
+    # No ALTER SYSTEM SET should be executed
+    assert not any("ALTER SYSTEM SET" in s for s in executed_sqls)
+    # But ANALYZE should still run
+    assert any("ANALYZE;" in s for s in executed_sqls)
+
