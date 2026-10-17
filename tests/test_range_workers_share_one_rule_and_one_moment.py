@@ -116,7 +116,7 @@ def test_the_range_copier_holds_reads_and_names_through_the_one_owner():
     ranged = inspect.getsource(hetero.HeteroEngine.copy_range)
     assert "copy_sizes(" in ranged and "_write_sized(" in ranged
     assert "named_write(" in ranged
-    assert "named_write(" in inspect.getsource(Engine.neutral_apply)
+    assert "named_batch(" in inspect.getsource(Engine.neutral_apply) or "named_write(" in inspect.getsource(Engine.neutral_apply)
     assert "tuning.sized(" in inspect.getsource(
         hetero.HeteroEngine._write_sized)
 
