@@ -4777,3 +4777,38 @@ def _speak_as():
 
 
 _speak_as()
+
+
+def canonical_oracle(engine="", declared="", **kwargs):
+    from . import canon_oracle
+    return canon_oracle.CanonicalOracle(engine=engine, declared_type=declared, **kwargs)
+
+
+def oracle_display(value, cls=None, engine="", declared="", **kwargs):
+    from . import canon_oracle
+    orc = canon_oracle.CanonicalOracle(engine=engine, declared_type=declared or (cls or ""), **kwargs)
+    return orc.display(value)
+
+
+def oracle_sort_key(value, cls=None, engine="", declared="", **kwargs):
+    from . import canon_oracle
+    orc = canon_oracle.CanonicalOracle(engine=engine, declared_type=declared or (cls or ""), **kwargs)
+    return orc.sort_key(value)
+
+
+def oracle_equals(v1, v2, cls=None, engine="", declared="", **kwargs):
+    from . import canon_oracle
+    orc = canon_oracle.CanonicalOracle(engine=engine, declared_type=declared or (cls or ""), **kwargs)
+    return orc.equals(v1, v2)
+
+
+def detect_drift(v1, v2, cls=None, engine="", declared="", **kwargs):
+    from . import canon_oracle
+    orc = canon_oracle.CanonicalOracle(engine=engine, declared_type=declared or (cls or ""), **kwargs)
+    return orc.diff(v1, v2)
+
+
+def multiset_hash(items, **kwargs):
+    from . import canon_oracle
+    return canon_oracle.multiset_hash(items, **kwargs)
+

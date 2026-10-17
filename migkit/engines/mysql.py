@@ -356,8 +356,16 @@ class MySQLEngine(Engine):
                            if side == "dst" else f"set session time_zone = '{SESSION_ZONE}'"))
             c._read_timeout = rt
             from ..attempts import transport
+            from ..keepalive import apply_tcp_keepalive
             sock = getattr(c, "_sock", None)
-            c._migkit_transport = transport(sock, rt, _keepalive(sock))
+            ka_cfg = ep.tcp_keepalive() if hasattr(ep, "tcp_keepalive") else {}
+            ka_res = apply_tcp_keepalive(
+                sock,
+                idle=ka_cfg.get("idle", 15),
+                interval=ka_cfg.get("interval", 5),
+                count=ka_cfg.get("count", 3),
+            )
+            c._migkit_transport = transport(sock, rt, ka_res)
             return c
         # a probe that only decides an option asks once: retrying a server
         # that is not there only delays saying "no"
@@ -366,6 +374,9 @@ class MySQLEngine(Engine):
 
     def _connect(self, side, retry=True):
         return self._conn(side, retry=retry)
+
+    def heartbeat(self, side="src", sql="SELECT 1", db=None):
+        return self._q(side, sql)
 
     CANON_ENGINE = "mysql"
     OWN_PATHS_READ_COLUMN_MAPPING = False
@@ -4062,6 +4073,7 @@ class MySQLEngine(Engine):
                                     null_empty_conditions=(), null_empty_columns=(),
                                     parts=None, sides=("src", "dst")):
         from .. import scanplan
+        from ..keepalive import heartbeat_during
         if text_columns is None:
             try:
                 text_columns = [c for t, c in self._text_columns(db) if t == table]
@@ -4072,12 +4084,13 @@ class MySQLEngine(Engine):
                 hash_expr = self._row_expr(db, table)
             except Exception:
                 hash_expr = None
-        return scanplan.fused_pushdown_verify(
-            self, db, table, query=lambda side, sql: self._q(side, sql),
-            source=lambda side, t: self._scope(side, db, t),
-            text_columns=text_columns, hash_expr=hash_expr, hash_algo=hash_algo,
-            hash_agg=hash_agg, null_empty_conditions=null_empty_conditions,
-            null_empty_columns=null_empty_columns, parts=parts, sides=sides)
+        with heartbeat_during(self, sides=sides, db=db):
+            return scanplan.fused_pushdown_verify(
+                self, db, table, query=lambda side, sql: self._q(side, sql),
+                source=lambda side, t: self._scope(side, db, t),
+                text_columns=text_columns, hash_expr=hash_expr, hash_algo=hash_algo,
+                hash_agg=hash_agg, null_empty_conditions=null_empty_conditions,
+                null_empty_columns=null_empty_columns, parts=parts, sides=sides)
 
     _fused_pushdown_verification = fused_pushdown_verification
 
@@ -4096,23 +4109,58 @@ class MySQLEngine(Engine):
                                     hash_expr=None, sides=("src", "dst"),
                                     leaf_threshold=16, max_depth=8):
         from .. import scanplan
-        src_table = self._scope("src", db, table)
-        if lo is None or hi is None:
-            k = f"`{key_col}`"
-            res = self._q("src", f"SELECT MIN({k}), MAX({k}), COUNT(*) FROM {src_table}")
-            if not res or res[0][0] is None:
-                return scanplan.AdaptiveMerkleResult(
-                    table, 0, [], 0, 0, 0, "ok", f"{table}: OK rows=0 clean", certified_complete=True)
-            lo = int(res[0][0])
-            hi = int(res[0][1])
+        from ..keepalive import heartbeat_during
+        with heartbeat_during(self, sides=sides, db=db):
+            src_table = self._scope("src", db, table)
+            if lo is None or hi is None:
+                k = f"`{key_col}`"
+                res = self._q("src", f"SELECT MIN({k}), MAX({k}), COUNT(*) FROM {src_table}")
+                if not res or res[0][0] is None:
+                    return scanplan.AdaptiveMerkleResult(
+                        table, 0, [], 0, 0, 0, "ok", f"{table}: OK rows=0 clean", certified_complete=True)
+                lo = int(res[0][0])
+                hi = int(res[0][1])
 
-        return scanplan.adaptive_merkle_bucket_verify(
-            self, db, table, key_col, lo=lo, hi=hi, num_buckets=num_buckets,
-            hash_expr=hash_expr, query=lambda side, sql: self._q(side, sql),
-            source=lambda side, t: self._scope(side, db, t),
-            sides=sides, leaf_threshold=leaf_threshold, max_depth=max_depth)
+            return scanplan.adaptive_merkle_bucket_verify(
+                self, db, table, key_col, lo=lo, hi=hi, num_buckets=num_buckets,
+                hash_expr=hash_expr, query=lambda side, sql: self._q(side, sql),
+                source=lambda side, t: self._scope(side, db, t),
+                sides=sides, leaf_threshold=leaf_threshold, max_depth=max_depth)
 
     _adaptive_merkle_bucket_diff = adaptive_merkle_bucket_diff
+
+    def keyless_slice_verification(self, db, table, *,
+                                   total_rows=None, total_pages=None,
+                                   chunk_size=None, mode="auto",
+                                   hash_expr=None, hash_algo="xor", hash_agg=None,
+                                   text_columns=None, sides=("src", "dst")):
+        from .. import keyless
+        if text_columns is None:
+            try:
+                text_columns = [c for t, c in self._text_columns(db) if t == table]
+            except Exception:
+                text_columns = []
+        if hash_expr is None and hash_agg is None:
+            try:
+                hash_expr = self._row_expr(db, table)
+            except Exception:
+                hash_expr = None
+        if total_rows is None and mode != "page":
+            try:
+                src_tbl = self._scope("src", db, table)
+                res = self._q("src", f"SELECT COUNT(*) FROM {src_tbl}")
+                total_rows = int(res[0][0]) if res else 1000
+            except Exception:
+                total_rows = 1000
+        return keyless.keyless_slice_verify(
+            self, db, table, query=lambda side, sql: self._q(side, sql),
+            source=lambda side, t: self._scope(side, db, t),
+            sides=sides, total_rows=total_rows, total_pages=total_pages,
+            chunk_size=chunk_size, mode=mode, hash_expr=hash_expr,
+            hash_algo=hash_algo, hash_agg=hash_agg, text_columns=text_columns)
+
+    _keyless_slice_verification = keyless_slice_verification
+
 
     def capture_watermark(self, db):
         return self.src_lsn(db)
@@ -11514,6 +11562,17 @@ class MySQLEngine(Engine):
                 "src_rows": sum(src.values()),
                 "dst_rows": sum(dst.values()),
                 **({"narrowed": narrowed} if narrowed else {})}
+
+    def authorize_snapshot_export(self, db, slot_name=None, side="dst"):
+        from .. import ratchet
+        return ratchet.authorize_snapshot_export(self, db, slot_name=slot_name, side=side)
+
+    def pre_syncback_headroom_check(self, db, headroom=10000, auto_ratchet=False, refuse_on_deficit=True):
+        from .. import ratchet
+        return ratchet.pre_syncback_cutover_check(
+            self, db, headroom=headroom, auto_ratchet=auto_ratchet, refuse_on_deficit=refuse_on_deficit
+        )
+
 
 
 def _copy_my_range(item):

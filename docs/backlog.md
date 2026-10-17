@@ -12743,7 +12743,7 @@ Status: OPEN acceptance/design extension; external issue reports are not a diagn
 
 ### NEED15.lock-impact — Predict and enforce a live workload lock budget
 
-**OPEN — P1; user-need acceptance extension; size L; index row 663.**
+**DONE — 2026-10-17; locks.execute_plan_with_budget lock timeout and backoff; tests/test_lock_impact_budget.py; index row 663.**
 
 Parent/dependencies and code: AUTO.deferred-index, RCH25, schema, locks.
 
@@ -12839,7 +12839,7 @@ Status: OPEN acceptance/design extension; external issue reports are not a diagn
 
 ### NEED21.app-rollback — Coordinate application versions with reversible schema evolution
 
-**OPEN — P1; user-need acceptance extension; size L; index row 669.**
+**DONE — 2026-10-17; rollback.AppRollbackCoordinator schema compatibility and forward compensation; tests/test_app_rollback_coordination.py; index row 669.**
 
 Parent/dependencies and code: RCH12, RCH13, SMART-N18.
 
@@ -12919,7 +12919,7 @@ Status: OPEN acceptance/design extension; external issue reports are not a diagn
 
 ### NEED26.canonical-oracle — Prove canonicalization independently of rendered strings
 
-**OPEN — P1; user-need acceptance extension; size L; index row 674.**
+**DONE — 2026-10-17; canon_oracle.CanonicalOracle scale/space/collation policies and multiset hash; tests/test_canonical_oracle.py; index row 674.**
 
 Parent/dependencies and code: RCH07, RCH36, canon.
 
@@ -13103,7 +13103,7 @@ Acceptance test: Verifying a 10M-row table with 5 mismatched rows completes with
 
 ### FIELD-OPS09.ssm-tunnel-keepalive-armor — Socket keepalive and application-level heartbeats preventing SSM/proxy connection drops
 
-**OPEN — P1; operations/scale; size M; index row 685.**
+**DONE — 2026-10-17; keepalive.apply_tcp_keepalive and heartbeat_during periodic query; tests/test_ssm_tunnel_keepalive_armor.py.**
 
 Parent/dependencies and code: `migkit/config.py`, `migkit/engines/mysql.py`, `migkit/engines/postgres.py`.
 
@@ -13119,7 +13119,7 @@ Acceptance test: A 45-minute continuous table check executed over an SSM port-fo
 
 ### FIELD-OPS10.pre-syncback-headroom-ratchet — Pre-syncback automated headroom ratchet (+10,000) and slot-before-snapshot verification
 
-**OPEN — P0; cutover; size M; index row 686.**
+**DONE — 2026-10-17; ratchet.pre_syncback_cutover_check and target slot verification; tests/test_pre_syncback_headroom_ratchet.py.**
 
 Parent/dependencies and code: `migkit/cli.py`, `migkit/engines/postgres.py`, `migkit/engines/mysql.py`.
 
@@ -13137,7 +13137,7 @@ Acceptance test: Pre-syncback verification flags un-ratcheted sequences as a blo
 
 ### FIELD-OPS11.no-pk-ctid-page-slicing — Physical CTID/page chunking for tables lacking primary keys avoiding slow offset scans
 
-**OPEN — P1; verify; size M; index row 687.**
+**DONE — 2026-10-17; keyless.keyless_slice_verify ctid and _rowid slicing; tests/test_no_pk_ctid_page_slicing.py.**
 
 Parent/dependencies and code: `migkit/engines/postgres.py`, `migkit/engines/mysql.py`, `migkit/scanplan.py`.
 
@@ -13154,7 +13154,7 @@ Acceptance test: Verify a 1M-row keyless table in constant sequential read time 
 
 ### FIELD-OPS12.users-grants-parity-orchestrator — Complete users, roles, table permissions, and sequence USAGE/UPDATE parity extraction
 
-**OPEN — P0; schema; size L; index row 688.**
+**DONE — 2026-10-17; grants.audit_grants_parity complete catalog audit and reconciliation DDL; tests/test_users_grants_parity_orchestrator.py.**
 
 Parent/dependencies and code: `migkit/engines/postgres.py`, `migkit/engines/mysql.py`, `migkit/cli.py`.
 

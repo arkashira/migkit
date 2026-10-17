@@ -373,15 +373,25 @@ def _pg_socket(conn, shut=False):
     return sock
 
 
-def keepalives():
+def keepalives(ep=None):
     """libpq's keepalive settings. Left out, the idle time is the
     operating system's (two hours on macOS): a long query over a
     cross-cloud link that loses its tunnel would hang for hours instead
     of failing; probed sooner it is an error the caller can act on."""
     from .. import envkeys
+    from ..keepalive import DEFAULT_KEEPIDLE, DEFAULT_KEEPINTVL, DEFAULT_KEEPCNT
+    opts = ep.options if ep and hasattr(ep, "options") else {}
+    env_val = os.environ.get("MIGKIT_KEEPALIVE_IDLE")
+    if env_val:
+        idle = envkeys.number("MIGKIT_KEEPALIVE_IDLE")
+    else:
+        idle = int(opts.get("tcp_keepidle", opts.get("keepalive_idle", DEFAULT_KEEPIDLE)))
+    interval = int(opts.get("tcp_keepintvl", opts.get("keepalive_interval", DEFAULT_KEEPINTVL)))
+    count = int(opts.get("tcp_keepcnt", opts.get("keepalive_count", DEFAULT_KEEPCNT)))
     return {"keepalives": 1,
-            "keepalives_idle": envkeys.number("MIGKIT_KEEPALIVE_IDLE"),
-            "keepalives_interval": 10, "keepalives_count": 5}
+            "keepalives_idle": idle,
+            "keepalives_interval": interval,
+            "keepalives_count": count}
 
 
 def connect(ep, dbname, driver="psycopg2", options="", timeout=None,
@@ -405,7 +415,7 @@ def connect(ep, dbname, driver="psycopg2", options="", timeout=None,
               password=ep.password, dbname=dbname,
               connect_timeout=timeout or CONNECT_SECONDS,
               application_name="migkit",
-              **keepalives(), **ep.tls_forms("postgres")["libpq"])
+              **keepalives(ep), **ep.tls_forms("postgres")["libpq"])
     options = " ".join(x for x in (SESSION if session else "", options) if x)
     if options:
         kw["options"] = options
@@ -420,7 +430,27 @@ def connect(ep, dbname, driver="psycopg2", options="", timeout=None,
 
         def made():
             return psycopg2.connect(**kw)
-    return with_retry(made, writes=True) if retry else made()
+    conn = with_retry(made, writes=True) if retry else made()
+    try:
+        from ..keepalive import apply_tcp_keepalive
+        idle_val = kw.get("keepalives_idle", 15)
+        intvl_val = kw.get("keepalives_interval", 5)
+        cnt_val = kw.get("keepalives_count", 3)
+        if hasattr(conn, "_sock") and conn._sock is not None:
+            apply_tcp_keepalive(conn._sock, idle=idle_val, interval=intvl_val, count=cnt_val)
+        else:
+            fd_fn = getattr(conn, "fileno", None)
+            sock_fd = fd_fn() if callable(fd_fn) else getattr(getattr(conn, "pgconn", None), "socket", None)
+            if sock_fd is not None and sock_fd >= 0:
+                import socket
+                s = socket.socket(fileno=os.dup(sock_fd))
+                try:
+                    apply_tcp_keepalive(s, idle=idle_val, interval=intvl_val, count=cnt_val)
+                finally:
+                    s.close()
+    except Exception:
+        pass
+    return conn
 
 
 def _conninfo_value(v):
@@ -7796,11 +7826,16 @@ select json_build_object(
             null_empty_columns=null_empty_columns, where=where,
             aliases=aliases, quote_identifiers=quote_identifiers)
 
+    def heartbeat(self, side="src", sql="SELECT 1", db=None):
+        target_db = db or (self.hop.source.options.get("dbname") if side == "src" else self.hop.target.options.get("dbname")) or (self.hop.databases[0] if getattr(self.hop, "databases", None) else "postgres")
+        return self._psql(side, target_db, sql)
+
     def fused_pushdown_verification(self, db, table, *, text_columns=None,
                                     hash_expr=None, hash_algo="xor", hash_agg=None,
                                     null_empty_conditions=(), null_empty_columns=(),
                                     parts=None, sides=("src", "dst")):
         from .. import scanplan
+        from ..keepalive import heartbeat_during
         if text_columns is None:
             try:
                 cols = self._text_columns("src", db)
@@ -7825,12 +7860,13 @@ select json_build_object(
                 return ".".join(_ident(x) for x in parts)
             return _ident(t)
 
-        return scanplan.fused_pushdown_verify(
-            self, db, table, query=_query,
-            source=_src,
-            text_columns=text_columns, hash_expr=hash_expr, hash_algo=hash_algo,
-            hash_agg=hash_agg, null_empty_conditions=null_empty_conditions,
-            null_empty_columns=null_empty_columns, parts=parts, sides=sides)
+        with heartbeat_during(self, sides=sides, db=db):
+            return scanplan.fused_pushdown_verify(
+                self, db, table, query=_query,
+                source=_src,
+                text_columns=text_columns, hash_expr=hash_expr, hash_algo=hash_algo,
+                hash_agg=hash_agg, null_empty_conditions=null_empty_conditions,
+                null_empty_columns=null_empty_columns, parts=parts, sides=sides)
 
     _fused_pushdown_verification = fused_pushdown_verification
 
@@ -7849,19 +7885,67 @@ select json_build_object(
                                     hash_expr=None, sides=("src", "dst"),
                                     leaf_threshold=16, max_depth=8):
         from .. import scanplan
-        src_table = self._scope(db, table)
-        if lo is None or hi is None:
-            k = _ident(key_col)
-            res = self._psql("src", db, f"SELECT MIN({k})::text || '|' || MAX({k})::text || '|' || COUNT(*)::text FROM {src_table}").strip()
-            if not res or "|" not in res:
-                return scanplan.AdaptiveMerkleResult(
-                    table, 0, [], 0, 0, 0, "ok", f"{table}: OK rows=0 clean", certified_complete=True)
-            parts = res.split("|")
-            if not parts[0] or parts[0] == "None":
-                return scanplan.AdaptiveMerkleResult(
-                    table, 0, [], 0, 0, 0, "ok", f"{table}: OK rows=0 clean", certified_complete=True)
-            lo = int(parts[0])
-            hi = int(parts[1])
+        from ..keepalive import heartbeat_during
+        with heartbeat_during(self, sides=sides, db=db):
+            src_table = self._scope(db, table)
+            if lo is None or hi is None:
+                k = _ident(key_col)
+                res = self._psql("src", db, f"SELECT MIN({k})::text || '|' || MAX({k})::text || '|' || COUNT(*)::text FROM {src_table}").strip()
+                if not res or "|" not in res:
+                    return scanplan.AdaptiveMerkleResult(
+                        table, 0, [], 0, 0, 0, "ok", f"{table}: OK rows=0 clean", certified_complete=True)
+                parts = res.split("|")
+                if not parts[0] or parts[0] == "None":
+                    return scanplan.AdaptiveMerkleResult(
+                        table, 0, [], 0, 0, 0, "ok", f"{table}: OK rows=0 clean", certified_complete=True)
+                lo = int(parts[0])
+                hi = int(parts[1])
+
+            def _query(side, sql):
+                ans = self._psql(side, db, sql)
+                if isinstance(ans, list):
+                    return ans
+                return [ln.split("|") for ln in str(ans).splitlines() if ln.strip()]
+
+            def _src(side, t):
+                if hasattr(self, "_split"):
+                    parts = self._split(t)
+                    return ".".join(_ident(x) for x in parts)
+                return _ident(t)
+
+            return scanplan.adaptive_merkle_bucket_verify(
+                self, db, table, key_col, lo=lo, hi=hi, num_buckets=num_buckets,
+                hash_expr=hash_expr, query=_query, source=_src,
+                sides=sides, leaf_threshold=leaf_threshold, max_depth=max_depth)
+
+    _adaptive_merkle_bucket_diff = adaptive_merkle_bucket_diff
+
+    def keyless_slice_verification(self, db, table, *,
+                                   total_blocks=None, total_rows=None,
+                                   chunk_size=None, mode="ctid",
+                                   hash_expr=None, hash_algo="xor", hash_agg=None,
+                                   text_columns=None, sides=("src", "dst")):
+        from .. import keyless
+        if text_columns is None:
+            try:
+                cols = self._text_columns("src", db)
+                text_columns = cols.get(table, [])
+            except Exception:
+                text_columns = []
+        if hash_expr is None and hash_agg is None:
+            try:
+                hash_expr = self._row_hash_expr("src", db, table)
+            except Exception:
+                hash_expr = None
+        if total_blocks is None and total_rows is None:
+            try:
+                sch, tbl = self._split(table)
+                res = self._psql("src", db,
+                    f"SELECT c.relpages FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                    f"WHERE n.nspname = '{sch}' AND c.relname = '{tbl}'").strip()
+                total_blocks = int(res) if res else None
+            except Exception:
+                total_blocks = None
 
         def _query(side, sql):
             ans = self._psql(side, db, sql)
@@ -7875,12 +7959,14 @@ select json_build_object(
                 return ".".join(_ident(x) for x in parts)
             return _ident(t)
 
-        return scanplan.adaptive_merkle_bucket_verify(
-            self, db, table, key_col, lo=lo, hi=hi, num_buckets=num_buckets,
-            hash_expr=hash_expr, query=_query, source=_src,
-            sides=sides, leaf_threshold=leaf_threshold, max_depth=max_depth)
+        return keyless.keyless_slice_verify(
+            self, db, table, query=_query, source=_src,
+            sides=sides, total_blocks=total_blocks, total_rows=total_rows,
+            chunk_size=chunk_size, mode=mode, hash_expr=hash_expr,
+            hash_algo=hash_algo, hash_agg=hash_agg, text_columns=text_columns)
 
-    _adaptive_merkle_bucket_diff = adaptive_merkle_bucket_diff
+    _keyless_slice_verification = keyless_slice_verification
+
 
     def capture_watermark(self, db):
         return self.src_lsn(db)
@@ -12606,28 +12692,23 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
             return None
         return got
 
-    def _export_snapshot(self, side, db):
-        """Open a transaction, export its snapshot, and hand back both.
+    def verify_replication_slot(self, side, db, slot_name=None):
+        from .. import ratchet
+        return ratchet.verify_target_replication_slot(self, db, slot_name=slot_name, side=side)
 
-        Returns `(connection, id)` or `(None, None)`. The connection is the
-        point: an exported snapshot lives exactly as long as the
-        transaction that exported it, so the caller has to hold it open
-        while the workers use it and close it after.
+    def authorize_snapshot_export(self, db, slot_name=None, side="dst"):
+        from .. import ratchet
+        return ratchet.authorize_snapshot_export(self, db, slot_name=slot_name, side=side)
 
-        **What it buys, measured.** migkit's fast data pass reads tables
-        through a thread pool, one connection each, so table `a` is read at
-        one instant and table `b` at another - and a transaction that moves
-        a row between them in that gap shows up as a difference in both.
-        On a live server, with a writer inserting between the export and
-        the reads:
+    def pre_syncback_headroom_check(self, db, headroom=10000, auto_ratchet=False, refuse_on_deficit=True):
+        from .. import ratchet
+        return ratchet.pre_syncback_cutover_check(
+            self, db, headroom=headroom, auto_ratchet=auto_ratchet, refuse_on_deficit=refuse_on_deficit
+        )
 
-            workers not sharing the snapshot    a=2  b=2
-            workers sharing the snapshot        a=1  b=1
-
-        `--consistent` already avoids this by reading every table of a side
-        in one transaction, which costs the parallelism. A shared snapshot
-        is how both are had at once.
-        """
+    def _export_snapshot(self, side, db, slot_name=None, verify_target_slot=False):
+        if verify_target_slot or (self.hop and getattr(self.hop, "options", {}).get("verify_slot_before_snapshot")):
+            self.authorize_snapshot_export(db, slot_name=slot_name, side="dst" if side == "src" else "src")
         try:
             conn = self._connect(side, db)
         except Exception:

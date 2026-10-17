@@ -442,6 +442,28 @@ class Endpoint:
     password: str = ""
     options: dict = field(default_factory=dict)
 
+    def tcp_keepalive(self):
+        from .keepalive import DEFAULT_KEEPIDLE, DEFAULT_KEEPINTVL, DEFAULT_KEEPCNT
+        return {
+            "keepalive": bool(self.options.get("keepalive", True)),
+            "idle": int(self.options.get("tcp_keepidle", self.options.get("keepalive_idle", DEFAULT_KEEPIDLE))),
+            "interval": int(self.options.get("tcp_keepintvl", self.options.get("keepalive_interval", DEFAULT_KEEPINTVL))),
+            "count": int(self.options.get("tcp_keepcnt", self.options.get("keepalive_count", DEFAULT_KEEPCNT))),
+        }
+
+    def libpq_keepalive(self):
+        cfg = self.tcp_keepalive()
+        return {
+            "keepalives": 1 if cfg["keepalive"] else 0,
+            "keepalives_idle": cfg["idle"],
+            "keepalives_interval": cfg["interval"],
+            "keepalives_count": cfg["count"],
+        }
+
+    def heartbeat_interval(self):
+        from .keepalive import DEFAULT_HEARTBEAT_INTERVAL
+        return float(self.options.get("heartbeat_interval", DEFAULT_HEARTBEAT_INTERVAL))
+
     def configured(self):
         return bool(self.host or self.options.get("hosts")
                     or self.options.get("path") or self.options.get("url")

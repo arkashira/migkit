@@ -844,12 +844,33 @@ def fused_pushdown_verify(eng, db, table, *, query,
                           null_empty_columns=(),
                           parts=None,
                           sides=("src", "dst"),
-                          quote_identifiers=True):
+                          quote_identifiers=True,
+                          keyless=False,
+                          keyless_mode="auto",
+                          total_blocks=None,
+                          total_rows=None,
+                          total_pages=None,
+                          chunk_size=None):
     from .engines.base import Result
     dialect = getattr(eng, "CANON_ENGINE", "mysql")
     if source is None:
         source = lambda side, t: t
-    slices = list(parts) if parts is not None else [""]
+    if keyless and parts is None:
+        from . import keyless as kl
+        dialect_name = str(dialect).lower()
+        if dialect_name in ("postgres", "pg", "postgresql"):
+            u = total_blocks if total_blocks is not None else (total_rows or 1000)
+            m = "ctid" if keyless_mode == "auto" else keyless_mode
+        elif keyless_mode == "page":
+            u = total_pages if total_pages is not None else (total_rows or 1000)
+            m = "page"
+        else:
+            u = total_rows or 1000
+            m = "rowid" if keyless_mode == "auto" else keyless_mode
+        kl_slices = kl.keyless_slices(dialect_name, u, chunk_size=chunk_size, mode=m)
+        slices = [s.predicate for s in kl_slices]
+    else:
+        slices = list(parts) if parts is not None else [""]
     if not slices:
         slices = [""]
 
@@ -1036,5 +1057,16 @@ def adaptive_merkle_bucket_verify(eng, db, table, key_col, *,
         hash_expr=hash_expr, leaf_threshold=leaf_threshold,
         max_depth=max_depth, engine=dialect)
     return differ.run(_q_fn, row_fn=_row_fn, table=table, sides=sides)
+
+
+def keyless_slice_query(engine, table, slice_predicate, **kwargs):
+    from . import keyless
+    return keyless.keyless_slice_query(engine, table, slice_predicate, **kwargs)
+
+
+def keyless_slice_verify(eng, db, table, **kwargs):
+    from . import keyless
+    return keyless.keyless_slice_verify(eng, db, table, **kwargs)
+
 
 

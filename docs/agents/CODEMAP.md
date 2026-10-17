@@ -22,7 +22,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - [`docs/agents/INVENTORY.md`](INVENTORY.md) - every file of `migkit/` and `tools/`: its responsibility package, owner domain, size, importers, the packages it reaches, the programs it wraps and the tests that reach it
 - [`docs/agents/LAYERS.md`](LAYERS.md) - the layering rule (a package imports its own rank and below) and every upward import still listed, with its reason
 
-## `migkit/` (191 modules)
+## `migkit/` (197 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/addresses.py` - A hop from two addresses (backlog R21).
@@ -46,6 +46,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/bsontype.py` - A MongoDB value compared as its BSON type and its value, both.
 - `migkit/bulkways.py` - The whole-database ways of the keyed engines, ranked by what each has measured on the hop (backlog F7.rshake, F7.mm2).
 - `migkit/canon.py` - One text rendering of a value that two different engines both produce. Classes: Added, Kept, Limits.
+- `migkit/canon_oracle.py` - (no docstring) Classes: ScalePolicy, SpacePolicy, CollationPolicy, SignedZeroPolicy, DriftKind, DriftResult.
 - `migkit/capabilities.py` - What each engine can do, read off the code, with every gap declared.
 - `migkit/carriers.py` - Where a seed shipped on media is written, and where the far end reads it back (`ship`; the owner's scope, 2026-10-01). Classes: Limits, Store, LocalStore, S3Store, AzureBlobStore, GcsStore.
 - `migkit/case.py` - The case migkit recognised between a hop's two servers, said and held to before anything is written (backlog P0-SCENARIOS). Classes: Case.
@@ -96,6 +97,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/freeze.py` - Keep the application from writing to the target until cutover - and, at the cutover of a hop that asks for it, from writing to the source. Classes: Hold, GroupHold, PostgresHold, MySQLHold, TiDBHold, MongoHold.
 - `migkit/fromsnapshot.py` - An OpenSearch or Elasticsearch index copied from the source's own snapshot by the snapshot reader of OpenSearch's migration project (backlog
 - `migkit/geo.py` - A shape - a geometry or a geography - as its SRID and its well-known binary, with x the longitude and y the latitude. Classes: Shape.
+- `migkit/grants.py` - (no docstring) Classes: PasswordEquivalenceStatus, PasswordEquivalenceResult, Role, RoleMembership, ObjectGrant, SequenceGrant.
 - `migkit/guarantees.py` - What a way guarantees, and what a whole strategy of ways does (backlog P0-SMART, the owner's note C of 2026-09-30: "guarantees never traded" Classes: Lift, Gap, Semantics, Schedule.
 - `migkit/guide.py` - `migkit init` as the guide (backlog R21): two addresses and the passwords, and migkit does the rest.
 - `migkit/ha.py` - The mover highly available: a standby that takes a hop's move over from the last position committed, and the proof that one machine wrote at Classes: Holding.
@@ -111,14 +113,16 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/jobs.py` - Scheduled jobs inside the databases, on exactly one side at a time.
 - `migkit/jointplan.py` - One plan for a move's tables, made jointly (backlog P0-SMART, item 4). Classes: Way, Job, Limits, Placed, Plan, Tied.
 - `migkit/kafkaclient.py` - The stream client a Kafka target is written through, and the codec its messages go in (backlog R18.7). Classes: StreamError, Refused, Sent, NativeProducer, Handle, Stepping.
+- `migkit/keepalive.py` - (no docstring) Classes: BackgroundHeartbeat.
 - `migkit/kept.py` - The proof kept up as the data moves (backlog R20.8; incremental multiset hashing, docs/research/diff-algorithms-2026-09-28.md section 8). Classes: Store, Table, Keeper.
+- `migkit/keyless.py` - (no docstring) Classes: KeylessSlice, KeylessSliceResult.
 - `migkit/lacks.py` - What the source uses that the target does not have, asked of both servers (backlog P0-SCENARIOS: a version down, a fork, an edition). Classes: Side, Feature.
 - `migkit/lease.py` - A write operation's hold on a hop, as a lease with a heartbeat (backlog 30). Classes: Jitter, Held, Lost, Lease.
 - `migkit/leaves.py` - A table's digest as a tree, every leaf of it in one scan a side, and the rows that differ read only from the leaves that differ (backlog R20 Classes: Spec, Side, Hasher, Tree, Found, Localized.
 - `migkit/leftovers.py` - What a mover added to the source and never took away. Classes: Named.
 - `migkit/legs.py` - The fewest legs the rows can take, and where migkit should stand (backlog R22, item 4). Classes: Footprint.
 - `migkit/loadtext.py` - The source renders the target's load format in SQL (backlog R20.14).
-- `migkit/locks.py` - What the repair DDL will lock, said before anyone applies it.
+- `migkit/locks.py` - What the repair DDL will lock, said before anyone applies it. Classes: LockContentionError, LockBudgetExceeded, ScopeViolationError, LockBehavior, LockBudget, LockWaitPrediction.
 - `migkit/logddl.py` - A DDL statement as a change log carries it, read for the tables it touches and what it does to each (`canon.ddl`).
 - `migkit/machine.py` - The machine to run on, and the class the target needs (backlog R22, item 6). Classes: Machine, Stages, Advice, Spent.
 - `migkit/managed.py` - Every managed database service in one catalogue, read one way for any pair (the owner, 2026-10-01: "any <-> any from the start"). Classes: Service, Side, Plan.
@@ -138,6 +142,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/proxy.py` - Pooler and proxy coordinators and seamless cutover traffic shifting. Classes: ProxyShiftResult, BaseProxyCoordinator, PgBouncerCoordinator, ProxySQLCoordinator, EnvoyXdsCoordinator.
 - `migkit/query_guard.py` - (no docstring) Classes: QueryPattern, ExecutionPlan, ParityIssue, IndexRecommendation, QueryParityReport, QueryOptimizerParityGuard.
 - `migkit/ranges.py` - A large table copied as ranges of its key, side by side. Classes: ReadPool, Slots, WorkerGone, Pending, Keyless, Stats.
+- `migkit/ratchet.py` - (no docstring) Classes: RatchetError, SlotMissingError, SnapshotAuthorizationError, HeadroomDeficitError, RatchetItem, HeadroomRatchetPlan.
 - `migkit/ready.py` - Right the first time, not a runbook to recover with (backlog R23, 6). Classes: Item.
 - `migkit/redact.py` - One way of hiding secrets in what migkit writes or says (audit 2026-10-01, SEC12). Classes: Redactor.
 - `migkit/redisshake.py` - A Redis keyspace copied by the replica protocol's own copy (backlog F7.rshake).
@@ -153,6 +158,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/reverse.py` - (no docstring) Classes: OriginMarker, CDCEvent, FailbackResult, ReverseFailbackLoop, ReverseFailbackController.
 - `migkit/revert.py` - The way back, handed over at the same moment as the way forward.
 - `migkit/ring_buffer.py` - (no docstring) Classes: ChunkCompressor, RecordBatch, DiskSegment, StoreAndForwardRingBuffer.
+- `migkit/rollback.py` - (no docstring) Classes: ExpandContractPhase, RollbackStrategy, AppVersionSpec, SchemaEvolutionStep, RecoveryArtifact, CurrentWriteState.
 - `migkit/rowfilter.py` - A hop's row filter, read one way and said in every engine's own words (backlog P0-SCOPE.7).
 - `migkit/rowtext.py` - How a row becomes one string before it is hashed.
 - `migkit/rules.py` - Business-rule checks: the operator's own questions, asked of both sides.

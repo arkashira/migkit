@@ -1093,6 +1093,16 @@ def _reverse_rows(hop, eng, d, gate):
     except Exception as e:  # noqa: BLE001
         out.append(("warn", f"{tdb}: whether the stream back can run could"
                             f" not be read ({e})"))
+    try:
+        from . import ratchet
+        plan = ratchet.build_headroom_ratchet_plan(eng, d)
+        if plan.refused:
+            reasons = "; ".join(plan.refusal_reasons[:3])
+            out.append((gate, f"{tdb}: pre-syncback headroom ratchet: {reasons}"))
+        elif plan.items:
+            out.append(("ok", f"{tdb}: pre-syncback sequence headroom verified"))
+    except Exception:
+        pass
     return out
 
 

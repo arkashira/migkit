@@ -559,7 +559,7 @@ _BY_NAME = {
               " masking freeze leftovers lease",
     "execution": "runner schedule throttle stall attempts ranges util"
                  " failpoint tunnel locks",
-    "conversion": "canon rowtext render transforms nanotime intervals geo"
+    "conversion": "canon canon_oracle rowtext render transforms nanotime intervals geo"
                   " vectors bsontype charsets commercial zones copybook"
                   " pieces ddl ddl_shield merkle schema schema_drift loadtext schemaformats described tally",
     "reporting": "verdict report wording diagnostics export"
