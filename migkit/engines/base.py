@@ -5183,17 +5183,20 @@ class Engine:
                 " rows - skipped")
             return True
         ranges = st.get("ranges")
-        if ranges and st.get("key"):
-            q = self._quote_ident(st["key"])
+        key = st.get("key") or st.get("keyed_by")
+        if ranges and key:
+            from .. import ranges as ranges_mod
             bad = []
             for after, upto in ranges:
-                rng = f"{q} > {int(after)} and {q} <= {int(upto)}"
+                rng = ranges_mod.pred(self._quote_ident, key, (after, upto))
                 if not self._range_same(db, table, f"({where}) and {rng}"
                                         if where else rng):
                     bad.append(after)
+            bad_h = {ranges_mod._h(b) for b in bad}
             st["ranges_done"] = [a for a in st.get("ranges_done", [])
-                                 if a not in bad]
+                                 if ranges_mod._h(a) not in bad_h]
             st.pop("done", None)
+            st.pop("last", None)
             log(f"{label}: done earlier, and {len(bad)} of {len(ranges)}"
                 " ranges no longer match the source - copying those again")
             return False
@@ -5202,6 +5205,36 @@ class Engine:
         log(f"{label}: done earlier, and the two sides no longer hold the"
             " same rows - copying it again")
         return False
+
+    def recheck_resumed(self, db, table, st, log, where=None, label=None):
+        """A table an earlier run left in flight with some ranges done:
+        ranges completed earlier are checked against the source before they
+        are skipped, in case rows were deleted or modified since."""
+        if not st.get("ranges_done"):
+            return
+        label = label or table
+        ranges = st.get("ranges")
+        key = st.get("key") or st.get("keyed_by")
+        if ranges and key:
+            from .. import ranges as ranges_mod
+            done_h = {ranges_mod._h(x) for x in st["ranges_done"]}
+            bad = []
+            for after, upto in ranges:
+                if ranges_mod._h(after) in done_h:
+                    rng = ranges_mod.pred(self._quote_ident, key, (after, upto))
+                    if not self._range_same(db, table, f"({where}) and {rng}"
+                                            if where else rng):
+                        bad.append(after)
+            if bad:
+                bad_h = {ranges_mod._h(b) for b in bad}
+                st["ranges_done"] = [a for a in st["ranges_done"]
+                                     if ranges_mod._h(a) not in bad_h]
+                st.pop("last", None)
+                log(f"{label}: resumed, and {len(bad)} ranges no longer"
+                    " match the source - copying those again")
+        else:
+            for k in list(st):
+                del st[k]
 
     def _range_same(self, db, table, where=None, every=None):
         """Whether the rows `where` selects digest the same on the source

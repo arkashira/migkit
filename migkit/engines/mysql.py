@@ -10147,6 +10147,15 @@ class MySQLEngine(Engine):
             return out
         return ["--ssl-mode=REQUIRED"] if o.get("ssl") else []
 
+    def _client_argv(self, program, side):
+        ep = self.hop.source if side == "src" else self.hop.target
+        return [program, "-h", ep.host, "-P", str(ep.port), "-u", ep.user,
+                *self._client_tls(side)]
+
+    def _client_env(self, side):
+        ep = self.hop.source if side == "src" else self.hop.target
+        return {"MYSQL_PWD": ep.password or ""}
+
     def _pass_ctx(self, db, t, log):
         from . import my_pass
         got = self._pass_columns(db, t)

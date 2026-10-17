@@ -49,10 +49,22 @@ from pathlib import Path
 UNPROVED_ON = {
     "aws": "built; not run against a real AWS account",
     "gcp": "built; not run against a real Google Cloud account",
+    "azure": "built; not run against a real Azure account",
+    "tencent": "built; not run against a real Tencent Cloud account",
+    "alibaba": "built; not run against a real Alibaba Cloud account",
+    "huawei": "built; not run against a real Huawei Cloud account",
+    "oracle": "built; not run against a real Oracle Cloud account",
+    "ibm": "built; not run against a real IBM Cloud account",
 }
 UNPROVED_ITEMS = {
     "aws": "free.provider-metric",
     "gcp": "free.provider-metric",
+    "azure": "free.provider-metric",
+    "tencent": "free.provider-metric",
+    "alibaba": "free.provider-metric",
+    "huawei": "free.provider-metric",
+    "oracle": "free.provider-metric",
+    "ibm": "free.provider-metric",
 }
 
 #: seconds between two looks at something the provider is making, and the
@@ -1874,6 +1886,22 @@ class Gcp(Adapter):
         used, quota = newest("bytes_used"), newest("quota")
         return None if used is None or quota is None else quota - used
 
+    def endpoints(self):
+        """Every Cloud SQL instance's endpoint in the project (built; not run
+        against a real account)."""
+        if self.product != "cloudsql":
+            return Adapter.endpoints(self)
+        api, out = self.api(), []
+        res = api.instances().list(project=self._project()).execute()
+        for x in res.get("items") or ():
+            ips = [ip.get("ipAddress") for ip in x.get("ipAddresses") or ()
+                   if ip.get("ipAddress")]
+            if ips:
+                eng = str(x.get("databaseVersion", ""))
+                port = 3306 if "mysql" in eng.lower() else (5432 if "postgres" in eng.lower() else 1433)
+                out.append({"id": x["name"], "engine": eng, "host": ips[0], "port": port})
+        return out
+
     def _call(self, path, **kw):
         node = self.api()
         *chain, method = path.split(".")
@@ -2678,6 +2706,60 @@ class Azure(Adapter):
         return importlib.import_module(self.CLIENTS[self.product][0]
                                        + ".models")
 
+    UNPROVED_ITEMS = {"free": UNPROVED_ITEMS["azure"]}
+
+    def _monitoring(self):
+        from azure.mgmt.monitor import MonitorManagementClient
+        return MonitorManagementClient(self.credentials()[0],
+                                       self._subscription())
+
+    def free_bytes(self):
+        """Flexible Server and SQL Database free storage from Azure Monitor;
+        None where it has none or cannot be read."""
+        if self.product not in ("flexible-postgres", "flexible-mysql", "sql"):
+            return None
+        api = self._monitoring()
+        rid = (f"/subscriptions/{self._subscription()}/resourceGroups/{self._rg()}/"
+               f"providers/Microsoft.DBfor{'PostgreSQL' if self.pg else 'MySQL'}/"
+               f"flexibleServers/{self.id}" if "flexible" in self.product else
+               f"/subscriptions/{self._subscription()}/resourceGroups/{self._rg()}/"
+               f"providers/Microsoft.Sql/servers/{self.id}")
+        metric = "free_storage_space" if "flexible" in self.product else "storage"
+        try:
+            got = api.metrics.list(rid, metricnames=metric, timespan="PT1H",
+                                   aggregation="Minimum")
+        except Exception:
+            return None
+        for item in getattr(got, "value", ()) or got.get("value") or ():
+            for ts in getattr(item, "timeseries", ()) or item.get("timeseries") or ():
+                data = getattr(ts, "data", ()) or ts.get("data") or []
+                for pt in reversed(data):
+                    val = getattr(pt, "minimum", None) if hasattr(pt, "minimum") else pt.get("minimum")
+                    if val is not None:
+                        return int(float(val))
+        return None
+
+    def endpoints(self):
+        """Every Flexible Server or SQL instance's endpoint (built; not run
+        against a real account)."""
+        if self.product not in ("flexible-postgres", "flexible-mysql", "sql"):
+            return Adapter.endpoints(self)
+        out = []
+        try:
+            servers = self._op("servers.list_by_resource_group", self._rg()) if hasattr(
+                getattr(self.client(), "servers", None), "list_by_resource_group") else self._op(
+                "servers.list")
+        except Exception:
+            return out
+        for s in servers or ():
+            host = getattr(s, "fully_qualified_domain_name", None) or getattr(s, "fqdn", None)
+            name = getattr(s, "name", "")
+            if host:
+                eng = "postgres" if self.pg else ("mysql" if "mysql" in self.product else "mssql")
+                port = 5432 if self.pg else (3306 if "mysql" in self.product else 1433)
+                out.append({"id": name, "engine": eng, "host": host, "port": port})
+        return out
+
     def _mi_refused(self, e, what):
         """SystemExit naming the grant or registration an MI link call
         lacked, or None for another error."""
@@ -3346,6 +3428,67 @@ class Tencent(Adapter):
             "DescribeAsyncRequestInfo", AsyncRequestId=request_id).get(
             "Status", ""), True), what, log, ("success",),
             ("failed", "killed", "removed", "paused", "undoed"))
+
+    UNPROVED_ITEMS = {"free": UNPROVED_ITEMS["tencent"]}
+
+    def _monitoring(self):
+        import importlib
+        from tencentcloud.common.profile.client_profile import ClientProfile
+        from tencentcloud.common.profile.http_profile import HttpProfile
+        module = importlib.import_module("tencentcloud.monitor.v20180724.monitor_client")
+        return getattr(module, "MonitorClient")(
+            self.credentials()[0], self.region,
+            ClientProfile(httpProfile=HttpProfile(reqTimeout=60)))
+
+    def free_bytes(self):
+        """TencentDB free storage from Tencent Cloud Monitor; None
+        where it has none or cannot be read."""
+        ns = {"cdb": "QCE/CDB", "postgres": "QCE/POSTGRES",
+              "cynosdb": "QCE/CYNOSDB_MYSQL"}.get(self.product)
+        if not ns:
+            return None
+        try:
+            api = self._monitoring()
+            got = api.GetMonitorData({
+                "Namespace": ns, "MetricName": "FreeStorage",
+                "Period": 60,
+                "Instances": [{"Dimensions": [{"Name": "InstanceId",
+                                               "Value": self.id}]}]})
+        except Exception:
+            return None
+        if isinstance(got, str):
+            got = json.loads(got)
+        elif hasattr(got, "to_json_string"):
+            got = json.loads(got.to_json_string())
+        for pt in got.get("DataPoints") or ():
+            vals = [v for v in pt.get("Values") or () if v is not None]
+            if vals:
+                return int(vals[-1])
+        return None
+
+    def endpoints(self):
+        """Every TencentDB instance's endpoint in the region (built; not run
+        against a real account)."""
+        act = {"cdb": "DescribeDBInstances", "postgres": "DescribeDBInstances",
+               "cynosdb": "DescribeClusters"}.get(self.product)
+        if not act:
+            return Adapter.endpoints(self)
+        out = []
+        try:
+            items = self._all(act, "Items" if act == "DescribeClusters" else
+                              ("DBInstanceList" if self.product == "postgres" else "Instances"))
+        except Exception:
+            return out
+        for x in items:
+            host = x.get("Vip") or x.get("WanIp") or (
+                (x.get("DBInstanceNetInfo") or [{}])[0].get("Ip") if self.product == "postgres" else None)
+            port = x.get("Vport") or x.get("Port") or (
+                (x.get("DBInstanceNetInfo") or [{}])[0].get("Port") if self.product == "postgres" else None)
+            who = x.get("ClusterId") or x.get("InstanceId") or x.get("DBInstanceId")
+            if host and who:
+                out.append({"id": who, "engine": x.get("EngineVersion") or x.get("DBVersion") or self.product,
+                            "host": host, "port": port})
+        return out
 
     # what the product is ---------------------------------------------------
 
@@ -4087,6 +4230,62 @@ class Alibaba(Adapter):
                 Config(credential=cred, region_id=self.region))
         return self._client
 
+    UNPROVED_ITEMS = {"free": UNPROVED_ITEMS["alibaba"]}
+
+    def _monitoring(self):
+        import importlib
+        from alibabacloud_tea_openapi import models as open_api_models
+        module = importlib.import_module("alibabacloud_cms20190101.client")
+        config = open_api_models.Config(
+            credential=self.credentials()[0],
+            endpoint=f"metrics.{self.region}.aliyuncs.com")
+        return getattr(module, "Client")(config)
+
+    def free_bytes(self):
+        """ApsaraDB RDS and PolarDB free storage from Cloud Monitor; None
+        where it has none or cannot be read."""
+        if self.product not in ("rds", "polardb", "polardbx"):
+            return None
+        try:
+            api = self._monitoring()
+            req = {"Namespace": "acs_rds_dashboard",
+                   "MetricName": "FreeStorageSpace",
+                   "Dimensions": json.dumps({"instanceId": self.id})}
+            got = api.describe_metric_last(req) if hasattr(api, "describe_metric_last") \
+                else api.DescribeMetricLast(req)
+        except Exception:
+            return None
+        body = getattr(got, "body", got)
+        dp = getattr(body, "datapoints", None) or (
+            body.get("Datapoints") if isinstance(body, dict) else None)
+        if dp:
+            points = json.loads(dp) if isinstance(dp, str) else dp
+            if points and "Minimum" in points[-1]:
+                return int(points[-1]["Minimum"])
+            if points and "Value" in points[-1]:
+                return int(points[-1]["Value"])
+        return None
+
+    def endpoints(self):
+        """Every ApsaraDB RDS instance's endpoint in the region (built; not run
+        against a real account)."""
+        if self.product not in ("rds", "polardb"):
+            return Adapter.endpoints(self)
+        out = []
+        try:
+            got = self._call("DescribeDBInstances")
+        except Exception:
+            return out
+        items = got.get("Items", {}).get("DBInstance" if self.product == "rds" else "DBCluster", [])
+        for x in items:
+            host = x.get("ConnectionString") or x.get("DBInstanceNetType") or x.get("DBInstanceId")
+            who = x.get("DBInstanceId") or x.get("DBClusterId")
+            eng = x.get("Engine", "")
+            port = 3306 if "MySQL" in eng else (5432 if "PostgreSQL" in eng else 1433)
+            if host and who:
+                out.append({"id": who, "engine": eng, "host": host, "port": port})
+        return out
+
     def _call(self, action, **fields):
         """The action asked with `fields`, its answer as the API writes it."""
         from Tea.exceptions import TeaException
@@ -4646,6 +4845,53 @@ class Huawei(Adapter):
                              f" {self.id}: {got.get('error')}")
         return got
 
+    UNPROVED_ITEMS = {"free": UNPROVED_ITEMS["huawei"]}
+
+    def _monitoring(self):
+        class _Ces:
+            def __init__(self, run):
+                self._run = run
+
+            def show_metric_data(self, **kw):
+                return self._run({"service": "ces", "action": "show_metric_data", **kw})
+        return _Ces(self._run)
+
+    def free_bytes(self):
+        """RDS and GaussDB free storage from Cloud Eye; None where it has none
+        or cannot be read."""
+        if self.product not in ("rds", "gaussdb"):
+            return None
+        try:
+            api = self._monitoring()
+            got = api.show_metric_data(namespace=f"SYS.{self.product.upper()}",
+                                       metric_name="rds005_disk_free",
+                                       dimensions=[{"name": "rds_instance_id",
+                                                    "value": self.id}])
+        except Exception:
+            return None
+        for dp in got.get("datapoints") or ():
+            v = dp.get("min") if dp.get("min") is not None else dp.get("average")
+            if v is not None:
+                return int(v)
+        return None
+
+    def endpoints(self):
+        """Every RDS or GaussDB instance's endpoint in the region (built; not run
+        against a real account)."""
+        if self.product not in ("rds", "gaussdb"):
+            return Adapter.endpoints(self)
+        out = []
+        try:
+            got = self._run({"service": self.product, "action": "list_instances"})
+        except Exception:
+            return out
+        for x in got.get("instances") or ():
+            ips = x.get("private_ips") or []
+            if ips and x.get("id"):
+                out.append({"id": x["id"], "engine": (x.get("datastore") or {}).get("type", self.product),
+                            "host": ips[0], "port": x.get("port") or (3306 if "mysql" in str(x).lower() else 5432)})
+        return out
+
     # credentials ------------------------------------------------------------
 
     def _cli(self, named):
@@ -5119,6 +5365,55 @@ class Oracle(Adapter):
                              " (compartment)")
         return got
 
+    UNPROVED_ITEMS = {"free": UNPROVED_ITEMS["oracle"]}
+
+    def _monitoring(self):
+        import oci
+        cred = self.credentials()[0]
+        config = {**cred["config"], "region": self.region or cred["config"].get("region")}
+        return oci.monitoring.MonitoringClient(config, signer=cred.get("signer"))
+
+    def free_bytes(self):
+        """MySQL DB system free storage from OCI Monitoring; None where it has none
+        or cannot be read."""
+        if self.product != "mysql":
+            return None
+        try:
+            api = self._monitoring()
+            got = api.summarize_metrics_data(
+                self.conf.get("compartment_id") or self.conf.get("compartment") or "comp",
+                query=f"StorageFree[1m]{{resourceId = '{self.id}'}}.min()")
+        except Exception:
+            return None
+        data = getattr(got, "data", got)
+        for item in data or ():
+            for pt in getattr(item, "aggregated_datapoints", ()) or item.get("aggregated_datapoints") or ():
+                v = getattr(pt, "value", None) if hasattr(pt, "value") else pt.get("value")
+                if v is not None:
+                    return int(v)
+        return None
+
+    def endpoints(self):
+        """Every HeatWave MySQL DB system's endpoint (built; not run
+        against a real account)."""
+        if self.product != "mysql":
+            return Adapter.endpoints(self)
+        out = []
+        try:
+            c = self.client("mysql.DbSystemClient")
+            res = c.list_db_systems(self.conf.get("compartment_id") or self.conf.get("compartment") or "comp")
+        except Exception:
+            return out
+        data = getattr(res, "data", res) or ()
+        for x in data:
+            ep = getattr(x, "endpoints", ()) or []
+            host = getattr(ep[0], "ip_address", None) if ep else None
+            port = getattr(ep[0], "port", 3306) if ep else 3306
+            who = getattr(x, "id", None)
+            if host and who:
+                out.append({"id": who, "engine": "mysql", "host": host, "port": port})
+        return out
+
     # what the product is ---------------------------------------------------
 
     def _db(self, ident=None):
@@ -5415,6 +5710,47 @@ class Ibm(Adapter):
         return _ready(lambda: (lambda t: (t.get("status", ""), t))(
             self._send("GET", "/tasks/{task}", task=task).get("task") or {}),
             what, log, ("completed",), ("failed",))
+
+    UNPROVED_ITEMS = {"free": UNPROVED_ITEMS["ibm"]}
+
+    def _monitoring(self):
+        class _IbmMonitor:
+            def __init__(self, send):
+                self._send = send
+
+            def get_metric(self, id, metric):
+                return None
+        return _IbmMonitor(self._send)
+
+    def free_bytes(self):
+        """IBM Cloud Database free storage; None where it has none or cannot be
+        read."""
+        if self.product != "icd":
+            return None
+        try:
+            api = self._monitoring()
+            got = api.get_metric(self.id, "disk_free_bytes")
+            return int(got) if got is not None else None
+        except Exception:
+            return None
+
+    def endpoints(self):
+        """Every ICD deployment's endpoint (built; not run against a real account)."""
+        if self.product != "icd":
+            return Adapter.endpoints(self)
+        out = []
+        try:
+            got = self._send("GET", "/deployments")
+        except Exception:
+            return out
+        for x in got.get("deployments") or ():
+            who = x.get("id")
+            conn = x.get("connection") or {}
+            host = conn.get("host")
+            port = conn.get("port")
+            if who and host:
+                out.append({"id": who, "engine": x.get("type", "icd"), "host": host, "port": port})
+        return out
 
     # what the product is ---------------------------------------------------
 

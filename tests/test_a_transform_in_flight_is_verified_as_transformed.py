@@ -229,3 +229,87 @@ def test_mysql_a_transformed_table_is_copied_and_held_as_transformed(
     refused = dict(keyed.masks_refused(db))
     assert any(k.endswith("people.id") and "part of a key" in why
                for k, why in refused.items()), refused
+
+
+def test_movers_call_transforms_place_before_the_copy(monkeypatch):
+    from migkit import movers
+    from migkit.config import Endpoint, Hop
+    hop = Hop(name="trans_place", engine="postgres",
+              source=Endpoint(host="10.0.0.1", port=5432, user="u", password="p"),
+              target=Endpoint(host="10.0.0.2", port=5432, user="u", password="p"),
+              databases=["appdb"],
+              options={"transform": {"people.email": LOWER, "on_target": False}})
+    choice = movers.place_transforms(hop, "appdb", "people", sample=[list(r) for r in ROWS],
+                                     columns=["id", "email", "phone", "name"], rows=100)
+    assert choice.path == "in_flight"
+
+    monkeypatch.setattr(transforms, "measure", lambda at, rows: 50.0)
+    choice = movers.place_transforms(hop, "appdb", "people", sample=[list(r) for r in ROWS],
+                                     columns=["id", "email", "phone", "name"], rows=100)
+    assert choice.path is None
+
+
+def test_on_target_rewrite_sql_and_execution():
+    rules = [("email", f"sql {LOWER}"), ("phone", f"sql {DIGITS}")]
+    pg_sql = transforms.rewrite_sql("people", rules, "postgres")
+    assert pg_sql == 'UPDATE "people" SET "email" = LOWER("email"), "phone" = REGEXP_REPLACE("phone", \'[0-9]\', \'#\', \'g\')'
+    my_sql = transforms.rewrite_sql("people", rules, "mysql")
+    assert my_sql == 'UPDATE `people` SET `email` = LOWER(`email`), `phone` = REGEXP_REPLACE(`phone`, \'[0-9]\', \'#\', \'g\')'
+
+    executed = []
+    transforms.rewrite(lambda s: executed.append(s), "people", rules, "postgres")
+    assert executed == [pg_sql]
+
+
+def test_whole_row_statement_in_flight_and_on_target():
+    expr = "lower(name) || ' ' || lower(email)"
+    cols = transforms.whole_row_statement(expr)
+    assert cols == ("email", "name")
+
+    at = [(1, f"sql {expr}")]
+    batch = [(1, "Ann@Example.COM", "081", "ALICE"), (2, "Bob@Example.COM", "082", "BOB")]
+    res = transforms.apply_rows(at, batch, column_names=["id", "email", "phone", "name"])
+    assert res[0][1] == "alice ann@example.com"
+    assert res[1][1] == "bob bob@example.com"
+
+    pg_expr = transforms.on_target(expr, ["email", "name"], "postgres")
+    assert pg_expr == 'LOWER("name") || \' \' || LOWER("email")'
+    my_expr = transforms.on_target(expr, ["email", "name"], "mysql")
+    assert my_expr == "CONCAT(LOWER(`name`), ' ', LOWER(`email`))"
+
+
+def test_check_that_target_computes_same_value():
+    sample = [("Ann@Example.COM",), ("Bob@Example.COM",)]
+    target_runner_ok = lambda sql, vals: [v.lower() for v in vals]
+    assert transforms.check_target_computes_same(target_runner_ok, LOWER, '"email"', sample, "postgres")
+
+    target_runner_diff = lambda sql, vals: [v.upper() for v in vals]
+    assert not transforms.check_target_computes_same(target_runner_diff, LOWER, '"email"', sample, "postgres")
+
+    rules = [(0, f"sql {LOWER}", '"email"')]
+    got = transforms.place(rules, sample, 100, 1.0, "postgres", authorized=True,
+                           target_runner=target_runner_diff)
+    assert got.path == "in_flight"
+
+
+@needs_docker
+def test_postgres_on_target_rewrite_and_whole_row_lane_proved(
+        pg, tmp_path, monkeypatch):
+    from migkit import movers
+    from migkit.engines.postgres import PostgresEngine
+    db = pg.name
+    for side in (pg.src, pg.dst):
+        side.sql("drop table if exists people_rw; create table people_rw (id int"
+                 " primary key, email text, phone text, name text)", db)
+    pg.src.sql(f"insert into people_rw values {_values(ROWS)}", db)
+    hop = _hop("postgres", pg, transform={"people_rw.email": LOWER, "on_target": True})
+    eng = PostgresEngine(hop)
+    sample = [list(r) for r in ROWS]
+    choice = movers.place_transforms(hop, db, "people_rw", sample=sample, eng=eng)
+    assert choice.path in ("in_flight", "on_target")
+
+    pg.dst.sql(f"insert into people_rw values {_values(ROWS)}", db)
+    stmt = movers.rewrite_target(hop, db, "people_rw", rules={"email": f"sql {LOWER}"}, eng=eng)
+    assert stmt and "UPDATE" in stmt
+    got = pg.dst.sql("select email from people_rw where id = 1", db)
+    assert got[0][0] == "ann@example.com"

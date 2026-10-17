@@ -562,10 +562,13 @@ def snapshot(hop):
                       " seed_snapshot: and seed_snapshot_parent:)")
     out = []
     for p in paths:
+        if isinstance(p, dict):
+            out.append(p)
+            continue
         try:
             with open(p, encoding="utf-8") as fh:
                 out.append(json.load(fh))
-        except (OSError, ValueError) as e:
+        except (OSError, ValueError, TypeError) as e:
             return None, f"the snapshot manifest {p} cannot be read: {e}"
     return out[0], out[1]
 
@@ -577,7 +580,12 @@ def _block_facts(hop, t):
     snap, parent = snapshot(hop)
     if snap is None:
         return {"blocks ok": parent, "blocks": None}
-    return blockseed.facts(snap, parent, t.link_rate)
+    opts = hop.options or {}
+    read_rate = opts.get("seed_read_rate") or opts.get("read_rate")
+    if read_rate is None and getattr(t, "load", None) and getattr(t, "size", None):
+        read_rate = t.size / t.load
+    listed = opts.get("seed_changed_blocks") or opts.get("changed_blocks") or opts.get("listed")
+    return blockseed.facts(snap, parent, t.link_rate, listed=listed, read_rate=read_rate)
 
 
 def choose(hop, t):
@@ -842,7 +850,11 @@ def _tables(w):
     """The source's tables the move carries, as the table copier lists
     them."""
     out = []
-    for sch, tbl in w.pair.list_move_tables(w.db):
+    try:
+        tables = w.pair.list_move_tables(w.db)
+    except Exception:
+        tables = [("", t) for t in w.src.neutral_tables("src", w.db)]
+    for sch, tbl in tables:
         t = f"{sch}.{tbl}" if sch else tbl
         if w.hop.takes_table(w.db, t):
             out.append(t)
@@ -2604,7 +2616,8 @@ def carry(hop, eng, db, mode, go, log, via=None):
     reads it, else the export - or None where the copy over the link is
     the way (measured faster, within the deadline). Said as it goes."""
     s = settings(hop)
-    if s is None or mode not in ("full", "full+cdc"):
+    snap, parent = snapshot(hop)
+    if (s is None and snap is None) or mode not in ("full", "full+cdc"):
         return None
     from .engines import ALIASES
     engine = ALIASES.get(hop.engine, hop.engine)
@@ -2613,16 +2626,20 @@ def carry(hop, eng, db, mode, go, log, via=None):
         via = movers.fitted(hop, engine, movers.for_hop(hop, engine)[0])[0]
     dbs = [db] if db else eng.databases()
     out, todo = {}, []
-    for d in dbs:
-        w = _Work(hop, eng, d, mode, log)
-        store, why = carriers.for_load(s, lambda st, d=d: seal_at(st, hop,
-                                                                   d))
-        if store is not None:
-            log(f"{d}: the sealed seed is at {store.said} - {why}")
-            out[d] = load(w, store, seal_at(store, hop, d), go,
-                          others_of(s))
-        else:
-            todo.append(w)
+    if s is not None:
+        for d in dbs:
+            w = _Work(hop, eng, d, mode, log)
+            store, why = carriers.for_load(s, lambda st, d=d: seal_at(st, hop,
+                                                                       d))
+            if store is not None:
+                log(f"{d}: the sealed seed is at {store.said} - {why}")
+                out[d] = load(w, store, seal_at(store, hop, d), go,
+                              others_of(s))
+            else:
+                todo.append(w)
+    else:
+        for d in dbs:
+            todo.append(_Work(hop, eng, d, mode, log))
     if not todo:
         return out
     begun = [w for w in todo if (w.dir / EXPORT_STATE).exists()]
@@ -2631,6 +2648,35 @@ def carry(hop, eng, db, mode, go, log, via=None):
     log(said(t, choice))
     if not begun and choice.rung is not None \
             and choice.rung.name == "network":
+        return out or None
+    if choice.rung is not None and choice.rung.name == "blocks":
+        from . import blockseed
+        opts = hop.options or {}
+        read_block = opts.get("read_block") or getattr(eng, "read_block", None)
+        write_block = opts.get("write_block") or getattr(eng, "write_block", None)
+        read_target = opts.get("read_target") or getattr(eng, "read_target", None)
+        listed = opts.get("seed_changed_blocks") or opts.get("changed_blocks") or opts.get("listed")
+        for w in todo:
+            if not snap.get("position"):
+                snap["position"] = _take_position(w)
+            state_path = w.dir / "blockseed.json"
+            if not go:
+                to_change = blockseed.changed(snap, parent, listed)
+                log(f"{w.db}: dry-run - {len(to_change)} changed blocks would be carried")
+                out[w.db] = Done("load", position=snap.get("position"),
+                                 said=f"dry-run: {len(to_change)} changed blocks")
+                continue
+            carried = blockseed.carry(snap, parent, read_block, write_block,
+                                      read_target, state_path, listed=listed,
+                                      read_position=lambda w=w: _take_position(w))
+            out[w.db] = Done("load", position=carried.position,
+                             said=f"{carried.blocks} changed blocks carried"
+                                  f" ({_human(carried.bytes)}),"
+                                  f" {carried.unchanged} unchanged;"
+                                  f" position {carried.position}")
+            log(f"{w.db}: {out[w.db].said}")
+        return out
+    if s is None:
         return out or None
     carrier = carriers.for_export(s, prove=go)
     log(f"the carrier: {carrier.said}, reached as {carrier.rung.said} -"

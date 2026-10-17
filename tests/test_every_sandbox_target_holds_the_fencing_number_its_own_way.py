@@ -13,7 +13,7 @@ script, a lightweight transaction, the broker's producer epoch, a row
 locked for update) or, on ClickHouse, by the read of the highest number
 the target keeps, which is said as the weaker hold. A bulk write through
 the engine's own bulk path after the raise fails at the target and leaves
-nothing (PostgreSQL in the transaction, MongoDB before the batch).
+nothing (PostgreSQL and Oracle in the transaction, MongoDB before the batch).
 
 Without a server: the rungs on facts alone, and the fleet audit telling a
 range lost from a table lost through the ledger's units.
@@ -181,7 +181,19 @@ def test_clickhouse_keeps_the_highest_number_and_says_the_hold_is_weaker(
 @needs_docker
 def test_oracle_holds_it_in_its_own_table_under_a_row_lock(oracle):
     eng = _eng(oracle, "oracle")
-    _taken_over(eng, oracle.name, None)
+    old = _taken_over(eng, oracle.name, None)
+    oracle.one.sql("begin execute immediate 'drop table w18a_t';"
+                   " exception when others then null; end;")
+    oracle.one.sql("create table w18a_t (id int primary key, v varchar2(50))")
+    cols = eng.neutral_columns("dst", oracle.name, "W18A_T")
+    fencing.arm(eng.hop, old)
+    try:
+        with pytest.raises(fencing.Fenced, match="refused a write"):
+            eng.neutral_write("dst", oracle.name, "W18A_T", cols,
+                              [[1, "a"], [2, "b"]])
+    finally:
+        fencing.disarm(eng.hop)
+    assert oracle.one.sql("select count(*) from w18a_t")[0][0] == 0
 
 
 @needs_docker
@@ -235,3 +247,61 @@ def test_the_audit_names_a_range_lost_not_the_table():
     got = fleet.audit(rec, named)
     assert len(got) == 1 and got[0].startswith("orders r:100:")
     assert "this range was lost, not the table" in got[0]
+
+
+def test_sqlserver_dialect_uses_own_table_hook():
+    statements = []
+
+    class FakeCursor:
+        def execute(self, sql, args=None):
+            statements.append((sql, args))
+
+        def fetchone(self):
+            return (1, "{}")
+
+        def close(self):
+            pass
+
+    class FakeConn:
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    class FakeSqlServerEngine:
+        OWN_DIALECT = "sqlserver"
+
+        def _connect(self, side, db):
+            return FakeConn()
+
+    eng = FakeSqlServerEngine()
+    assert fencing._dialect(eng) == fencing.SQL["sqlserver"]
+    conn, t = fencing._own_table(eng, "dst", "app")
+    assert t == "[app].[dbo].[migkit_origin]"
+    assert any("create table" in s[0].lower() for s in statements)
+
+
+def test_redis_compared_key_watches_when_held_in_pipeline():
+    watched = []
+
+    class FakePipe:
+        def watch(self, key):
+            watched.append(key)
+
+    class FakeEngine:
+        def _client(self, side, db=0):
+            class FakeClient:
+                def eval(self, script, keys_num, key, *args):
+                    return 1
+
+            return FakeClient()
+
+    ck = fencing.ComparedKey(FakeEngine(), "dst", "0", "in", None)
+    pipe = FakePipe()
+    assert ck.held("t_row", 1, "mover", cur=pipe) is None
+    assert watched == [f"{fencing.OWN}:t_row"]
+

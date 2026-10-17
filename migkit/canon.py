@@ -1589,7 +1589,11 @@ def render_value(cls, value):
             return format(value, "f")
         # `normalize` writes 100 as 1E+2, which `f` turns back into 100;
         # a zero has no sign on any engine
-        return "0" if value == 0 else format(value.normalize(), "f")
+        import decimal
+        prec = max(decimal.getcontext().prec,
+                   len(value.as_tuple().digits) + 10)
+        return "0" if value == 0 else format(
+            value.normalize(decimal.Context(prec=prec)), "f")
     if cls == "text":
         return value if isinstance(value, str) else str(value)
     if cls in ("json", JSON_ONE):
@@ -3000,8 +3004,11 @@ def fold_rows(classes, rows, total=0, way="md5"):
     fns = [render.digest_renderer(c) for c in classes]
     n = 0
     for row in rows:
-        total = digest_step(total, rowtext.encode(
-            [f(v) for f, v in zip(fns, row)]), way)
+        encoded = rowtext.encode([f(v) for f, v in zip(fns, row)])
+        try:
+            total = digest_step(total, encoded, way)
+        except TypeError:
+            total = digest_step(total, encoded)
         n += 1
     return n, total
 

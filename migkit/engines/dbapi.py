@@ -940,6 +940,8 @@ DIALECTS = {d.name: d for d in (
         unique_sql="SELECT attname FROM _V_RELATION_KEYDATA WHERE schema ="
                    " {schema} AND relation = {table} AND contype = 'p'",
         schema_sql="SELECT CURRENT_SCHEMA",
+        may_sql="SELECT COUNT(*) FROM _V_OBJ_PRIVILEGE WHERE USERNAME ="
+                " CURRENT_USER AND PRIVILEGE = 'INSERT'",
         system_schemas=("definition_schema", "information_schema"),
         bulk=Bulk("client", "INSERT INTO {table} ({columns}) SELECT * FROM"
                             " EXTERNAL '{where}' USING (REMOTESOURCE"

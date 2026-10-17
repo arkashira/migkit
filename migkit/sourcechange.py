@@ -565,7 +565,7 @@ def answers(hop):
                 else "at a terminal"
             out[name] = (a, f"answered {where} by {got.get('by') or '?'}"
                             f" on {got.get('at') or '?'}")
-    opts = hop.options or {}
+    opts = getattr(hop, "options", None) or {}
     phys = opts.get("physical")
     if isinstance(phys, dict) and "source_plugin" in phys:
         a = answer_word(phys["source_plugin"])
@@ -827,8 +827,8 @@ def _path(hop):
 
 def _record(hop):
     from . import config
-    if "report_dir" not in vars(hop) \
-            and not (config.REPORTS / str(hop.name) / FILE).exists():
+    if not hasattr(hop, "report_dir") \
+            and not (config.REPORTS / str(getattr(hop, "name", "")) / FILE).exists():
         # nothing recorded: asked without making the hop's directory
         return {}
     try:

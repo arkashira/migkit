@@ -46,8 +46,16 @@ from .cli import main
 from .diagnostics import ProbeAccumulator
 
 #: built and proved on stand-ins only: listing an account's instances
-NOT_RUN = {"aws": "listing an account's RDS and Aurora instances: built,"
-                  " not run against a real AWS account"}
+NOT_RUN = {
+    "aws": "listing an account's RDS and Aurora instances: built, not run against a real AWS account",
+    "gcp": "listing an account's Cloud SQL instances: built, not run against a real Google Cloud account",
+    "azure": "listing an account's Flexible Server instances: built, not run against a real Azure account",
+    "tencent": "listing an account's TencentDB instances: built, not run against a real Tencent Cloud account",
+    "alibaba": "listing an account's RDS instances: built, not run against a real Alibaba Cloud account",
+    "huawei": "listing an account's RDS instances: built, not run against a real Huawei Cloud account",
+    "oracle": "listing an account's MySQL DB systems: built, not run against a real Oracle Cloud account",
+    "ibm": "listing an account's ICD deployments: built, not run against a real IBM Cloud account",
+}
 
 #: what each family is asked once signed in: its version, the bytes its
 #: databases hold

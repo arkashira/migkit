@@ -664,7 +664,7 @@ def run(goal, ops, say, path=None, wait=time.sleep, now=time.time,
     if pair:
         wf.decided(hop, "pair", said_pair, "->".join(
             p or "?" for p in pair), source=pair[0], target=pair[1])
-    if told:
+    if whole:
         wf.decided(hop, "gaps", f"{len(told)} things the pair lacks said"
                    " before any step", gaps=told, pair=list(pair))
     for d, c in choices.items():

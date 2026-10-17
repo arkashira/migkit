@@ -291,7 +291,8 @@ class Bind:
         from .. import commercial
         if not self.zoned:
             return None
-        value = _as_time(value)
+        if isinstance(value, str):
+            return "UTC"
         own = getattr(value, "zone", None)
         if own:
             return own
@@ -1386,8 +1387,14 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
             for r in large:
                 self._insert_in_pieces(conn, quoted, names, binds, r)
             from .. import fencing
-            fencing.hold(self, side, db, conn.cursor())
+            fencing.hold(self, side, db, cur)
             conn.commit()
+        except BaseException:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
         finally:
             conn.close()
 
@@ -1502,6 +1509,12 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
             fencing.hold(self, side, db, cur)
             conn.commit()
             cur.execute(f"truncate table {staged}")
+        except BaseException:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
         finally:
             conn.close()
 

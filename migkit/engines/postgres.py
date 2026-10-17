@@ -613,6 +613,7 @@ class PostgresEngine(Engine):
     SETTINGS_PER_DATABASE = True
     #: a subscription with copy_data=true copies the tables, then follows
     REPLICA_COPIES = True
+    REREADS_FROM_A_POSITION = True
     #: set by the cutover's last check while it reads: its proof never
     #: passes a table over (`_held_for_cutover`)
     cutover_proof = False
@@ -4001,6 +4002,22 @@ select json_build_object(
                      " read from the files without the server's functions",
              leaves="the followed tables' keys beside the follow's"
                     " position"),
+        Rung("trigger capture", "the changes captured by triggers on the tables",
+             needs=(Need("a key on the table",
+                         lambda f: f["no key"] is not True,
+                         "the table has no primary key, and a change its"
+                         " triggers capture is written by key"),
+                    Need("the source is not a replica",
+                         lambda f: not f.get("is_replica") and not f.get("standby"),
+                         "the source is a replica at wal_level=replica:"
+                         " triggers cannot be written on a read-only server"),
+                    Need("triggers permitted",
+                         lambda f: bool(f.get("trigger capture")),
+                         "triggers are not configured to capture changes")),
+             holds={"consistent": "as of one moment",
+                    "idempotent": "converges", "resumable": "goes on"},
+             because="every change captured by triggers on the source",
+             leaves="triggers on the followed tables"),
         Rung("digest diff", "the table copied again and held to its digest",
              needs=(Need("a table without a key",
                          lambda f: f["no key"] is True,
@@ -4115,6 +4132,8 @@ select json_build_object(
                 lambda: int(one("show server_version_num"))),
             "wal functions": functions, "wal read granted": granted,
             "wal kept": kept, "wal dirs": dirs, "wal program": program,
+            "is_replica": lambda: bool(one("select pg_is_in_recovery()")),
+            "trigger capture": lambda: bool(opts.get("trigger_capture")),
             "no key": lambda: False,
             "digest way": lambda: "asked of one table, not a database"})
         return facts
@@ -4256,14 +4275,19 @@ select json_build_object(
     def _wal_tables(self, side, db):
         """{schema.table: its key's columns} of the tables in scope that
         hold rows (a partitioned table's leaves, not the table itself)."""
+        try:
+            roots = self.partition_roots(side, db)
+        except Exception:
+            roots = {}
         out = {}
         for (name,) in self._wal_ask(
                 side, db, "select n.nspname || '.' || c.relname from"
                 " pg_class c join pg_namespace n on n.oid = c.relnamespace"
                 " where c.relkind = 'r' and n.nspname not in ('pg_catalog',"
                 " 'information_schema') and n.nspname not like 'pg_toast%'"):
-            if self.in_scope(db, name):
-                out[name] = self.neutral_key(side, db, name)
+            root = roots.get(name, name)
+            if self.in_scope(db, name) or self.in_scope(db, root):
+                out[name] = self.neutral_key(side, db, root) or self.neutral_key(side, db, name)
         return out
 
     def _wal_block_rows(self, side, db, table, blocks):
@@ -4454,6 +4478,10 @@ select json_build_object(
             if not (open_at == token and len(records) >= limit):
                 break
             limit = int(limit) * 2  # one transaction longer than a batch
+        try:
+            roots = self.partition_roots(side, db)
+        except Exception:
+            roots = {}
         names = {}
         for (tsp, rel), blocks in touched.items():
             got = self._wal_ask(
@@ -4469,19 +4497,21 @@ select json_build_object(
                     " read again by their place. Compare the database"
                     " again, then follow from there")
             name, kind = got[0]
-            if kind == "r" and name in ledger["tables"]:
+            root = roots.get(name, name)
+            if kind == "r" and (name in ledger["tables"] or root in ledger["tables"]):
                 names[name] = blocks
-            elif kind == "r" and self.in_scope(db, name):
+            elif kind == "r" and (self.in_scope(db, name) or self.in_scope(db, root)):
                 raise SystemExit(
                     f"{db}: {name} was made after this follow began holding"
                     " its tables' keys, so a row taken out of it could not"
                     " be named: move it, then follow")
         out = []
         for table, blocks in sorted(names.items()):
-            key = ledger["tables"][table]
+            root = roots.get(table, table)
+            key = ledger["tables"].get(table) or ledger["tables"].get(root)
             if not key:
-                self._wal_keyless(side, db, table, way)
-                out.append(canon.ddl(table, "reload"))
+                self._wal_keyless(side, db, root, way)
+                out.append(canon.ddl(root, "reload"))
                 continue
             early = sorted(b for b, gone in blocks.items() if gone
                            and _lsn_int(gone) < _lsn_int(ledger["at"]))
@@ -4501,15 +4531,15 @@ select json_build_object(
                     mine[blk].add(k)
                     after.add(k)
                     out.append(canon.change(
-                        "update" if k in before else "insert", table,
+                        "update" if k in before else "insert", root,
                         {c: row.get(c) for c in key}, row))
             for k in sorted(before - after):
-                out.append(canon.change("delete", table,
+                out.append(canon.change("delete", root,
                                         dict(zip(key, json.loads(k)))))
         upto = open_at or (records[-1]["lsn"] if len(records) >= limit
                            else end)
         read = {t: blocks for t, blocks in names.items()
-                if ledger["tables"][t]}
+                if (ledger["tables"].get(t) or ledger["tables"].get(roots.get(t, t)))}
         if going_on and (read or str(upto) != str(token)):
             self._wal_line(side, db, ledger, token, upto, read)
         elif not going_on:
@@ -14497,19 +14527,20 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         # its rows were carried unfiltered
         rf = (self.row_filter(db, *self._ruled(db, f"{sch}.{tbl}"))
               if hasattr(self.hop, "row_filter") else None)
-        if st.get("done") and self.recheck_done(db, key, st, log, rf):
-            ck.save()
-            return
-        ck.save()
-        self.set_aside_indexes(later, self, db, f"{sch}.{tbl}", st,
-                               self._rows_of("src", db, key), log)
         pk = self._int_pk(db, sch, tbl)
         st["key"] = pk
         if not pk:
-            # a key of any other type is copied by its own ranges
-            # (`_copy_keyed`), the same key on every resume
             st.setdefault("keyed_by", list(
                 self.neutral_key("src", db, f"{sch}.{tbl}") or ()))
+        if st.get("done"):
+            if self.recheck_done(db, key, st, log, rf):
+                ck.save()
+                return
+        elif st.get("ranges_done"):
+            self.recheck_resumed(db, key, st, log, rf)
+        ck.save()
+        self.set_aside_indexes(later, self, db, f"{sch}.{tbl}", st,
+                               self._rows_of("src", db, key), log)
         cols = self._copy_cols(db, sch, tbl)
         from .. import tableway
         tableway.carry(self, tableway.job(

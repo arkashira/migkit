@@ -1016,7 +1016,15 @@ class Miner:
             password=ep.option_secret("mine_password"))
         self.standby = bool(standby)
         if self.standby:
-            standby_gate(self.eng, self.side, self.db, self.conn)
+            try:
+                standby_gate(self.eng, self.side, self.db, self.conn)
+            except BaseException:
+                try:
+                    self.conn.close()
+                except Exception:
+                    pass
+                self.conn = None
+                raise
         self.root = self.conn.cursor().execute(
             "select sys_context('userenv', 'con_name') from"
             " dual").fetchone()[0] == "CDB$ROOT"

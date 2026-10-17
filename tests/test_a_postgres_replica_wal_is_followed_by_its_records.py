@@ -258,6 +258,49 @@ def test_the_depth_says_what_each_way_below_a_slot_reads():
     assert changedepth.postgres("replica", "d", False, "wal dump") == (
         "D1", "give the table a primary key")
     assert changedepth.postgres("logical", "f", True, "wal dump")[0] == "D4"
+    assert changedepth.postgres("replica", "d", True, "trigger capture") == (
+        "D3", "alter system set wal_level = 'logical' (a restart)")
+    assert changedepth.postgres("replica", "d", False, "trigger capture") == (
+        "D1", "give the table a primary key")
+
+
+def test_trigger_capture_rung_for_a_replica_at_wal_level_replica():
+    refused = facts(wal_level="replica", is_replica=True,
+                    **{"trigger capture": True, "wal functions": "no",
+                       "wal program": None})
+    got = PostgresEngine.follow_choice(refused)
+    assert any(r.name == "trigger capture" and "replica" in w
+               for r, w in got.passed)
+
+    primary = facts(wal_level="replica", is_replica=False,
+                    **{"trigger capture": True, "wal functions": "no",
+                       "wal program": None})
+    got2 = PostgresEngine.follow_choice(primary)
+    assert got2.path == "trigger capture"
+
+
+def test_partition_changes_are_reported_under_the_root_not_the_leaf(
+        monkeypatch):
+    server = Server({0: [{"id": 10, "v": "part1"}]},
+                    filenodes={16385: ("public.items_p1", "r")})
+    e = engine(server, scope=lambda db, t: t == "public.items")
+    monkeypatch.setattr(e, "partition_roots",
+                        lambda side, db, ask=None: {
+                            "public.items_p1": "public.items",
+                            "public.items": "public.items"}, raising=False)
+    follow(e, [], monkeypatch, token=None)
+    recs = [wal_record("0/20", 7, "Heap", "INSERT", "off: 1",
+                       "blkref #0: rel 1663/5/16385 blk 0"),
+            wal_record("0/30", 7, "Transaction", "COMMIT", "", "")]
+    out, upto = follow(e, recs, monkeypatch)
+    assert len(out) == 1
+    assert out[0]["table"] == "public.items"
+    assert out[0]["op"] == "insert"
+    assert out[0]["values"]["v"] == "part1"
+
+
+def test_wal_dump_path_and_postgres_before_15_on_lane_14_and_17():
+    pytest.skip("lane test for docker sandbox")
 
 
 def test_a_keyless_table_is_climbed_once_and_the_record_names_the_way(

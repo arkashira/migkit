@@ -1163,8 +1163,16 @@ def leftovers_cmd(hop_name, db, only_list):
         for d in _left.dumps(hop, dbs):
             console.print(f"{_esc(hop_name)}: a dump left at"
                           f" {_esc(str(d['path']))}")
+        for s in _left.settings_left(hop, dbs):
+            console.print(f"{_esc(hop_name)}: the target's {_esc(s['name'])} is"
+                          f" {s['new']} (was {s['old']});"
+                          f" migkit leftovers {_esc(hop_name)} puts it back")
     else:
         _left.clear_dumps(hop, dbs, lambda m: console.print(f"  {_esc(m)}"))
+        if _left.settings_left(hop, dbs):
+            _left.put_back_settings(hop, get_engine(hop),
+                                    lambda m: console.print(f"  {_esc(m)}"),
+                                    dbs)
     if not chosen:
         console.print(f"{_esc(hop_name)}: no writes held on either side")
         return

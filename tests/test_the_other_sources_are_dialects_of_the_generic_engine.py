@@ -250,23 +250,30 @@ def test_each_dialects_bulk_kind_is_the_one_its_server_offers(name, kind):
     assert (bulk.kind if bulk else None) == kind
 
 
-def test_the_way_is_chosen_from_what_the_target_answers(tmp_path,
+@pytest.mark.parametrize("name", ["vertica", "netezza"])
+def test_the_way_is_chosen_from_what_the_target_answers(name, tmp_path,
                                                         monkeypatch):
     # the client way stands on the driver loading on this machine
-    monkeypatch.setitem(sys.modules, dbapi.DIALECTS["vertica"].driver,
+    monkeypatch.setitem(sys.modules, dbapi.DIALECTS[name].driver,
                         types.ModuleType("driver"))
-    server = Server(dbapi.DIALECTS["vertica"], may=True)
-    eng = engine("vertica", tmp_path, server)
+    server = Server(dbapi.DIALECTS[name], may=True)
+    eng = engine(name, tmp_path, server)
     eng._on = lambda which, table, db="-": table
     counts = iter([3, 0])
     eng._count = lambda side, table: next(counts)
     eng.hop.options = {"key": "id"}
     got = eng.bulk_way("app.orders")
     assert got.path == "client"
-    refused = Server(dbapi.DIALECTS["vertica"], may=False)
-    eng2 = engine("vertica", tmp_path, refused)
+    refused = Server(dbapi.DIALECTS[name], may=False)
+    eng2 = engine(name, tmp_path, refused)
     eng2._on = lambda which, table, db="-": table
     assert eng2.bulk_way("app.orders").path == "copier"
+
+
+def test_every_dialect_with_bulk_has_may_sql():
+    for name, d in dbapi.DIALECTS.items():
+        if d.bulk and d.bulk.kind in ("client", "landing", "tool"):
+            assert d.may_sql, f"{name} is missing may_sql"
 
 
 def test_a_bulk_statement_names_the_table_and_columns_in_the_dialects_way(

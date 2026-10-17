@@ -59,6 +59,9 @@ def postgres(wal_level, replica_identity, has_key, way=None):
     if level == "minimal":
         return "D0", "alter system set wal_level = 'replica' (a restart)"
     if level != "logical":
+        if way == "trigger capture":
+            return ("D3", _LOGICAL) if has_key else (
+                "D1", "give the table a primary key")
         if way in ("wal inspect", "wal dump"):
             return ("D2", _LOGICAL) if has_key else (
                 "D1", "give the table a primary key")

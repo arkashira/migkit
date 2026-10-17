@@ -3390,8 +3390,17 @@ KEEPS_SEMANTICS = Need(
 def schedule_facts(schedule, semantics, known=None):
     """`Facts` a schedule is admitted from: what it breaks, read once."""
     from . import guarantees
+    if hasattr(schedule, "copies") and not hasattr(schedule, "accepted"):
+        sched = guarantees.Schedule(
+            order=tuple(t for t, _, _ in schedule.copies),
+            times=schedule.copies,
+            at_once=max(1, len({s for _, s, _ in schedule.copies})),
+            snapshot="one" if getattr(schedule, "snapshot", "") == "one" else "per table",
+            caught_up=schedule.tail is not None)
+    else:
+        sched = schedule
     return Facts(known, **{SCHEDULE_BREAKS: lambda: guarantees.breaks(
-        schedule, semantics)})
+        sched, semantics)})
 
 
 def admit(schedule, semantics, said="the schedule as planned", facts=None):

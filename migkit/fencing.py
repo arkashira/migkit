@@ -222,9 +222,49 @@ def _lock_wait(e):
     return "lock timeout" in text or "lock wait timeout" in text
 
 
+def own_table_sqlserver(engine, side, db):
+    conn = engine._connect(side, db)
+    t = (engine.own_name(side, db)
+         if callable(getattr(engine, "own_name", None))
+         else f"[{db}].[dbo].[migkit_origin]" if db else "dbo.migkit_origin")
+    made = getattr(engine, "_own_made", None)
+    if made is None:
+        made = set()
+        setattr(engine, "_own_made", made)
+    if t not in made:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                f"if object_id('{t}', 'U') is null "
+                f"create table {t} (origin nvarchar(400) not null primary key, "
+                f"n bigint not null, seen nvarchar(max))")
+            conn.commit()
+            made.add(t)
+        finally:
+            cur.close()
+    return conn, t
+
+
+OWN_TABLE_HOOKS = {
+    "sqlserver": own_table_sqlserver,
+}
+
+
+def _own_table(engine, side, db):
+    hook = getattr(engine, "own_table", None)
+    if callable(hook):
+        return hook(side, db)
+    d = getattr(engine, "OWN_DIALECT", None)
+    if d in OWN_TABLE_HOOKS:
+        return OWN_TABLE_HOOKS[d](engine, side, db)
+    raise AttributeError(f"{type(engine).__name__} has no own_table")
+
+
 def _dialect(engine):
     d = getattr(engine, "OWN_DIALECT", None)
-    if d not in SQL or not callable(getattr(engine, "own_table", None)):
+    if d not in SQL:
+        return None
+    if not callable(getattr(engine, "own_table", None)) and d not in OWN_TABLE_HOOKS:
         return None
     return SQL[d]
 
@@ -248,7 +288,7 @@ def read(engine, side, db, row):
     if d is None:
         w = way(engine, side, db)
         return w.read(row) if isinstance(w, Way) else (None, {})
-    conn, t = engine.own_table(side, db)
+    conn, t = _own_table(engine, side, db)
     try:
         cur = conn.cursor()
         try:
@@ -277,7 +317,7 @@ def raise_to(engine, side, db, token, log=None, wait=RAISE_WAIT):
         return w.raise_(token.row, token.number, token.by, token.seen())
     said = False
     while True:
-        conn, t = engine.own_table(side, db)
+        conn, t = _own_table(engine, side, db)
         try:
             cur = conn.cursor()
             try:
@@ -354,21 +394,31 @@ def hold(engine, side, db, cur):
         token.before(db)
     d = _dialect(engine)
     if d is None or cur is None:
-        _hold_own(engine, side, db, token, d)
+        _hold_own(engine, side, db, token, d, cur=cur)
         return
-    name = engine.own_name(side, db)
+    name = (engine.own_name(side, db)
+            if callable(getattr(engine, "own_name", None))
+            else (f"[{db}].[dbo].[migkit_origin]" if d == "sqlserver" and db
+                  else "dbo.migkit_origin" if d == "sqlserver"
+                  else f"{db}.migkit_origin" if db else "migkit_origin"))
     if token.lazy and (side, db) not in token.raised:
         raise_once(engine, side, db, token)
     cur.execute(_sql(d, "share", name), (token.row,))
     got = cur.fetchone()
     n, seen = (int(got[0]), _seen(got[1])) if got else (None, {})
     if n != token.number or seen.get("by") != token.by:
+        conn = getattr(cur, "connection", None)
+        if conn is not None and callable(getattr(conn, "rollback", None)):
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         raise Fenced("the target refused a write: " + _refused(token, n, seen)
                      + "; this transaction is rolled back and this writer"
                        " stops")
 
 
-def _hold_own(engine, side, db, token, d):
+def _hold_own(engine, side, db, token, d, cur=None):
     """`hold` for a write with no transaction of migkit's to hold the row
     in - an engine's own bulk path, before each batch: the target's way
     compares, or the SQL row is held in a transaction of its own."""
@@ -381,9 +431,9 @@ def _hold_own(engine, side, db, token, d):
                           " hold this write to")
                          + ", and it carries a writer's token: nothing of"
                            " it is written")
-        why = w.held(token.row, token.number, token.by)
+        why = w.held(token.row, token.number, token.by, cur=cur)
     else:
-        conn, t = engine.own_table(side, db)
+        conn, t = _own_table(engine, side, db)
         try:
             cur = conn.cursor()
             cur.execute(_sql(d, "wait", t))
@@ -417,7 +467,7 @@ def prove(engine, side, db):
     conns = []
 
     def opened():
-        conn, t = engine.own_table(side, db)
+        conn, t = _own_table(engine, side, db)
         conns.append(conn)
         return conn, conn.cursor(), t
     try:
@@ -462,7 +512,7 @@ def prove(engine, side, db):
             except Exception:  # noqa: BLE001 - it is going anyway
                 pass
         try:
-            conn, t = engine.own_table(side, db)
+            conn, t = _own_table(engine, side, db)
             try:
                 cur = conn.cursor()
                 cur.execute(_sql(d, "delete", t), (row,))
@@ -612,7 +662,7 @@ class GuardedDocument(Way):
         return ((int(got["n"]), _seen(got.get("seen"))) if got
                 else (None, {}))
 
-    def held(self, row, n, by):
+    def held(self, row, n, by, cur=None):
         got = self._coll().find_one_and_update(
             {"_id": row, "n": n, "by": by}, {"$set": {"held": time.time()}})
         return None if got is not None else self._judge(row, n, by)
@@ -654,7 +704,12 @@ class ComparedKey(Way):
         return (int(got[0]), _seen(got[1])) if got[0] is not None \
             else (None, {})
 
-    def held(self, row, n, by):
+    def held(self, row, n, by, cur=None):
+        if cur is not None and hasattr(cur, "watch"):
+            try:
+                cur.watch(self._key(row))
+            except Exception:
+                pass
         try:
             self._r().eval(self.HOLD, 1, self._key(row), n, by, time.time())
         except Exception as e:  # noqa: BLE001 - the script's refusal, or not
@@ -700,7 +755,7 @@ class LightweightTransaction(Way):
             consistency_level=ConsistencyLevel.SERIAL), (row,)).one()
         return (int(got[0]), _seen(got[1])) if got else (None, {})
 
-    def held(self, row, n, by):
+    def held(self, row, n, by, cur=None):
         got = self._s().execute(
             f"update {self._t} set held = %s where origin = %s"
             " if n = %s and holder = %s", (time.time(), row, n, by))
@@ -783,7 +838,7 @@ class ProducerEpoch(Way):
             return None, {}
         return int(last["n"]), _seen(last.get("seen"))
 
-    def held(self, row, n, by):
+    def held(self, row, n, by, cur=None):
         p = self._held.get((row, n, by))
         if p is None:
             return self._judge(row, n, by) or (
@@ -839,7 +894,7 @@ class ReplacingRow(Way):
             parameters={"o": row}).result_rows
         return (int(got[0][0]), _seen(got[0][1])) if got else (None, {})
 
-    def held(self, row, n, by):
+    def held(self, row, n, by, cur=None):
         return self._judge(row, n, by)
 
     def delete(self, row):

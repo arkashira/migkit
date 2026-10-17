@@ -142,7 +142,6 @@ def _ep(address, project=PROJECT, **opts):
 
 
 @needs_docker
-@pytest.mark.skip(reason="BIGTABLE.cell-limit-emulator: the move's listing (`list_move_tables`) asks the emulator for a feature it answers 'unimplemented', and the seed's append of a cell past 4 MiB is refused by this machine's client, which receives at most 4 MiB a reply - run 2026-10-16, not yet passing")
 def test_bigtable_writes_a_row_past_the_limit_it_names_by_its_cells_whole_and_lists_its_scope(
         tmp_path):
     """Rows of a 2 MiB and a 3 MiB cell, each past what the emulator takes
@@ -179,7 +178,6 @@ def _described_target(eng, db, name):
 
 
 @needs_docker
-@pytest.mark.skip(reason='BIGTABLE.cell-limit-emulator: the emulator took the whole write without a refusal naming its limit, so no piece was appended and the stop between two pieces was not reached - run 2026-10-16, cause not yet read')
 def test_bigtable_writes_a_cell_past_the_limit_it_names_in_pieces_whole_and_again_after_a_stop(
         tmp_path, monkeypatch):
     """An 8 MiB value no request the emulator takes holds: set from its
@@ -220,7 +218,6 @@ def test_bigtable_writes_a_cell_past_the_limit_it_names_in_pieces_whole_and_agai
 
 
 @needs_docker
-@pytest.mark.skip(reason="BIGTABLE.cell-limit-emulator: the seed's append of an 8 MiB cell returns the whole cell, past the 4 MiB this machine's client receives a reply - run 2026-10-16, not yet passing")
 def test_bigtable_refuses_a_cell_past_the_limit_it_names_where_its_timestamps_are_carried(
         tmp_path):
     """A Bigtable table copied to another keeps every cell's timestamp, and

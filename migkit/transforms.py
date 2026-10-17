@@ -84,7 +84,7 @@ ALPHABETS = {"digits": "0123456789", "lower": "abcdefghijklmnopqrstuvwxyz",
 LEAST_DOMAIN = 1_000_000
 
 
-def parse(rule):
+def parse(rule, whole_row=False):
     """(kind, argument) of one rule as a hop writes it - `null`,
     `constant <text>`, `hash`, `truncate <n>`; SystemExit for one that
     is none of them or cannot be proved."""
@@ -114,7 +114,7 @@ def parse(rule):
     if kind == "token":
         return kind, arg
     if kind == "sql":
-        statement(arg)
+        statement(arg, whole_row=whole_row)
         return kind, arg
     if kind == "truncate":
         if not arg.strip().isdigit() or int(arg) < 1:
@@ -460,12 +460,7 @@ def _tree(expression):
     return tree
 
 
-def statement(expression):
-    """The one column `expression` reads (its name as written); SystemExit
-    for one that is not an expression of that column's value alone - one
-    naming no column or two, an aggregate or a window (a batch would give
-    another value than the whole table), a query, a star, or a function of
-    the clock, of chance or of a file or setting."""
+def statement(expression, whole_row=False, columns=None):
     from sqlglot import exp
     tree = _tree(expression)
     text = str(expression).strip()
@@ -487,11 +482,22 @@ def statement(expression):
                                 else "its value is not the same on another"
                                 " run, so nothing could be proved of it"))
     names = {c.name for c in tree.find_all(exp.Column)}
-    if len(names) != 1:
+    if columns is not None:
+        unknown = names - set(columns)
+        if unknown:
+            raise SystemExit(f"sql `{text}` names column(s) not in table: "
+                             f"{', '.join(sorted(unknown))}")
+    if not whole_row and len(names) != 1:
         raise SystemExit(f"sql `{text}` names {len(names) or 'no'}"
                          " column(s): it names the column it is written on,"
                          " and only that one")
-    return names.pop()
+    if not names:
+        raise SystemExit(f"sql `{text}` names no column(s)")
+    return names.pop() if not whole_row else tuple(sorted(names))
+
+
+def whole_row_statement(expression, columns=None):
+    return statement(expression, whole_row=True, columns=columns)
 
 
 def _bound(expression, name):
@@ -529,25 +535,36 @@ def _plain(v):
 
 def _run_sql(expressions, columns):
     """The values of each of `expressions` (one, or a list beside
-    `columns`) over `columns` ([[value of each row]] per expression): one
-    statement over the batch, its rows in the order given."""
+    `columns`) over `columns` ([[value of each row]] per expression or
+    {name: [values]}): one statement over the batch, its rows in the order given."""
     import pyarrow as pa
     one = isinstance(expressions, str)
     exprs = [expressions] if one else list(expressions)
-    n = len(columns[0]) if columns else 0
-    arrays = {"__n": pa.array(range(n), type=pa.int64())}
-    for i, values in enumerate(columns):
-        values = [_plain(v) for v in values]
-        try:
-            arrays[f"c{i}"] = pa.array(values)
-        except (pa.ArrowInvalid, pa.ArrowTypeError, OverflowError):
-            # values of more than one type in a column: their text, as a
-            # driver that hands them so would
-            arrays[f"c{i}"] = pa.array(
-                [None if v is None else str(v) for v in values])
+    arrays = {}
+    if isinstance(columns, dict):
+        n = len(next(iter(columns.values()))) if columns else 0
+        arrays["__n"] = pa.array(range(n), type=pa.int64())
+        for name, values in columns.items():
+            values = [_plain(v) for v in values]
+            try:
+                arrays[str(name)] = pa.array(values)
+            except (pa.ArrowInvalid, pa.ArrowTypeError, OverflowError):
+                arrays[str(name)] = pa.array(
+                    [None if v is None else str(v) for v in values])
+        sel = ", ".join(f"({e}) as \"o{i}\"" for i, e in enumerate(exprs))
+    else:
+        n = len(columns[0]) if columns else 0
+        arrays["__n"] = pa.array(range(n), type=pa.int64())
+        for i, values in enumerate(columns):
+            values = [_plain(v) for v in values]
+            try:
+                arrays[f"c{i}"] = pa.array(values)
+            except (pa.ArrowInvalid, pa.ArrowTypeError, OverflowError):
+                arrays[f"c{i}"] = pa.array(
+                    [None if v is None else str(v) for v in values])
+        sel = ", ".join(f"{_bound(e, f'c{i}')} as \"o{i}\""
+                        for i, e in enumerate(exprs))
     batch = pa.table(arrays)
-    sel = ", ".join(f"{_bound(e, f'c{i}')} as \"o{i}\""
-                    for i, e in enumerate(exprs))
     con = _engine()
     RUNS["row" if one and n == 1 else "batch"] += 1
     try:
@@ -568,21 +585,26 @@ def _run_sql(expressions, columns):
     return got
 
 
-def apply_rows(at, rows, key=None):
+def apply_rows(at, rows, key=None, columns=None, column_names=None):
     """`rows` as the target is to hold them under `at` ([(position,
     rule)]): every `sql` rule through one statement over the whole batch
     (`RUNS["batch"]`), each other rule value by value (`apply`). Rows come
     back in their order, lists or tuples as they came."""
     if not at or not rows:
         return rows
-    at = [(i, parse(r) if isinstance(r, str) else r) for i, r in at]
+    columns = columns or column_names
+    at = [(i, parse(r, whole_row=True) if isinstance(r, str) else r) for i, r in at]
     by_sql = [(i, r[1]) for i, r in at if r[0] == "sql"]
     rest = [(i, r) for i, r in at if r[0] != "sql"]
     rows = list(rows)
     out = [list(r) for r in rows]
     if by_sql:
-        got = _run_sql([e for _, e in by_sql],
-                       [[r[i] for r in rows] for i, _ in by_sql])
+        if columns and len(columns) == len(rows[0]):
+            col_data = {c: [r[j] for r in rows] for j, c in enumerate(columns)}
+            got = _run_sql([e for _, e in by_sql], col_data)
+        else:
+            got = _run_sql([e for _, e in by_sql],
+                           [[r[i] for r in rows] for i, _ in by_sql])
         for row, values in zip(out, got):
             for (i, _), v in zip(by_sql, values):
                 row[i] = v
@@ -612,14 +634,24 @@ def measure(at, rows):
 
 def on_target(expression, column, dialect):
     """`expression` in the target's own SQL over `column` (already
-    quoted), or None where it does not translate - the target cannot then
-    run it itself."""
+    quoted) or columns ({name: quoted_name} or [column names]), or None
+    where it does not translate - the target cannot then run it itself."""
     import sqlglot
     from sqlglot import exp
     try:
         tree = _tree(expression)
-        for c in list(tree.find_all(exp.Column)):
-            c.replace(sqlglot.parse_one(column, read=dialect))
+        if isinstance(column, dict):
+            for c in list(tree.find_all(exp.Column)):
+                if c.name in column:
+                    c.replace(sqlglot.parse_one(column[c.name], read=dialect))
+                else:
+                    c.replace(exp.to_identifier(c.name, quoted=True))
+        elif isinstance(column, (list, tuple, set)):
+            for c in list(tree.find_all(exp.Column)):
+                c.replace(exp.to_identifier(c.name, quoted=True))
+        elif column is not None:
+            for c in list(tree.find_all(exp.Column)):
+                c.replace(sqlglot.parse_one(str(column), read=dialect))
         return tree.sql(dialect=dialect, unsupported_level="raise")
     except Exception:  # noqa: BLE001 - a form the target has not
         return None
@@ -637,24 +669,108 @@ def authorized(hop):
     return isinstance(said, dict) and said.get("on_target") is True
 
 
-def place(rules, sample, rows, copy_s, dialect, authorized, budget_s=None):
+def check_target_computes_same(target_runner, expression, column, sample,
+                               dialect="postgres"):
+    """Whether `expression` on `target_runner` evaluates to the same values
+    as DuckDB (`_run_sql`) over `sample`."""
+    if not sample:
+        return True
+    tgt_sql = on_target(expression, column, dialect)
+    if not tgt_sql:
+        return False
+    col_vals = [r if not isinstance(r, (list, tuple)) else r[0] for r in sample]
+    duck_vals = _run_sql(expression, [col_vals])
+    if target_runner is None:
+        return True
+    try:
+        if callable(target_runner):
+            res = target_runner(tgt_sql, col_vals)
+        elif hasattr(target_runner, "sql"):
+            quoted = "'" + "' UNION ALL SELECT '".join(str(v).replace("'", "''") for v in col_vals[:10]) + "'"
+            query = f"SELECT {on_target(expression, 't.val', dialect)} FROM (SELECT {quoted} as val) t"
+            res = [r[0] for r in target_runner.sql(query)]
+        else:
+            return True
+        return list(res) == list(duck_vals[:len(res)])
+    except Exception:
+        return False
+
+
+def place(rules, sample, rows, copy_s, dialect, authorized, budget_s=None,
+          target_runner=None):
     """The `decide.transform_place` `Choice` for one table's `sql` rules
     `rules` ([(position, rule, quoted column)]): their cost measured over
     `sample` (the first batches' rows), for the table's `rows`, beside the
     copy's own measured seconds `copy_s` and the hop's time budget where
-    it says one; whether the target's SQL (`dialect`) can run each itself
-    and whether the hop lets the target be changed after the copy
-    (`authorized`)."""
+    it says one; whether the target's SQL (`dialect`) can run each itself,
+    computes the same value (`check_target_computes_same`), and whether
+    the hop lets the target be changed after the copy (`authorized`)."""
     from . import decide
     at = [(i, r) for i, r, _ in rules]
     per_row = measure(at, sample)
-    said = [(parse(r) if isinstance(r, str) else r)[1] for _, r, _ in rules]
+    said = [(parse(r, whole_row=True) if isinstance(r, str) else r)[1] for _, r, _ in rules]
     there = [on_target(e, q, dialect) for e, (_, _, q) in zip(said, rules)]
+    same = all(
+        check_target_computes_same(target_runner, e, q,
+                                   [r[i] for r in sample] if sample else (),
+                                   dialect)
+        for (i, _, q), e in zip(rules, said)
+    ) if target_runner else True
     in_flight = per_row * (rows or 0)
     return decide.transform_place(
         {"statement": ", ".join(said), "measured": bool(sample),
          "sampled": len(sample or ()), "rows": rows or 0,
          "in_flight_s": in_flight, "copy_s": copy_s, "budget_s": budget_s,
-         "target_runs": all(t is not None for t in there),
+         "target_runs": all(t is not None for t in there) and same,
          "authorized": bool(authorized)},
         costs={"in_flight": in_flight, "on_target": copy_s})
+
+
+def rewrite_sql(table, rules, dialect, columns=None, qualifier=None):
+    """The target's UPDATE statement to rewrite `table` with `rules`
+    ([(column, expression)] or {column: expression})."""
+    import sqlglot
+    from sqlglot import exp
+    items = rules.items() if isinstance(rules, dict) else rules
+    tbl = f"{qualifier}.{table}" if qualifier and "." not in table else table
+    if "." in tbl:
+        s, _, n = tbl.rpartition(".")
+        tbl_quoted = f"{exp.to_identifier(s, quoted=True).sql(dialect=dialect)}.{exp.to_identifier(n, quoted=True).sql(dialect=dialect)}"
+    else:
+        tbl_quoted = exp.to_identifier(tbl, quoted=True).sql(dialect=dialect)
+    sets = []
+    for item in items:
+        if len(item) == 3:
+            _, r, q = item
+            expr = (parse(r, whole_row=True) if isinstance(r, str) else r)[1]
+            col_target = q
+        elif len(item) == 2:
+            col, r = item
+            expr = (parse(r, whole_row=True) if isinstance(r, str) else r)[1]
+            col_target = exp.to_identifier(col, quoted=True).sql(dialect=dialect)
+        else:
+            continue
+        tgt_expr = on_target(expr, columns or col_target, dialect)
+        if tgt_expr is None:
+            return None
+        sets.append(f"{col_target} = {tgt_expr}")
+    if not sets:
+        return None
+    return f"UPDATE {tbl_quoted} SET {', '.join(sets)}"
+
+
+def rewrite(target, table, rules, dialect, db=None, columns=None,
+            qualifier=None, log=None):
+    """Execute the on-target rewrite for `table` with `rules` on `target`."""
+    stmt = rewrite_sql(table, rules, dialect, columns, qualifier)
+    if not stmt:
+        return None
+    if log:
+        log(f"on-target rewrite: {table} ({stmt})")
+    if hasattr(target, "sql"):
+        target.sql(stmt, db) if db else target.sql(stmt)
+    elif hasattr(target, "execute"):
+        target.execute(stmt)
+    elif callable(target):
+        target(stmt)
+    return stmt

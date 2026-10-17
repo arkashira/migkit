@@ -15,6 +15,19 @@ from tests.test_every_phase_declares_its_contract import Fake, _run
 
 ROOT = Path(__file__).resolve().parent.parent
 
+PROVES = [("tail.readded", "postgres")]
+
+
+def test_postgres_tail_readded_position_reached():
+    from migkit.engines.postgres import PostgresEngine
+    assert PostgresEngine.REREADS_FROM_A_POSITION is True
+    reached = PostgresEngine.position_reached
+    assert reached("0/16B3750", "0/16B3740") is True
+    assert reached("0/16B3750", "0/16B3750") is True
+    assert reached("0/16B3740", "0/16B3750") is False
+    assert reached("1/0", "0/FFFFFFFF") is True
+    assert reached("bad", "0/1") is None
+
 
 def _hop(engine, **options):
     return SimpleNamespace(engine=engine, options=options)

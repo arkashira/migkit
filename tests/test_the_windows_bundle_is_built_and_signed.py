@@ -107,10 +107,22 @@ def _fake_pip(skip=()):
                 name = re.sub(r"[-_.]+", "_", m.group(1)).lower()
                 if m.group(1).lower() in skip:
                     continue
+                if name == "pure_sasl":
+                    open(f"{dest}/pure-sasl-{m.group(2)}.tar.gz",
+                         "wb").write(b"tarball")
+                    continue
                 tag = "win_amd64" if name in ("cffi", "psycopg_binary") \
                     else "any"
                 abi = "cp312-cp312" if tag != "any" else "py3-none"
                 open(f"{dest}/{name}-{m.group(2)}-{abi}-{tag}.whl",
+                     "wb").write(b"PK")
+        if "wheel" in argv and "-w" in argv:
+            dest = argv[argv.index("-w") + 1]
+            src = argv[-1]
+            if "pure-sasl" in src or "pure_sasl" in src:
+                m = re.search(r"pure[-_]sasl-([0-9.]+)", src)
+                ver = m.group(1) if m else "0.6.2"
+                open(f"{dest}/pure_sasl-{ver}-py3-none-any.whl",
                      "wb").write(b"PK")
         return subprocess.CompletedProcess(argv, 0, "", "")
     return run, asked
@@ -161,6 +173,11 @@ def test_the_windows_bundle_is_built_from_the_lock_and_signed(
         assert tags <= {"any", "win_amd64"}, tags
         assert not list((out / where).glob("*.tar.gz"))
     assert not (out / "locks").exists()
+    # pure-sasl was fetched as source and built into a universal wheel
+    wheel_builds = [a for a in asked if isinstance(a, list) and "wheel" in a
+                    and any("pure" in x for x in a)]
+    assert len(wheel_builds) == 1 and any(
+        a.endswith(".tar.gz") for a in wheel_builds[0])
     monkeypatch.setenv("MIGKIT_BUNDLE_KEY", str(key))
     tools._sign_bundle(out, said.append)
     assert (out / "SHA256SUMS.sig").exists(), said
@@ -196,6 +213,60 @@ def test_a_pip_that_says_done_but_leaves_a_pin_out_is_refused_by_name(
     assert not (out / "SHA256SUMS").exists()
 
 
+def test_a_source_distribution_whose_build_fails_is_refused_by_name(
+        tmp_path, monkeypatch):
+    """A distribution pinned only as source that fails to build into a
+    wheel refuses the Windows bundle by name, leaving nothing signed."""
+    run, _ = _fake_pip()
+
+    def run_failing_wheel(argv, env=None, **kw):
+        if (argv[0] == "pip" and "wheel" in argv
+                and any("pure" in x for x in argv)):
+            return subprocess.CompletedProcess(
+                argv, 1, "", "ERROR: Failed to build pure-sasl")
+        return run(argv, env, **kw)
+
+    monkeypatch.setattr(tools, "_pip", lambda: ["pip"])
+    monkeypatch.setattr(runner, "run", run_failing_wheel)
+    out = tmp_path / "bundle"
+    out.mkdir()
+    with pytest.raises(SystemExit) as got:
+        tools._bundle_wheels(out, tools._platform("windows-x86_64"),
+                             lambda m: None)
+    assert "pure-sasl" in str(got.value) and "Windows" in str(got.value)
+    assert not (out / "wheels").exists()
+    assert not (out / "second-reader").exists()
+    assert not (out / "SHA256SUMS").exists()
+
+
+def test_a_source_distribution_without_universal_wheel_refuses_the_build(
+        tmp_path, monkeypatch):
+    """A distribution whose source build produces an architecture-specific
+    wheel rather than a universal one is refused: Windows cannot build it."""
+    run, _ = _fake_pip()
+
+    def run_platform_wheel(argv, env=None, **kw):
+        if (argv[0] == "pip" and "wheel" in argv
+                and any("pure" in x for x in argv)):
+            dest = argv[argv.index("-w") + 1]
+            open(f"{dest}/pure_sasl-0.6.2-cp312-cp312-win_amd64.whl",
+                 "wb").write(b"PK")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return run(argv, env, **kw)
+
+    monkeypatch.setattr(tools, "_pip", lambda: ["pip"])
+    monkeypatch.setattr(runner, "run", run_platform_wheel)
+    out = tmp_path / "bundle"
+    out.mkdir()
+    with pytest.raises(SystemExit) as got:
+        tools._bundle_wheels(out, tools._platform("windows-x86_64"),
+                             lambda m: None)
+    assert "pure-sasl" in str(got.value) and "Windows" in str(got.value)
+    assert not (out / "wheels").exists()
+    assert not (out / "second-reader").exists()
+    assert not (out / "SHA256SUMS").exists()
+
+
 def test_windows_is_declared_built_and_unproved_in_the_state():
     """The Windows cells are read by the declaration seam into the
     state's "built, unproved" block, with the reason the bundle says."""
@@ -203,7 +274,7 @@ def test_windows_is_declared_built_and_unproved_in_the_state():
     assert "tools.py" in caps.DECLARING
     why, cells = caps.UNPROVED_ELSEWHERE["windows"]
     assert why == tools.WINDOWS_UNPROVED == tools.UNPROVED_ON["windows"]
-    assert "bundle.install" in cells
+    assert {"bundle.install", "bundle.source-build"} <= set(cells)
 
 
 def test_a_linux_bundle_takes_wheels_built_for_any_glibc_floor_between():

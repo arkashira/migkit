@@ -345,3 +345,129 @@ def test_the_schedule_the_copy_is_given_is_in_the_run_record(
     assert detail["makespan_seconds"] == round(plan.makespan, 3)
     assert detail["makespan_seconds"] <= detail["serial_seconds"]
     assert entry["before_the_first_ends"] >= 1
+
+
+def test_the_range_path_on_the_overlap_schedule_and_admit():
+    from types import SimpleNamespace
+    from migkit import decide
+    known = {"public.orders": {"bytes": 8000, "rows": 80},
+             "public.items": {"bytes": 2000, "rows": 20},
+             "public.users": {"bytes": 5000, "rows": 50}}
+    tables = ["public.items", "public.orders", "public.users"]
+    bound = lambda v: SimpleNamespace(bound=lambda: v)
+    model = SimpleNamespace(
+        measured=True, little=2, carried=0,
+        rate=lambda n: 100.0,
+        stages={"target": bound(50.0), "source": bound(200.0)})
+    plan = legs.schedule(SimpleNamespace(), "shop", known, tables, 2, model=model)
+    assert plan is not None
+    assert plan.checks and len(plan.checks) >= 2
+    assert plan.makespan < plan.serial
+    work = [("public.items", "i1"), ("public.orders", "o1"), ("public.orders", "o2"), ("public.users", "u1")]
+    ordered = legs.in_schedule(work, plan)
+    assert [w[0] for w in ordered] == ["public.orders", "public.orders", "public.users", "public.items"]
+    ok, why = decide.admit(plan, {})
+    assert ok and not why
+
+
+def test_relay_compression_applied_to_streaming_copy_source_read(
+        tmp_path, monkeypatch):
+    from migkit import config, decide, jointplan
+    from migkit.config import Endpoint, Hop
+    monkeypatch.setattr(config, "REPORTS", tmp_path)
+    monkeypatch.setattr(movers, "cpu_headroom", lambda: 4.0)
+    hop = Hop(name="w18k_relay", engine="postgres",
+              source=Endpoint(host="10.0.0.1", port=5432, user="u",
+                              password="CHANGE_ME"),
+              target=Endpoint(host="10.0.0.2", port=5432, user="u",
+                              password="CHANGE_ME"),
+              databases=["appdb"])
+    monkeypatch.setattr(jointplan, "semantics_of",
+                        lambda eng, db: {"a": Semantics(table="a"),
+                                         "b": Semantics(table="b")})
+    monkeypatch.setattr("migkit.engines.postgres.PostgresEngine",
+                        lambda h: object())
+    monkeypatch.setattr(legs, "_relayed", lambda h: True)
+    sample = bytes(range(256)) * 40
+    monkeypatch.setattr(legs, "_relay_sample", lambda h, db=None: (sample, 100))
+    monkeypatch.setattr(planner, "link_speed", lambda h: 1000.0)
+    got = movers._builds_beside_the_copy(hop, "appdb", 2, True)
+    assert got is not None
+    records = [e for e in decide.recorded(hop)
+               if e["work"] == "appdb: the copy's schedule"]
+    assert len(records) == 1
+    assert "relay to here" in records[0]["detail"]["relay"]
+    assert "compressed" in records[0]["detail"]["relay"]
+
+
+def test_record_schedule_through_pull_move_on_a_postgres_fdw_lane(
+        tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from migkit import config, decide
+    from migkit.config import Endpoint, Hop
+    monkeypatch.setattr(config, "REPORTS", tmp_path)
+    hop = Hop(name="w18k_fdw", engine="postgres",
+              source=Endpoint(host="10.0.0.1", port=5432, user="u",
+                              password="CHANGE_ME"),
+              target=Endpoint(host="10.0.0.2", port=5432, user="u",
+                              password="CHANGE_ME"),
+              databases=["appdb"])
+    bound = lambda v: SimpleNamespace(bound=lambda: v)
+    fake_model = SimpleNamespace(
+        measured=True, little=2, carried=0,
+        rate=lambda n: 100.0,
+        stages={"target": bound(50.0), "source": bound(200.0)})
+    monkeypatch.setattr("migkit.model.load", lambda p: fake_model)
+
+    class FakeEngine:
+        def __init__(self, h):
+            self.hop = h
+        def _all_tables(self, side, db):
+            return ["public.t1", "public.t2"]
+        def table_facts(self, side, db):
+            return {"public.t1": {"bytes": 1000, "rows": 10},
+                    "public.t2": {"bytes": 2000, "rows": 20}}
+        def list_move_tables(self, db):
+            return [("public", "t1"), ("public", "t2")]
+        def _split(self, name):
+            return name.split(".", 1)
+
+    monkeypatch.setattr("migkit.engines.postgres.PostgresEngine", FakeEngine)
+    monkeypatch.setattr(legs, "source_for_target", lambda h: ("10.0.0.1", 5432))
+    monkeypatch.setattr(legs, "facts", lambda h, db: {})
+    monkeypatch.setattr(movers, "_pg_create_missing", lambda *a, **k: None)
+    monkeypatch.setattr(movers, "_pg_truncate_target", lambda *a, **k: None)
+    monkeypatch.setattr(movers, "_pg_quiet_triggers", lambda *a, **k: None)
+    monkeypatch.setattr(movers, "_pg_carry_sequences", lambda *a, **k: None)
+    monkeypatch.setattr(movers, "_pg_finish_created", lambda *a, **k: None)
+    monkeypatch.setattr(legs, "servers_seen", lambda h: 10.0)
+
+    class FakeFootprint:
+        def __init__(self, *a, **k):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            pass
+        def import_tables(self, sch, tbls, fetch):
+            return {t: t for t in tbls}
+        def drop_credentials(self):
+            pass
+
+    monkeypatch.setattr(legs, "Footprint", FakeFootprint)
+    monkeypatch.setattr(legs, "_table_work",
+                        lambda h, eng, db, sch, t, local, known: [(f"{sch}.{t}", "stmt")])
+    monkeypatch.setattr(legs, "trials",
+                        lambda h, db, lf, log: SimpleNamespace(save=lambda: None))
+    executed = []
+    monkeypatch.setattr(legs, "_run_ranges",
+                        lambda h, db, work, workers, quiet, log, t, lf: executed.extend(work))
+
+    steps = legs.pull_move(hop, "appdb", workers=2, go=True, log=None)
+    assert steps and len(executed) == 2
+    records = [e for e in decide.recorded(hop)
+               if e["work"] == "appdb: the copy's schedule"]
+    assert len(records) == 1
+    detail = records[0]["detail"]
+    assert detail["tables"] == 2
+    assert detail["makespan_seconds"] <= detail["serial_seconds"]

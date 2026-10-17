@@ -266,3 +266,158 @@ def test_a_service_with_no_class_to_copy_from_takes_no_neutral_way_unread():
     for shape in ("keyless", "no unique index", "wide key"):
         assert decide.WAYS[shape]["synapse"][0] == "yes", shape
 
+
+def test_azure_flexible_servers_free_space_is_read_from_metrics(monkeypatch):
+    from types import SimpleNamespace
+    from migkit import cloudapi
+
+    class Monitor:
+        class metrics:
+            @staticmethod
+            def list(*a, **kw):
+                class Point:
+                    minimum = 8 << 30
+
+                class TimeSeries:
+                    data = [Point()]
+
+                class Item:
+                    timeseries = [TimeSeries()]
+
+                return SimpleNamespace(value=[Item()])
+
+    az = cloudapi.Azure({"product": "flexible-postgres", "id": "db1",
+                         "resource_group": "rg", "subscription": "sub"})
+    monkeypatch.setattr(az, "_monitoring", lambda: Monitor())
+    assert az.free_bytes() == 8 << 30
+    assert cloudapi.Azure.UNPROVED_ITEMS == {"free": "free.provider-metric"}
+
+
+def test_tencent_cloud_free_space_is_read_from_monitor(monkeypatch):
+    from migkit import cloudapi
+
+    class Monitor:
+        def GetMonitorData(self, req):
+            return {"DataPoints": [{"Values": [12 << 30]}]}
+
+    tc = cloudapi.Tencent({"product": "cdb", "id": "cdb-1",
+                          "region": "ap-guangzhou"})
+    monkeypatch.setattr(tc, "_monitoring", lambda: Monitor())
+    assert tc.free_bytes() == 12 << 30
+    assert cloudapi.Tencent.UNPROVED_ITEMS == {"free": "free.provider-metric"}
+
+
+def test_alibaba_cloud_free_space_is_read_from_cloud_monitor(monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from migkit import cloudapi
+
+    class Cms:
+        def describe_metric_last(self, req):
+            return SimpleNamespace(body=SimpleNamespace(
+                datapoints=json.dumps([{"Minimum": 15 << 30}])))
+
+    ali = cloudapi.Alibaba({"product": "rds", "id": "rm-1",
+                            "region": "cn-hangzhou"})
+    monkeypatch.setattr(ali, "_monitoring", lambda: Cms())
+    assert ali.free_bytes() == 15 << 30
+    assert cloudapi.Alibaba.UNPROVED_ITEMS == {"free": "free.provider-metric"}
+
+
+def test_huawei_cloud_free_space_is_read_from_ces(monkeypatch):
+    from migkit import cloudapi
+
+    class Ces:
+        def show_metric_data(self, **kw):
+            return {"datapoints": [{"min": 20 << 30}]}
+
+    hw = cloudapi.Huawei({"product": "rds", "id": "inst-1",
+                          "region": "cn-north-4"})
+    monkeypatch.setattr(hw, "_monitoring", lambda: Ces())
+    assert hw.free_bytes() == 20 << 30
+    assert cloudapi.Huawei.UNPROVED_ITEMS == {"free": "free.provider-metric"}
+
+
+def test_oracle_and_ibm_free_space_read(monkeypatch):
+    from types import SimpleNamespace
+    from migkit import cloudapi
+
+    class OciMon:
+        def summarize_metrics_data(self, *a, **kw):
+            return SimpleNamespace(data=[SimpleNamespace(
+                aggregated_datapoints=[SimpleNamespace(value=25 << 30)])])
+
+    ora = cloudapi.Oracle({"product": "mysql", "id": "ocid1",
+                           "region": "us-ashburn-1"})
+    monkeypatch.setattr(ora, "_monitoring", lambda: OciMon())
+    assert ora.free_bytes() == 25 << 30
+
+    class IbmMon:
+        def get_metric(self, id, metric):
+            return 30 << 30
+
+    ibm = cloudapi.Ibm({"product": "icd", "id": "crn1", "region": "us-south"})
+    monkeypatch.setattr(ibm, "_monitoring", lambda: IbmMon())
+    assert ibm.free_bytes() == 30 << 30
+
+
+def test_account_listing_beyond_aws_rds(monkeypatch):
+    from types import SimpleNamespace
+    from migkit import cloudapi
+
+    class GcpApi:
+        class instances:
+            @staticmethod
+            def list(**kw):
+                class Req:
+                    @staticmethod
+                    def execute():
+                        return {"items": [{
+                            "name": "sql1", "databaseVersion": "POSTGRES_15",
+                            "ipAddresses": [{"ipAddress": "10.0.0.1"}]}]}
+                return Req()
+
+    gcp = cloudapi.Gcp({"product": "cloudsql", "id": "sql1", "region": "r"})
+    monkeypatch.setattr(gcp, "api", lambda: GcpApi())
+    monkeypatch.setattr(gcp, "_project", lambda: "p")
+    assert gcp.endpoints() == [{
+        "id": "sql1", "engine": "POSTGRES_15", "host": "10.0.0.1",
+        "port": 5432}]
+
+    class AzureClient:
+        class servers:
+            @staticmethod
+            def list():
+                return [SimpleNamespace(
+                    name="pg1",
+                    fully_qualified_domain_name="pg1.postgres.database.azure.com")]
+
+    az = cloudapi.Azure({"product": "flexible-postgres", "id": "pg1",
+                         "resource_group": "rg", "subscription": "sub"})
+    monkeypatch.setattr(az, "client", lambda: AzureClient())
+    assert az.endpoints() == [{
+        "id": "pg1", "engine": "postgres",
+        "host": "pg1.postgres.database.azure.com", "port": 5432}]
+
+    tc = cloudapi.Tencent({"product": "cdb", "id": "cdb1", "region": "r"})
+    monkeypatch.setattr(tc, "_all", lambda *a, **k: [{
+        "InstanceId": "cdb1", "Vip": "10.0.0.2", "Vport": 3306,
+        "EngineVersion": "8.0"}])
+    assert tc.endpoints() == [{
+        "id": "cdb1", "engine": "8.0", "host": "10.0.0.2", "port": 3306}]
+
+
+def test_every_cloudapi_adapter_has_free_bytes_and_declares_unproved():
+    from migkit import capabilities as caps, cloudapi
+    assert "cloudapi.py" in caps.DECLARING
+    for who, cls in cloudapi.ADAPTERS.items():
+        assert hasattr(cls, "free_bytes")
+        assert callable(getattr(cls, "free_bytes"))
+        assert who in cloudapi.UNPROVED_ON
+        assert who in cloudapi.UNPROVED_ITEMS
+        assert getattr(cls, "UNPROVED_ITEMS") == {
+            "free": "free.provider-metric"}
+        why, cells = caps.UNPROVED_ELSEWHERE[who]
+        assert "free.provider-metric" in cells
+        assert why == cloudapi.UNPROVED_ON[who]
+

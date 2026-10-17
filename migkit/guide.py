@@ -225,6 +225,7 @@ def run(ask, say, path, force=False, env=None):
         left = found["left_out"]
         from .config import scope_patterns
         raw["exclude"] = scope_patterns(raw.get("exclude")) + left
+        raw.pop("include", None)
         say(f"  the task took {len(found['tables']) - len(left)} of the"
             f" source's {len(found['tables'])} tables; left out:"
             f" {', '.join(left[:8])}{' ...' if len(left) > 8 else ''}")
@@ -236,6 +237,11 @@ def run(ask, say, path, force=False, env=None):
     hop = build_hop(name, raw)
     written = plan(hop, found, goal, say)
     small = hopkeys.smallest(name, raw)
+    for side in ("source", "target"):
+        if addresses.is_address(raw.get(side)):
+            sch = raw[side].split("://", 1)[0]
+            if addresses.is_address(small.get(side)) and sch != small[side].split("://", 1)[0]:
+                small[side] = f"{sch}://{small[side].split('://', 1)[1]}"
     if goal == "copy":
         # what a hop with no goal does: said by leaving it out
         small.pop("goal", None)
@@ -429,7 +435,16 @@ def _size_words(sums):
 
 def imports_left_out(imported, facts):
     from . import imports
-    return imports.left_out(imported, list(facts))
+    left = imports.left_out(imported, list(facts))
+    if not left and not imported.include and imported.raw.get("include"):
+        from fnmatch import fnmatch
+        incl = imported.raw["include"]
+        for ident in facts:
+            ident = str(ident)
+            leaf = ident.rsplit(".", 1)[-1]
+            if not any(fnmatch(ident, p) or fnmatch(leaf, p) for p in incl):
+                left.append(ident)
+    return left
 
 
 #: how many tables' columns are read for the types that need care
@@ -453,6 +468,8 @@ def types_needing_care(hop, eng, dbs, canon):
                 return out
             for col, declared in src.neutral_columns("src", db, table):
                 cls, why = canon.comparable(s_name, declared)
+                if not why and s_name != d_name and cls == canon.INTERVAL:
+                    why = "interval not compared across engines"
                 if why:
                     out.append((table, col, declared,
                                 "migkit cannot compare it across the two"))

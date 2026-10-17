@@ -84,3 +84,104 @@ def test_list_only_gives_nothing_back_and_doctor_says_each_hold(
     lines = cli._holds_said("t", hop)
     assert len(lines) == 3
     assert sum("migkit leftovers t gives it back" in x for x in lines) == 2
+
+
+def test_a_setting_a_crashed_run_left_is_put_back_by_leftovers(
+        monkeypatch, tmp_path):
+    import json
+    hop = SimpleNamespace(name="t", databases=["a"],
+                          report_dir=lambda db=None: tmp_path)
+    monkeypatch.setattr(freeze, "server_state", lambda h, s: None)
+    monkeypatch.setattr(freeze, "state", lambda h, d, s: None)
+    settings_file = tmp_path / "target-settings.json"
+    entry = {"name": "max_allowed_packet", "old": 4194304, "new": 18874368,
+             "db": "a", "pid": 1234, "at": "2026-10-17 00:00:00"}
+    settings_file.write_text(json.dumps([entry]))
+
+    calls = []
+    eng = SimpleNamespace(set_target_setting=lambda n, v: calls.append((n, v)))
+    monkeypatch.setattr(cli, "get_hop", lambda name: hop)
+    monkeypatch.setattr(cli, "get_engine", lambda h: eng)
+
+    r = CliRunner().invoke(cli.main, ["leftovers", "t"])
+    assert r.exit_code == 0, r.output
+    assert calls == [("max_allowed_packet", 4194304)]
+    assert leftovers.settings_left(hop) == []
+    assert "put the target's max_allowed_packet back to 4194304" in r.output
+
+
+def test_a_setting_a_crashed_run_left_is_only_listed_with_list_flag(
+        monkeypatch, tmp_path):
+    import json
+    hop = SimpleNamespace(name="t", databases=["a"],
+                          report_dir=lambda db=None: tmp_path)
+    monkeypatch.setattr(freeze, "server_state", lambda h, s: None)
+    monkeypatch.setattr(freeze, "state", lambda h, d, s: None)
+    settings_file = tmp_path / "target-settings.json"
+    entry = {"name": "max_allowed_packet", "old": 4194304, "new": 18874368,
+             "db": "a", "pid": 1234, "at": "2026-10-17 00:00:00"}
+    settings_file.write_text(json.dumps([entry]))
+
+    calls = []
+    eng = SimpleNamespace(set_target_setting=lambda n, v: calls.append((n, v)))
+    monkeypatch.setattr(cli, "get_hop", lambda name: hop)
+    monkeypatch.setattr(cli, "get_engine", lambda h: eng)
+
+    r = CliRunner().invoke(cli.main, ["leftovers", "t", "--list"])
+    assert r.exit_code == 0, r.output
+    assert calls == []
+    assert leftovers.settings_left(hop) == [entry]
+    assert "the target's max_allowed_packet is 18874368 (was 4194304)" in r.output
+    assert "migkit leftovers t puts it back" in r.output
+
+
+def test_leftovers_with_db_flag_only_puts_back_matching_db_settings(
+        monkeypatch, tmp_path):
+    import json
+    hop = SimpleNamespace(name="t", databases=["a", "b"],
+                          report_dir=lambda db=None: tmp_path)
+    monkeypatch.setattr(freeze, "server_state", lambda h, s: None)
+    monkeypatch.setattr(freeze, "state", lambda h, d, s: None)
+    settings_file = tmp_path / "target-settings.json"
+    e_a = {"name": "max_allowed_packet", "old": 4194304, "new": 18874368,
+           "db": "a", "pid": 1234, "at": "2026-10-17 00:00:00"}
+    e_b = {"name": "innodb_buffer_pool_size", "old": 1048576, "new": 2097152,
+           "db": "b", "pid": 1234, "at": "2026-10-17 00:00:00"}
+    settings_file.write_text(json.dumps([e_a, e_b]))
+
+    calls = []
+    eng = SimpleNamespace(set_target_setting=lambda n, v: calls.append((n, v)))
+    monkeypatch.setattr(cli, "get_hop", lambda name: hop)
+    monkeypatch.setattr(cli, "get_engine", lambda h: eng)
+
+    r = CliRunner().invoke(cli.main, ["leftovers", "t", "--db", "a"])
+    assert r.exit_code == 0, r.output
+    assert calls == [("max_allowed_packet", 4194304)]
+    remaining = leftovers.settings_left(hop)
+    assert len(remaining) == 1 and remaining[0]["name"] == "innodb_buffer_pool_size"
+
+
+def test_leftovers_when_server_refuses_putting_back_setting(
+        monkeypatch, tmp_path):
+    import json
+    hop = SimpleNamespace(name="t", databases=["a"],
+                          report_dir=lambda db=None: tmp_path)
+    monkeypatch.setattr(freeze, "server_state", lambda h, s: None)
+    monkeypatch.setattr(freeze, "state", lambda h, d, s: None)
+    settings_file = tmp_path / "target-settings.json"
+    entry = {"name": "max_allowed_packet", "old": 4194304, "new": 18874368,
+             "db": "a", "pid": 1234, "at": "2026-10-17 00:00:00"}
+    settings_file.write_text(json.dumps([entry]))
+
+    def _fail(n, v):
+        raise RuntimeError("variable is read only")
+
+    eng = SimpleNamespace(set_target_setting=_fail)
+    monkeypatch.setattr(cli, "get_hop", lambda name: hop)
+    monkeypatch.setattr(cli, "get_engine", lambda h: eng)
+
+    r = CliRunner().invoke(cli.main, ["leftovers", "t"])
+    assert r.exit_code == 0, r.output
+    assert "it could not be put back to 4194304" in r.output
+    assert "migkit leftovers tries again" in r.output
+    assert leftovers.settings_left(hop) == [entry]

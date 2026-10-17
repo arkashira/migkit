@@ -22,7 +22,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - [`docs/agents/INVENTORY.md`](INVENTORY.md) - every file of `migkit/` and `tools/`: its responsibility package, owner domain, size, importers, the packages it reaches, the programs it wraps and the tests that reach it
 - [`docs/agents/LAYERS.md`](LAYERS.md) - the layering rule (a package imports its own rank and below) and every upward import still listed, with its reason
 
-## `migkit/` (190 modules)
+## `migkit/` (191 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/addresses.py` - A hop from two addresses (backlog R21).
@@ -104,6 +104,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/huawei_sdk.py` - Huawei Cloud's API for migkit, run in the environment its SDK lives in.
 - `migkit/imports.py` - A hop from another tool's task (backlog R21: switching costs nothing). Classes: Imported.
 - `migkit/indexes.py` - Getting the indexes out of the way of a bulk load, and putting them back. Classes: NotRebuilt, IndexWindow, NotPutBack, ForeignKeyWindow, DeferredIndexLifecycle.
+- `migkit/init.py` - (no docstring)
 - `migkit/integrations.py` - migkit inside the team's tools: a task for Airflow and Dagster, a step for GitHub Actions and Argo Workflows, each a thin wrapper over migki
 - `migkit/interlock.py` - The interlock on the target (backlog R23, 3): before a step writes to a target - a copy, a stream, a repair, a cutover, users, a converted s
 - `migkit/intervals.py` - An interval as the three parts every engine that has one keeps apart: months, days, and a time of nanoseconds. Classes: Interval.

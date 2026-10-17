@@ -34,10 +34,10 @@ def lane(sandbox):
     yield sandbox
     for pdb in (SRC, DST):
         ora("begin for s in (select sid, serial# from v$session where"
-            " username = 'MIGKIT') loop execute immediate 'alter system"
-            " kill session ''' || s.sid || ',' || s.serial# || '''"
-            " immediate'; end loop; end;", pdb=pdb, user="sys",
-            sysdba=True)
+            " username in ('MIGKIT', 'APP')) loop begin execute immediate"
+            " 'alter system kill session ''' || s.sid || ',' || s.serial#"
+            " || ''' immediate'; exception when others then null; end;"
+            " end loop; end;", pdb=pdb, user="sys", sysdba=True)
 
 
 def _seen():

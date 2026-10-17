@@ -436,6 +436,21 @@ class Proc:
     def returncode(self):
         return self.popen.returncode
 
+    @property
+    def stdout(self):
+        return self.popen.stdout
+
+    @property
+    def stderr(self):
+        return self.popen.stderr
+
+    @property
+    def stdin(self):
+        return self.popen.stdin
+
+    def kill(self):
+        self.stop()
+
     def stop(self, grace=GRACE):
         """Ask the program's whole group to end, then make it: SIGTERM,
         `grace` seconds, SIGKILL. A container is removed as well - its

@@ -76,7 +76,7 @@ def _digest_of(m, i):
 
 
 def manifest(kind, volume, snapshot, block_size, read_block, blocks,
-             position, parent=None, store=None):
+             position=None, parent=None, store=None, read_position=None):
     """The manifest of `snapshot` of `volume`: every one of its `blocks`
     blocks of `block_size` bytes read through `read_block(i)` and digested,
     with the source's `position` recorded at the snapshot and the
@@ -86,6 +86,10 @@ def manifest(kind, volume, snapshot, block_size, read_block, blocks,
     if kind not in KINDS:
         raise Refused(f"a {kind} snapshot is not one a seed reads: "
                       + ", ".join(sorted(KINDS)))
+    if callable(position):
+        position = position()
+    elif not position and callable(read_position):
+        position = read_position()
     if not position:
         raise Refused(f"snapshot {snapshot} of {volume} records no position"
                       " of the source: the follow could not start from it,"
@@ -163,8 +167,28 @@ def _state(path, snap):
     return got
 
 
+def _block_io(fn_or_path, block_size, mode="rb"):
+    if callable(fn_or_path):
+        return fn_or_path
+    if fn_or_path:
+        from pathlib import Path
+        p = Path(fn_or_path)
+        if mode == "write":
+            def write_b(i, data):
+                with open(p, "r+b") as f:
+                    f.seek(int(i) * int(block_size))
+                    f.write(data)
+            return write_b
+        def read_b(i):
+            with open(p, "rb") as f:
+                f.seek(int(i) * int(block_size))
+                return f.read(int(block_size))
+        return read_b
+    return None
+
+
 def carry(snap, base, read_block, write_block, read_target, state_path,
-          listed=None):
+          listed=None, read_position=None):
     """The changed blocks of `snap` written over a target holding `base`:
     each read through `read_block(i)` and held to its digest, written
     through `write_block(i, data)`, read back through `read_target(i)` and
@@ -173,12 +197,20 @@ def carry(snap, base, read_block, write_block, read_target, state_path,
     snapshot's digests, the unchanged ones too. The `Carried`."""
     from pathlib import Path
     state_path = Path(state_path)
+    if not snap.get("position") and callable(read_position):
+        snap["position"] = read_position()
+    if not callable(read_block):
+        read_block = _block_io(read_block or snap.get("volume"), snap["block_size"])
+    if not callable(write_block):
+        write_block = _block_io(write_block or (base and base.get("volume")), snap["block_size"], mode="write")
+    if not callable(read_target):
+        read_target = _block_io(read_target or (base and base.get("volume")), snap["block_size"])
     todo = changed(snap, base, listed)
     state = _state(state_path, snap)
     done = set(state["done"])
     out = Carried(resumed=len(done & set(todo)),
                   unchanged=snap["blocks"] - len(todo),
-                  position=snap["position"])
+                  position=snap.get("position") or "")
     for i in todo:
         if i in done:
             continue

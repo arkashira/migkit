@@ -347,6 +347,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: the hop asks to mask <...>. Nothing has been copied: fix the rule, or drop it to copy the values as they are
 
+* <...>.<...>: the hop's transform cannot run: <...>. Nothing has been copied: fix the rule, or drop it to copy the values as they are
+
 * <...> would be emptied anyway: the table references one of the tables this move replaces, and emptying a table empties everything pointing at it. the hop excludes it, which says its rows are written here and not carried, so they cannot be put back afterwards. either it is not target-owned after all - take it out of the hop's exclude list and let the move carry it - or the reference has to go before the move can run. | <...> the hop carries only the rows its filter selects into it, and the rows outside the filter are the target's own, so they cannot be put back afterwards. Either the filter goes, or the reference has to go before the move can run. | <...> the source has no such table, so the move does not carry it and its rows are the target's own, which cannot be put back afterwards. Either the reference goes before the move can run, or the hop leaves out the table it points at. | <...>
 
 * <...> ... | <...>: the hop carries only some of their changes (mapping.ops), so the rows the target holds of them are kept as they are - a row the source deleted, or changed, stays as it was there - and emptying them for the load would take those rows. Nothing has been emptied. Move them while the target holds none of their rows, or follow only their changes (`migkit move --mode cdc`)
@@ -1421,6 +1423,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * TiDB keeps no binlog: its changes are read from the Kafka topic TiCDC publishes them to. Say where in the source's options - changes: {servers: host:9092, topic: <topic>, format: canal-json} - with a changefeed made with enable-tidb-extension=true
 
+* format: debezium - TiCDC's Debezium output carries no watermarks: use canal-json, simple, open-protocol or avro
+
 * format: <...> - TiCDC's changes are read as canal-json, simple, open-protocol or avro
 
 * <...>: <...> <...> no primary key, and a change TiCDC publishes for such a table names its hidden row id, which no other server holds: give each a primary key, or leave it out of the hop and move it with a copy
@@ -2359,7 +2363,11 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * sql `<...>` names <...> column(s): it names the column it is written on, and only that one
 
+* sql `<...>` names no column(s)
+
 * sql `<...>` calls <...>: it reads outside the batch | its value is not the same on another run, so nothing could be proved of it
+
+* sql `<...>` names column(s) not in table: <...>
 
 * the transform <...> cannot run over these values: <...>. Nothing was written of them
 

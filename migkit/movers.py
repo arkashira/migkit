@@ -538,6 +538,14 @@ def refuse_unmasked(hop, db, via):
             + "; ".join(f"{n} ({why})" for n, why in refused)
             + ". Nothing has been copied: fix the rule, or drop it to copy"
               " the values as they are")
+    if hasattr(eng, "neutral_tables"):
+        for t in eng.neutral_tables("src", db):
+            choice = place_transforms(hop, db, t, eng=eng)
+            if choice and choice.path is None:
+                raise SystemExit(
+                    f"{db}.{t}: the hop's transform cannot run: {choice.reason}. "
+                    "Nothing has been copied: fix the rule, or drop it to copy"
+                    " the values as they are")
 
 
 def supported(engine, via):
@@ -4019,6 +4027,13 @@ def mask_plan(hop, db, rules, keys, columns=None, text=None):
     refused = mask_refused(hop, rules, keys, columns, text)
     bad = {n.rpartition(".")[0] for n, _ in refused}
     for table, cols in sorted(rules.items()):
+        sql_cols = {c: r for c, r in cols.items()
+                    if (r[0] if isinstance(r, tuple) else str(r).split()[0]) == "sql"}
+        if sql_cols and table not in bad:
+            choice = place_transforms(hop, db, table)
+            if choice and choice.path is None:
+                refused.append((table, f"transform cannot run: {choice.reason}"))
+                bad.add(table)
         if table in bad or not dump_masks(cols):
             continue
         sections[table] = [
@@ -4026,6 +4041,56 @@ def mask_plan(hop, db, rules, keys, columns=None, text=None):
             else f"`{column}` = constant '{arg}'"
             for column, (kind, arg) in sorted(cols.items())]
     return sections, refused
+
+
+def place_transforms(hop, db, table, sample=None, rows=None, copy_s=None,
+                     eng=None, log=None, target_runner=None, columns=None):
+    """The `decide.transform_place` `Choice` for `table`'s transforms before copy."""
+    from . import transforms
+    masks = dict(hop.masks(db, table) if callable(getattr(hop, "masks", None)) else {})
+    if not masks and hasattr(hop, "options"):
+        opts = hop.options or {}
+        tr = opts.get("transform") or {}
+        if isinstance(tr, dict):
+            for k, v in tr.items():
+                if k == "on_target" or "." not in str(k):
+                    continue
+                tbl, _, col = str(k).rpartition(".")
+                if tbl in (table, f"public.{table}", f"dbo.{table}"):
+                    masks[col] = f"sql {v}"
+    if not columns and eng and hasattr(eng, "neutral_columns"):
+        try:
+            cols = eng.neutral_columns("src", db, table)
+            columns = [c[0] if isinstance(c, (list, tuple)) else c for c in cols]
+        except Exception:
+            pass
+    sql_rules = []
+    for i, (col, r) in enumerate(masks.items()):
+        parsed = transforms.parse(r, whole_row=True) if isinstance(r, str) else r
+        if parsed[0] == "sql":
+            idx = columns.index(col) if columns and col in columns else i
+            sql_rules.append((idx, r, f'"{col}"'))
+    if not sql_rules:
+        return None
+    dialect = getattr(eng, "CANON_ENGINE", hop.engine) if eng else hop.engine
+    auth = transforms.authorized(hop)
+    facts = eng.table_facts("src", db).get(table, {}) if eng and hasattr(eng, "table_facts") else {}
+    rows = rows or facts.get("rows") or len(sample or ()) or 0
+    copy_s = copy_s or (rows / 1000.0 if rows else 1.0)
+    choice = transforms.place(sql_rules, sample or (), rows, copy_s, dialect,
+                              auth, target_runner=target_runner)
+    if log:
+        log(f"transform placement: {table} -> {choice.path} ({choice.reason})")
+    return choice
+
+
+def rewrite_target(hop, db, table, rules=None, eng=None, log=None):
+    """The on-target rewrite for `table` after the copy."""
+    from . import transforms
+    rules = rules or (hop.masks(db, table) if callable(getattr(hop, "masks", None)) else {})
+    dialect = getattr(eng, "CANON_ENGINE", hop.engine) if eng else hop.engine
+    dst = getattr(eng, "dst_engine", eng) if eng else None
+    return transforms.rewrite(dst, table, rules, dialect, db=db, log=log)
 
 
 def masked_held(eng, db, tables):
@@ -5984,7 +6049,8 @@ def _builds_beside_the_copy(hop, db, workers, windowed, log=None):
         if log:
             log(f"index builds: {got.said}")
         from . import legs
-        legs.record_schedule(hop, got, db)
+        relay = legs.relay_choice(hop, db)
+        legs.record_schedule(hop, got, db, relay=relay)
         return got
     if log:
         why = "; ".join(w for _, w in got.refused) or got.said

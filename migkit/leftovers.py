@@ -422,7 +422,10 @@ def dumps(hop, dbs=None, now=None):
             bases.append(pathlib.Path(hop.report_dir(d)))
         except Exception:  # noqa: BLE001 - no such directory: no dump in it
             continue
-    where = evidence.scratch_of(hop)
+    try:
+        where = evidence.scratch_of(hop)
+    except (AttributeError, Exception):
+        where = None
     if where:
         top = pathlib.Path(where).expanduser() / str(hop.name)
         if names:
@@ -486,16 +489,19 @@ def _settings_file(hop):
     return hop.report_dir() / "target-settings.json"
 
 
-def settings_left(hop):
+def settings_left(hop, dbs=None):
     """[{name, old, new, db, pid, at}] of every setting a run changed on
     the target and has not put back - a run killed before its end leaves
     its entry (`settings_held`)."""
     import json
     try:
         got = json.loads(_settings_file(hop).read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError):
         return []
-    return [e for e in got if isinstance(e, dict) and e.get("name")]
+    entries = [e for e in got if isinstance(e, dict) and e.get("name")]
+    if dbs:
+        return [e for e in entries if not e.get("db") or e["db"] in dbs]
+    return entries
 
 
 def _keep_settings(hop, entries):
@@ -513,7 +519,7 @@ def _keep_settings(hop, entries):
     os.replace(tmp, path)
 
 
-def put_back_settings(hop, eng, say=None):
+def put_back_settings(hop, eng, say=None, dbs=None):
     """Every setting `settings_left` lists put back on the target to the
     value it had before the run, each entry dropped only once the server
     took it back; one the server would not take back is kept and said, so
@@ -521,6 +527,9 @@ def put_back_settings(hop, eng, say=None):
     back."""
     back, kept = [], []
     for e in settings_left(hop):
+        if dbs and e.get("db") and e["db"] not in dbs:
+            kept.append(e)
+            continue
         try:
             eng.set_target_setting(e["name"], e["old"])
         except Exception as x:  # noqa: BLE001 - kept for the next try

@@ -228,3 +228,78 @@ def test_the_mining_places_rank_by_the_lag_measured_at_each(monkeypatch):
         assert miner.place(eng, "src", "app").path == miner.INSTANCE
     finally:
         miner._LAGS.clear()
+
+
+def test_standby_gate_checks_role_mode_and_dbid():
+    class DummyCursor:
+        def __init__(self, row):
+            self.row = row
+
+        def execute(self, sql):
+            return self
+
+        def fetchone(self):
+            return self.row
+
+    class DummyConn:
+        def __init__(self, row):
+            self.cur = DummyCursor(row)
+            self.closed = False
+
+        def cursor(self):
+            return self.cur
+
+        def close(self):
+            self.closed = True
+
+    class DummyEng:
+        def _rows(self, side, db, sql):
+            return [[123456]]
+
+    eng = DummyEng()
+    # not a physical standby
+    conn = DummyConn(["PRIMARY", "READ WRITE", 123456, 1000])
+    with pytest.raises(SystemExit, match="not a physical standby"):
+        miner.standby_gate(eng, "src", "app", conn)
+    # not open read only
+    conn = DummyConn(["PHYSICAL STANDBY", "MOUNTED", 123456, 1000])
+    with pytest.raises(SystemExit, match="not open read-only"):
+        miner.standby_gate(eng, "src", "app", conn)
+    # different DBID
+    conn = DummyConn(["PHYSICAL STANDBY", "READ ONLY WITH APPLY", 999999, 1000])
+    with pytest.raises(SystemExit, match="standby of another database"):
+        miner.standby_gate(eng, "src", "app", conn)
+    # valid active data guard
+    conn = DummyConn(["PHYSICAL STANDBY", "READ ONLY WITH APPLY", 123456, 1050])
+    assert miner.standby_gate(eng, "src", "app", conn) == 1050
+
+
+def test_miner_open_cleans_up_connection_when_standby_gate_fails(monkeypatch):
+    class DummyCursor:
+        def execute(self, sql):
+            return self
+
+        def fetchone(self):
+            return ["PRIMARY", "READ WRITE", 123, 100]
+
+    class DummyConn:
+        def __init__(self):
+            self.closed = False
+
+        def cursor(self):
+            return DummyCursor()
+
+        def close(self):
+            self.closed = True
+
+    eng = _eng({"mine_standby": "10.0.0.8:1521"})
+    conn = DummyConn()
+    eng._dedicated = lambda *a, **k: conn
+    eng._dsn = lambda *a, **k: "10.0.0.8:1521"
+    eng._rows = lambda *a, **k: [[123]]
+    m = miner.Miner(eng, "src", "app")
+    with pytest.raises(SystemExit):
+        m._open()
+    assert conn.closed is True
+    assert m.conn is None
+

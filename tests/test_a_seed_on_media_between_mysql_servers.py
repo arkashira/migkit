@@ -78,6 +78,7 @@ def pair():
                  " all select n + 1 from g where n < 12000) select n,"
                  " concat('item-', n), n % 7, timestamp('2026-10-01') +"
                  " interval n minute, unhex(md5(n)), n / 3 from g")
+        _my(SRC, "analyze table orders")
         yield
     finally:
         subprocess.run(["docker", "rm", "-f", "-v", SRC, DST],

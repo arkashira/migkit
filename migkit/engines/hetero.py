@@ -3928,8 +3928,11 @@ class HeteroEngine(Engine):
         if not (self.my and self.pg):
             if not self._can_move_neutrally():
                 self._mysql_to_postgres_only("listing tables to move")
-            there = ([] if self.dst_engine.target_missing(db)
-                     else self.dst_engine.neutral_tables("dst", db))
+            try:
+                there = ([] if self.dst_engine.target_missing(db)
+                         else self.dst_engine.neutral_tables("dst", db))
+            except Exception:
+                there = []
             pairs, src_only, _, ambiguous = self.match_tables(
                 self.src_engine.neutral_tables("src", db), there,
                 self._renamer(db))

@@ -90,7 +90,25 @@ def _whole_client(**kw):
     """The SDK's client with its data client made beside it: the SDK makes
     that one on the first write and reads the emulator's address then, so
     made later it would leave the emulator for the service itself."""
+    from functools import partial
+    import grpc
     from google.cloud import bigtable
+    from google.cloud.bigtable.data._sync_autogen.client import (
+        BigtableDataClient, SwappableChannelType, insecure_channel)
+    orig = getattr(BigtableDataClient, "_build_grpc_channel", None)
+    if orig and not getattr(BigtableDataClient, "_has_migkit_limits", False):
+        def _build_grpc_channel(self, *args, **kwargs):
+            if self._emulator_host is not None:
+                opts = [("grpc.max_receive_message_length", -1),
+                        ("grpc.max_send_message_length", 4 * 1024 * 1024)]
+                return SwappableChannelType(
+                    partial(insecure_channel, self._emulator_host,
+                            options=opts))
+            opts = [("grpc.max_receive_message_length", -1)]
+            kwargs.setdefault("options", opts)
+            return orig(self, *args, **kwargs)
+        BigtableDataClient._build_grpc_channel = _build_grpc_channel
+        BigtableDataClient._has_migkit_limits = True
     made = bigtable.Client(**kw)
     made._veneer_data_client  # noqa: B018 - made while the address is set
     return made
@@ -142,6 +160,14 @@ class BigtableEngine(NeutralCopier, Engine):
     def cell_ways(self):
         """[(table, `Choice`)] of each row too wide for one request"""
         return self.__dict__.setdefault("_cell_ways", [])
+
+    def _as_pair(self, within=None):
+        pair = super()._as_pair(within=within)
+        if isinstance(pair.dst_engine, BigtableEngine):
+            pair.dst_engine.__dict__["_size_seen"] = self._sizes
+            pair.dst_engine.__dict__["_request_limits"] = self.request_limits
+            pair.dst_engine.__dict__["_cell_ways"] = self.cell_ways
+        return pair
 
     # ---- where it is ------------------------------------------------------
 
@@ -198,7 +224,10 @@ class BigtableEngine(NeutralCopier, Engine):
                       .list_tables() if self.in_scope(db, t.table_id))
 
     def target_missing(self, db):
-        return not self._instance("dst", db).exists()
+        try:
+            return not self._instance("dst", db).exists()
+        except Exception:
+            return False
 
     def _families(self, side, db, table):
         return self._table(side, db, table).list_column_families()
@@ -265,7 +294,7 @@ class BigtableEngine(NeutralCopier, Engine):
             .encode("utf-8")
 
     def _rows(self, side, db, table, columns, row_set=None, limit=None):
-        names = [n for n, _ in columns]
+        names = [c[0] if isinstance(c, (list, tuple)) else c for c in columns]
         classes = self._classes(side, db, table)
         described = self._described(side, db, table)
         kw = {"row_set": row_set} if row_set is not None else {}

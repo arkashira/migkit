@@ -45,8 +45,10 @@ GC_PASSED = (9006,)
 #: built on fakes; owed a run on a TiDB cluster and its change topics (ER4)
 UNPROVED_ON = ("built; not run on a real TiDB cluster, only on its"
                " single-node container and on fakes: the accounts, the"
-               " bulk load, the snapshot's mark and TiCDC's open-protocol"
-               " and Avro messages")
+               " bulk load, the snapshot's mark, TiCDC's open-protocol"
+               " and Avro messages, binary keys on the canal-json way only,"
+               " and the service details unverified (IMPORT INTO wildcard,"
+               " --ignore-fields, Avro watermark framing, DSQL ANALYZE)")
 UNPROVED_ITEMS = (
     "tidb:tail.quiet "
     "verify.value.one-plan verify.structure.collection-options "
@@ -510,7 +512,12 @@ class TiDBEngine(MySQLEngine):
                     " changefeed made with enable-tidb-extension=true")
             # the protocol is the topic's first message's (`TicdcAny`)
             # where the hop names none
-            env = changetopic.envelope(spec.get("format", "ticdc"))
+            fmt = spec.get("format", "ticdc")
+            if fmt == "debezium":
+                raise SystemExit("format: debezium - TiCDC's Debezium output"
+                                 " carries no watermarks: use canal-json, simple,"
+                                 " open-protocol or avro")
+            env = changetopic.envelope(fmt)
             if env.name not in ("canal-json", "simple", "open-protocol",
                                 "avro", "ticdc"):
                 raise SystemExit(f"format: {env.name} - TiCDC's changes are"
@@ -518,10 +525,8 @@ class TiDBEngine(MySQLEngine):
                                  " or avro")
             if hasattr(env, "registry"):
                 env.registry = spec.get("registry")
-            # how each writes a binary key: canal-json a character a byte,
-            # the simple protocol as JSON writes bytes (base64)
-            self.__dict__["_binary"] = ("base64" if env.name == "simple"
-                                        else "latin-1")
+            self.__dict__["_binary"] = ("latin-1" if env.name == "canal-json"
+                                        else "base64")
             held[db] = changetopic.Follower(
                 env, changetopic.KafkaLanes(spec, f"{self.hop.name}-changes"),
                 name=lambda row, db=db: self._named(db, row),
@@ -636,9 +641,23 @@ class TiDBEngine(MySQLEngine):
                 try:
                     cur.execute("set @@tidb_snapshot = %s", (str(version),))
                 except Exception as e:  # noqa: BLE001 - classified here
-                    if getattr(e, "args", [None])[0] not in GC_PASSED:
-                        raise
-                    at_fence = False
+                    code = getattr(e, "args", [None])[0]
+                    if code == 1105 and "tikv_gc_safe_point" in str(e):
+                        try:
+                            cur.execute(
+                                "insert ignore into mysql.tidb values "
+                                "('tikv_gc_safe_point', "
+                                "'20000101-00:00:00 +0000', 'safe point')")
+                            conn.commit()
+                            cur.execute("set @@tidb_snapshot = %s",
+                                        (str(version),))
+                            code = None
+                        except Exception:
+                            pass
+                    if code is not None:
+                        if code not in GC_PASSED:
+                            raise
+                        at_fence = False
                 where = "(" + ", ".join(f"`{k}`" for k in key) + ") in ("
                 from .. import decide
                 at_once = self.batch_size(decide.BY_KEY, len(key))
@@ -778,9 +797,11 @@ class TiDBEngine(MySQLEngine):
                                   f" {str(e).splitlines()[0][:90]}",
                                   category="identity.sequence-parity"))
                 continue
-            nxt = next((int(r[3]) for r in got
-                        if str(r[2]).lower() == str(col).lower()
-                        and str(r[4]).upper() == "AUTO_INCREMENT"), None)
+            nxt = max((int(r[3]) for r in got
+                       if str(r[2]).lower() == str(col).lower()
+                       and str(r[4]).upper() in ("AUTO_INCREMENT",
+                                                 "_TIDB_ROWID")),
+                      default=None)
             top = self._q("dst", f"select max(`{col}`) from"
                                  f" `{dst}`.`{t}`")[0][0]
             if nxt is not None and top is not None and nxt <= int(top):

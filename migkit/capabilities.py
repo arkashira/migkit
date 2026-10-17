@@ -2145,7 +2145,7 @@ DEPTH_GAPS = {
     },
     "tail.readded": {
         **_each(NOT_YET, "P0-PARITY.tail",
-                "postgres redis clickhouse "
+                "redis clickhouse "
                 "db2 db2i ase opensearch cassandra redshift "
                 "iceberg delta cockroachdb dsql couchbase "
                 "sapodp saas"),
