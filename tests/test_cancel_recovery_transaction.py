@@ -9,7 +9,19 @@ from migkit.cancel_recovery import (
     SnapshotTxStore,
     TxValidationError,
     TxStateError,
+    decide_cancel_recovery,
 )
+from migkit import lease
+import tests.rung_branches
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("cancel_recovery", "cancel_recovery_rungs", "commit_active_transaction", "holds"),
+    ("cancel_recovery", "cancel_recovery_rungs", "commit_active_transaction", "refuses"),
+    ("cancel_recovery", "cancel_recovery_rungs", "rollback_owned_work_and_cancel", "holds"),
+    ("cancel_recovery", "cancel_recovery_rungs", "rollback_owned_work_and_cancel", "refuses"),
+    ("cancel_recovery", "cancel_recovery_rungs", "quarantine_and_recover_stranded", "holds"),
+]
 
 
 def test_transactional_lifecycle_commit():
@@ -395,4 +407,45 @@ def test_diagnostics_filtering_by_phase():
     assert all(d.phase == "INITIALIZATION" for d in init_diags)
     assert len(cancel_diags) >= 1
     assert all(d.phase == "CANCELLATION" for d in cancel_diags)
+
+
+def test_cancel_recovery_uses_lease_term(monkeypatch):
+    monkeypatch.setenv("MIGKIT_LEASE_SECONDS", "45")
+    store = SnapshotTxStore()
+    tx = store.begin_tx("tx_lease_term", "items", ("id",))
+    assert tx.lease_timeout == 45.0
+    assert tx.lease_timeout == lease.term()
+
+
+def test_cancel_recovery_rungs_under_watched():
+    with watched() as seen:
+        # 1. commit_active_transaction holds
+        f1 = {
+            "is_active": True,
+            "cancel_requested": False,
+            "lease_expired": False,
+            "can_rollback": True,
+        }
+        c1 = decide_cancel_recovery(f1)
+        assert c1.rung.name == "commit_active_transaction"
+
+        # 2. commit_active_transaction refuses, rollback_owned_work_and_cancel holds
+        f2 = {
+            "is_active": True,
+            "cancel_requested": True,
+            "lease_expired": False,
+            "can_rollback": True,
+        }
+        c2 = decide_cancel_recovery(f2)
+        assert c2.rung.name == "rollback_owned_work_and_cancel"
+
+        # 3. rollback_owned_work_and_cancel refuses, quarantine_and_recover_stranded holds
+        f3 = {
+            "is_active": False,
+            "cancel_requested": False,
+            "lease_expired": True,
+            "can_rollback": False,
+        }
+        c3 = decide_cancel_recovery(f3)
+        assert c3.rung.name == "quarantine_and_recover_stranded"
 

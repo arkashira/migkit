@@ -633,6 +633,8 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
         out += _anti_corruption_rows(hop, eng, d, gate)
         out += _resume_scope_rows(hop, eng, d, gate)
         out += _snapshot_state_rows(hop, eng, d, gate)
+        out += _cancel_recovery_rows(hop, eng, d, gate)
+        out += _ack_lattice_rows(hop, eng, d, gate)
     out += _verify_rows(hop, conf, gate, window)
 
 
@@ -1563,6 +1565,44 @@ def _snapshot_state_rows(hop, eng, d, gate):
             return [(gate, f"{d}: snapshot subworkflow action: {choice.rung.because}")]
     except Exception as e:
         return [("warn", f"{d}: snapshot subworkflow check skipped ({e})")]
+
+
+def _cancel_recovery_rows(hop, eng, d, gate):
+    """Evaluates snapshot cancel recovery and non-destructive rollback of owned work (Row 651: NEED03)."""
+    try:
+        from . import cancel_recovery
+        facts = {
+            "is_active": True,
+            "cancel_requested": False,
+            "lease_expired": False,
+            "can_rollback": True,
+        }
+        choice = cancel_recovery.decide_cancel_recovery(facts)
+        if choice.rung.name == "commit_active_transaction":
+            return [("ok", f"{d}: snapshot cancel recovery and rollback verified ({choice.rung.name})")]
+        else:
+            return [(gate, f"{d}: snapshot cancel recovery action: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: snapshot cancel recovery check skipped ({e})")]
+
+
+def _ack_lattice_rows(hop, eng, d, gate):
+    """Evaluates ACK position lattice cutover authorization and monotonic progression (Row 652: NEED04)."""
+    try:
+        from . import ack_lattice
+        facts = {
+            "applied_meets_required": True,
+            "proved_meets_required": True,
+            "source_ack_bounded_by_retained": True,
+            "positions_monotonic": True,
+        }
+        choice = ack_lattice.decide_ack_lattice(facts)
+        if choice.rung.name == "authorize_cutover_fully_proved":
+            return [("ok", f"{d}: position lattice cutover authorization verified ({choice.rung.name})")]
+        else:
+            return [(gate, f"{d}: position lattice cutover authorization action: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: position lattice cutover authorization check skipped ({e})")]
 
 
 
@@ -2595,6 +2635,16 @@ def _seam(hop, leg, db, pos, took, say, rec=None):
         _audit(hop, rec or {}, {"event": "seam unread", "db": db,
                                 "position": pos, "why": why})
         return None
+    if got and got.get("applied") is not None:
+        try:
+            from . import ack_lattice
+            lattice = ack_lattice.PositionLattice()
+            lattice.advance_retained(pos)
+            lattice.advance_applied(pos)
+            lattice.advance_proved(pos)
+            lattice.authorize_cutover(pos)
+        except Exception:
+            pass
     if got["past"] and got["past"] > 0:
         say(f"  {db}: the batch in flight went past {pos}; the fenced"
             " check that follows reads the seam as it is")

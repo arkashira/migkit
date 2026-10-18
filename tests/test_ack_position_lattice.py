@@ -17,7 +17,18 @@ from migkit.ack_lattice import (
     DurableAckPipeline,
     normalize_position,
     format_lsn,
+    decide_ack_lattice,
 )
+import tests.rung_branches
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("ack_lattice", "ack_lattice_rungs", "authorize_cutover_fully_proved", "holds"),
+    ("ack_lattice", "ack_lattice_rungs", "authorize_cutover_fully_proved", "refuses"),
+    ("ack_lattice", "ack_lattice_rungs", "allow_pipeline_drain_progression", "holds"),
+    ("ack_lattice", "ack_lattice_rungs", "allow_pipeline_drain_progression", "refuses"),
+    ("ack_lattice", "ack_lattice_rungs", "refuse_cutover_unproved_or_unapplied", "holds"),
+]
 
 
 def test_pipeline_stage_ordering():
@@ -328,3 +339,36 @@ def test_dict_roundtrip_and_summary():
     assert "applied=800" in summary
     assert "proved=700" in summary
     assert "ack=900" in summary
+
+
+def test_ack_lattice_rungs_under_watched():
+    with watched() as seen:
+        # 1. authorize_cutover_fully_proved holds
+        f1 = {
+            "applied_meets_required": True,
+            "proved_meets_required": True,
+            "source_ack_bounded_by_retained": True,
+            "positions_monotonic": True,
+        }
+        c1 = decide_ack_lattice(f1)
+        assert c1.rung.name == "authorize_cutover_fully_proved"
+
+        # 2. authorize_cutover_fully_proved refuses, allow_pipeline_drain_progression holds
+        f2 = {
+            "applied_meets_required": False,
+            "proved_meets_required": False,
+            "source_ack_bounded_by_retained": True,
+            "positions_monotonic": True,
+        }
+        c2 = decide_ack_lattice(f2)
+        assert c2.rung.name == "allow_pipeline_drain_progression"
+
+        # 3. allow_pipeline_drain_progression refuses, refuse_cutover_unproved_or_unapplied holds
+        f3 = {
+            "applied_meets_required": False,
+            "proved_meets_required": False,
+            "source_ack_bounded_by_retained": False,
+            "positions_monotonic": False,
+        }
+        c3 = decide_ack_lattice(f3)
+        assert c3.rung.name == "refuse_cutover_unproved_or_unapplied"

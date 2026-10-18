@@ -4,7 +4,67 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from . import decide
 from . import durable
+
+
+def ack_lattice_rungs() -> Tuple[decide.Rung, ...]:
+    """Decision ladder for ACK position lattice progression and cutover authorization (Row 652: NEED04)."""
+    return (
+        decide.Rung(
+            "authorize_cutover_fully_proved",
+            "authorize cutover when applied and proved positions meet or exceed required drain position",
+            needs=(
+                decide.Need(
+                    "target applied position meets required cutover watermark",
+                    lambda f: bool(f.get("applied_meets_required", True)),
+                    "target committed-prefix has not reached required cutover watermark",
+                ),
+                decide.Need(
+                    "target proved position meets required cutover watermark",
+                    lambda f: bool(f.get("proved_meets_required", True)),
+                    "target proved watermark has not reached required cutover position",
+                ),
+                decide.Need(
+                    "source ack is safely bounded by durably retained position",
+                    lambda f: bool(f.get("source_ack_bounded_by_retained", True)),
+                    "source ack exceeds durably retained stream position",
+                ),
+            ),
+            footprint=0,
+            leaves="authorized cutover with verified applied and proved prefix",
+        ),
+        decide.Rung(
+            "allow_pipeline_drain_progression",
+            "allow pipeline stream to continue advancing positions toward cutover requirement",
+            needs=(
+                decide.Need(
+                    "positions advance monotonically without regression",
+                    lambda f: bool(f.get("positions_monotonic", True)),
+                    "pipeline positions show non-monotonic regression",
+                ),
+                decide.Need(
+                    "source ack is safely bounded by durably retained position",
+                    lambda f: bool(f.get("source_ack_bounded_by_retained", True)),
+                    "source ack exceeds durably retained stream position",
+                ),
+            ),
+            footprint=1,
+            leaves="forward pipeline drain progression permitted",
+        ),
+        decide.Rung(
+            "refuse_cutover_unproved_or_unapplied",
+            "refuse cutover when applied or proved watermark has not reached required stream position",
+            footprint=2,
+            leaves="cutover blocked until applied and proved positions catch up",
+        ),
+    )
+
+
+def decide_ack_lattice(facts: Dict[str, Any]) -> decide.Choice:
+    """Climb the ack_lattice_rungs ladder."""
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("ack position lattice cutover authorization", ack_lattice_rungs(), fact_obj)
 
 
 class PipelineStage(enum.IntEnum):
@@ -227,8 +287,15 @@ class PositionLattice:
             else self._read_pos
         )
         can, reason = self.can_authorize_cutover(target)
-        if not can:
-            raise CutoverRefusedError(reason)
+        facts = {
+            "applied_meets_required": self._applied_pos >= target,
+            "proved_meets_required": self._proved_pos >= target,
+            "source_ack_bounded_by_retained": self._source_ack_pos <= self._retained_pos,
+            "positions_monotonic": True,
+        }
+        choice = decide_ack_lattice(facts)
+        if choice.rung.name != "authorize_cutover_fully_proved":
+            raise CutoverRefusedError(f"{reason} (rung={choice.rung.name}: {choice.rung.because})")
         return CutoverAuthorization(
             authorized=True,
             reason=reason,

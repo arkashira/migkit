@@ -10,6 +10,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+from . import decide
+from . import lease
+
 
 class SnapshotTxState(str, Enum):
     INITIALIZING = "INITIALIZING"
@@ -20,6 +23,60 @@ class SnapshotTxState(str, Enum):
     CANCELLED = "CANCELLED"
     FAILED = "FAILED"
     ROLLED_BACK = "ROLLED_BACK"
+
+
+def cancel_recovery_rungs() -> Tuple[decide.Rung, ...]:
+    """Decision ladder for recovering invalid or cancelled snapshot transactions (Row 651: NEED03)."""
+    return (
+        decide.Rung(
+            "commit_active_transaction",
+            "commit cleanly when transaction is active, heartbeats valid, and no cancellation requested",
+            needs=(
+                decide.Need(
+                    "transaction is valid and active",
+                    lambda f: bool(f.get("is_active", True)),
+                    "transaction is not in active state",
+                ),
+                decide.Need(
+                    "no cancellation requested",
+                    lambda f: not bool(f.get("cancel_requested", False)),
+                    "cancellation was requested for this transaction",
+                ),
+                decide.Need(
+                    "lease heartbeat is active",
+                    lambda f: not bool(f.get("lease_expired", False)),
+                    "lease heartbeat has expired",
+                ),
+            ),
+            footprint=0,
+            leaves="committed snapshot transaction with staged work",
+        ),
+        decide.Rung(
+            "rollback_owned_work_and_cancel",
+            "roll back owned work chunks non-destructively and transition to cancelled state",
+            needs=(
+                decide.Need(
+                    "owned work chunks can be rolled back cleanly",
+                    lambda f: bool(f.get("can_rollback", True)),
+                    "work chunks cannot be safely rolled back",
+                ),
+            ),
+            footprint=1,
+            leaves="clean non-destructive rollback of owned work",
+        ),
+        decide.Rung(
+            "quarantine_and_recover_stranded",
+            "quarantine stranded or orphaned process transaction and roll back owned work",
+            footprint=2,
+            leaves="quarantined failed transaction with diagnostics recorded",
+        ),
+    )
+
+
+def decide_cancel_recovery(facts: Dict[str, Any]) -> decide.Choice:
+    """Climb the cancel_recovery_rungs ladder."""
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("snapshot cancel recovery", cancel_recovery_rungs(), fact_obj)
 
 
 class TxValidationError(ValueError):
@@ -65,7 +122,7 @@ class SnapshotTx:
     updated_at: float = field(default_factory=time.time)
     owner_pid: Optional[int] = None
     heartbeat_at: float = field(default_factory=time.time)
-    lease_timeout: float = 30.0
+    lease_timeout: float = field(default_factory=lambda: float(lease.term()))
     metadata: Dict[str, Any] = field(default_factory=dict)
     owned_chunks: Set[str] = field(default_factory=set)
     staged_records: Dict[str, List[Any]] = field(default_factory=dict)
@@ -139,7 +196,7 @@ class SnapshotTx:
             updated_at=float(data["updated_at"]),
             owner_pid=data.get("owner_pid"),
             heartbeat_at=float(data.get("heartbeat_at", data["created_at"])),
-            lease_timeout=float(data.get("lease_timeout", 30.0)),
+            lease_timeout=float(data["lease_timeout"]) if data.get("lease_timeout") is not None else float(lease.term()),
             metadata=dict(data.get("metadata") or {}),
             owned_chunks=set(data.get("owned_chunks") or ()),
             staged_records=dict(data.get("staged_records") or {}),
@@ -218,7 +275,7 @@ class SnapshotTxStore:
         filter_expr: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         owner_pid: Optional[int] = None,
-        lease_timeout: float = 30.0,
+        lease_timeout: Optional[float] = None,
     ) -> SnapshotTx:
         if not keys or not isinstance(keys, (tuple, list)) or len(keys) == 0:
             raise TxValidationError(f"Invalid keys for snapshot transaction {tx_id}: keys cannot be empty")
@@ -228,6 +285,7 @@ class SnapshotTxStore:
                 raise TxStateError(f"Transaction {tx_id} already exists in active or in-flight state")
 
             pid = owner_pid if owner_pid is not None else os.getpid()
+            effective_timeout = float(lease_timeout) if lease_timeout is not None else float(lease.term())
             tx = SnapshotTx(
                 tx_id=tx_id,
                 table_name=table_name,
@@ -235,7 +293,7 @@ class SnapshotTxStore:
                 filter_expr=filter_expr,
                 state=SnapshotTxState.INITIALIZING,
                 owner_pid=pid,
-                lease_timeout=lease_timeout,
+                lease_timeout=effective_timeout,
                 metadata=metadata or {},
             )
             self._transactions[tx_id] = tx
@@ -377,6 +435,14 @@ class SnapshotTxStore:
             if tx.state != SnapshotTxState.ACTIVE:
                 raise TxStateError(f"Cannot commit transaction {tx_id} in state {tx.state.value}")
 
+            facts = {
+                "is_active": tx.is_active(),
+                "cancel_requested": False,
+                "lease_expired": tx.is_expired(),
+                "can_rollback": True,
+            }
+            decide_cancel_recovery(facts)
+
             tx.state = SnapshotTxState.COMMITTING
             tx.state = SnapshotTxState.COMMITTED
             tx.updated_at = time.time()
@@ -391,6 +457,14 @@ class SnapshotTxStore:
                 raise TxStateError(f"Cannot cancel already committed transaction {tx_id}")
             if tx.state in {SnapshotTxState.CANCELLED, SnapshotTxState.FAILED}:
                 return tx
+
+            facts = {
+                "is_active": tx.is_active(),
+                "cancel_requested": True,
+                "lease_expired": tx.is_expired(),
+                "can_rollback": True,
+            }
+            decide_cancel_recovery(facts)
 
             diag = tx.record_diagnostic(
                 phase="CANCELLATION",
@@ -418,6 +492,14 @@ class SnapshotTxStore:
                 raise KeyError(f"Transaction {tx_id} not found")
             if tx.state == SnapshotTxState.COMMITTED:
                 raise TxStateError(f"Cannot fail already committed transaction {tx_id}")
+
+            facts = {
+                "is_active": False,
+                "cancel_requested": False,
+                "lease_expired": False,
+                "can_rollback": True,
+            }
+            decide_cancel_recovery(facts)
 
             diag = tx.record_diagnostic(phase, error_code, message, details)
             self._diagnostics.append(diag)
@@ -469,6 +551,13 @@ class SnapshotTxStore:
                     reason = f"Lease heartbeat expired (timeout={tx.lease_timeout}s)"
 
                 if is_stranded:
+                    facts = {
+                        "is_active": False,
+                        "cancel_requested": False,
+                        "lease_expired": True,
+                        "can_rollback": True,
+                    }
+                    decide_cancel_recovery(facts)
                     diag = tx.record_diagnostic(
                         phase="PROCESS_DEATH",
                         error_code="ORPHANED_PROCESS_DEATH",
