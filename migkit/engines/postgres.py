@@ -7899,11 +7899,20 @@ select json_build_object(
             quote_identifiers=quote_identifiers)
 
     def adaptive_merkle_bucket_diff(self, db, table, key_col, *,
-                                    lo=None, hi=None, num_buckets=1024,
+                                    lo=None, hi=None, num_buckets=None,
                                     hash_expr=None, sides=("src", "dst"),
-                                    leaf_threshold=16, max_depth=8):
+                                    leaf_threshold=None, max_depth=None):
         from .. import scanplan
         from ..keepalive import heartbeat_during
+        num_buckets = num_buckets or scanplan.get_default_merkle_buckets()
+        leaf_threshold = leaf_threshold or scanplan.get_default_merkle_leaf_threshold()
+        max_depth = max_depth or scanplan.get_default_merkle_max_depth()
+        if hash_expr is None:
+            try:
+                row_raw = self._row_expr(db, table)
+                hash_expr = f"abs(('x' || substr(md5({row_raw}::text), 1, 16))::bit(64)::bigint)"
+            except Exception:
+                hash_expr = None
         with heartbeat_during(self, sides=sides, db=db):
             src_table = self._scope(db, table)
             if lo is None or hi is None:
@@ -8013,10 +8022,65 @@ select json_build_object(
         from ..verifiers import lsn_gte
         return lsn_gte(curr, l0)
 
-    def wait_cdc_flush(self, db, l0, timeout=300):
+    def wait_cdc_flush(self, db, l0, timeout=None):
         return self.fence_wait(db, l0, timeout=timeout)
 
-    def crossover_watermark_fence(self, db, table, candidate_keys, l0=None, timeout=300):
+    def _compare_pks(self, db, table, candidate_keys):
+        """Recheck candidate keys across src and dst to classify in-flight writes vs true defects."""
+        if not candidate_keys:
+            return [], [], []
+        pks = self._pk_cols(db, table)
+        if not pks:
+            return list(candidate_keys), [], []
+        pk = pks[0]
+        src_table = self._scope("src", db, table)
+        dst_table = self._scope("dst", db, table)
+        k_expr = f'"{pk}"'
+        try:
+            row_raw = self._row_expr(db, table)
+            h_expr = f"md5({row_raw}::text)"
+        except Exception:
+            h_expr = k_expr
+
+        keys_list = list(candidate_keys)
+        is_num = all(isinstance(x, (int, float)) or (isinstance(x, str) and x.isdigit()) for x in keys_list)
+        if is_num:
+            in_clause = ", ".join(str(int(x)) for x in keys_list)
+        else:
+            in_clause = ", ".join(f"'{str(x)}'" for x in keys_list)
+
+        sql = f"SELECT {k_expr} || '|' || {h_expr} FROM {{tbl}} WHERE {k_expr} IN ({in_clause})"
+        try:
+            s_out = self._psql("src", db, sql.format(tbl=src_table))
+            d_out = self._psql("dst", db, sql.format(tbl=dst_table))
+            src_rows = {}
+            for line in s_out.splitlines():
+                if "|" in line:
+                    parts = line.split("|", 1)
+                    src_rows[parts[0].strip()] = parts[1].strip()
+            dst_rows = {}
+            for line in d_out.splitlines():
+                if "|" in line:
+                    parts = line.split("|", 1)
+                    dst_rows[parts[0].strip()] = parts[1].strip()
+
+            missing, extra, changed = [], [], []
+            for k in keys_list:
+                sk = str(k)
+                in_src = sk in src_rows
+                in_dst = sk in dst_rows
+                if in_src and not in_dst:
+                    missing.append(k)
+                elif in_dst and not in_src:
+                    extra.append(k)
+                elif in_src and in_dst:
+                    if src_rows[sk] != dst_rows[sk]:
+                        changed.append(k)
+            return missing, extra, changed
+        except Exception:
+            return list(candidate_keys), [], []
+
+    def crossover_watermark_fence(self, db, table, candidate_keys, l0=None, timeout=None):
         from ..verifiers import crossover_watermark_fence
         return crossover_watermark_fence(self, db, table, candidate_keys, l0=l0, timeout=timeout)
 

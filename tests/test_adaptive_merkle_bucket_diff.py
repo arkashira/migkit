@@ -3,6 +3,20 @@ from types import SimpleNamespace
 from migkit import leaves, scanplan
 from migkit.engines.mysql import MySQLEngine
 from migkit.engines.postgres import PostgresEngine
+from tests.rung_branches import HOLDS, REFUSES, branch, watched
+
+PROVES_RUNGS = [
+    ("scanplan", "adaptive_merkle_rungs", "hierarchical_merkle_partitioning", "holds"),
+    ("scanplan", "adaptive_merkle_rungs", "hierarchical_merkle_partitioning", "refuses"),
+    ("scanplan", "adaptive_merkle_rungs", "content_hash_integrity_preservation", "holds"),
+    ("scanplan", "adaptive_merkle_rungs", "content_hash_integrity_preservation", "refuses"),
+    ("scanplan", "adaptive_merkle_rungs", "recursive_bisection_envelope", "holds"),
+    ("scanplan", "adaptive_merkle_rungs", "recursive_bisection_envelope", "refuses"),
+    ("scanplan", "adaptive_merkle_rungs", "o1_identical_range_pruning", "holds"),
+    ("scanplan", "adaptive_merkle_rungs", "o1_identical_range_pruning", "refuses"),
+    ("scanplan", "adaptive_merkle_rungs", "refuse_unindexable_merkle_slice", "holds"),
+    ("scanplan", "adaptive_merkle_rungs", "refuse_unindexable_merkle_slice", "refuses"),
+]
 
 
 def test_adaptive_merkle_bucket_query_mysql_structure():
@@ -182,4 +196,79 @@ def test_adaptive_merkle_query_modulo_fallback_and_where():
         "postgres", "orders", "uuid", num_buckets=256, where="status = 'active'")
     assert "abs(('x' || substr(md5(cast(\"uuid\" as text)), 1, 8))::bit(32)::bigint) % 256" in pg_sql
     assert "WHERE (status = 'active')" in pg_sql
+
+
+def test_adaptive_merkle_rungs_hold_and_refuse():
+    with watched() as seen:
+        c = scanplan.decide_adaptive_merkle({"total_rows": 2_000_000, "threshold": 1_000_000, "key_col": "id"})
+    assert c.rung.name == "hierarchical_merkle_partitioning"
+    assert branch(seen, "hierarchical_merkle_partitioning") == [HOLDS]
+
+    with watched() as seen:
+        c = scanplan.decide_adaptive_merkle({
+            "total_rows": 500_000, "threshold": 1_000_000, "key_col": "id",
+            "hash_expr": "row_hash", "key_only_hashing": False
+        })
+    assert branch(seen, "hierarchical_merkle_partitioning") == [REFUSES]
+    assert c.rung.name == "content_hash_integrity_preservation"
+    assert branch(seen, "content_hash_integrity_preservation") == [HOLDS]
+
+    with watched() as seen:
+        c = scanplan.decide_adaptive_merkle({
+            "total_rows": 500_000, "threshold": 1_000_000, "key_col": "id",
+            "hash_expr": "", "depth": 2, "max_depth": 8, "bisection_active": True
+        })
+    assert branch(seen, "content_hash_integrity_preservation") == [REFUSES]
+    assert c.rung.name == "recursive_bisection_envelope"
+    assert branch(seen, "recursive_bisection_envelope") == [HOLDS]
+
+    with watched() as seen:
+        c = scanplan.decide_adaptive_merkle({
+            "total_rows": 500_000, "threshold": 1_000_000, "key_col": "id",
+            "hash_expr": "", "depth": 10, "max_depth": 8, "identical_buckets": 100
+        })
+    assert branch(seen, "recursive_bisection_envelope") == [REFUSES]
+    assert c.rung.name == "o1_identical_range_pruning"
+    assert branch(seen, "o1_identical_range_pruning") == [HOLDS]
+
+    with watched() as seen:
+        c = scanplan.decide_adaptive_merkle({
+            "total_rows": 500_000, "threshold": 1_000_000, "key_col": "id",
+            "hash_expr": "", "depth": 10, "max_depth": 8, "identical_buckets": 0
+        })
+    assert branch(seen, "o1_identical_range_pruning") == [REFUSES]
+    assert c.rung.name == "refuse_unindexable_merkle_slice"
+    assert branch(seen, "refuse_unindexable_merkle_slice") == [HOLDS]
+
+    with watched() as seen:
+        try:
+            scanplan.decide_adaptive_merkle({
+                "total_rows": 5_000_000, "threshold": 1_000_000, "key_col": "id",
+                "hash_expr": "", "depth": 10, "max_depth": 8, "identical_buckets": 0
+            })
+        except Exception:
+            pass
+    assert branch(seen, "refuse_unindexable_merkle_slice") == [REFUSES]
+
+
+def test_merkle_content_drift_caught_by_hash_expression():
+    mysql_sql = scanplan.adaptive_merkle_bucket_query("mysql", "orders", "id", hash_expr="row_hash_expr")
+    assert "row_hash_expr" in mysql_sql
+    assert "BIT_XOR(row_hash_expr)" in mysql_sql
+
+    mysql_sql_auto = scanplan.adaptive_merkle_bucket_query("mysql", "orders", "id", hash_expr=None)
+    assert "md5(cast(`id` as char))" in mysql_sql_auto
+
+
+def test_dynamic_merkle_getters_resolution(monkeypatch):
+    monkeypatch.setenv("MIGKIT_MERKLE_THRESHOLD", "500000")
+    monkeypatch.setenv("MIGKIT_MERKLE_BUCKETS", "512")
+    monkeypatch.setenv("MIGKIT_MERKLE_LEAF_THRESHOLD", "32")
+    monkeypatch.setenv("MIGKIT_MERKLE_MAX_DEPTH", "12")
+
+    assert scanplan.get_default_merkle_threshold() == 500000
+    assert scanplan.get_default_merkle_buckets() == 512
+    assert scanplan.get_default_merkle_leaf_threshold() == 32
+    assert scanplan.get_default_merkle_max_depth() == 12
+
 

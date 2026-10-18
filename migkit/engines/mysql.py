@@ -4106,11 +4106,20 @@ class MySQLEngine(Engine):
             quote_identifiers=quote_identifiers)
 
     def adaptive_merkle_bucket_diff(self, db, table, key_col, *,
-                                    lo=None, hi=None, num_buckets=1024,
+                                    lo=None, hi=None, num_buckets=None,
                                     hash_expr=None, sides=("src", "dst"),
-                                    leaf_threshold=16, max_depth=8):
+                                    leaf_threshold=None, max_depth=None):
         from .. import scanplan
         from ..keepalive import heartbeat_during
+        num_buckets = num_buckets or scanplan.get_default_merkle_buckets()
+        leaf_threshold = leaf_threshold or scanplan.get_default_merkle_leaf_threshold()
+        max_depth = max_depth or scanplan.get_default_merkle_max_depth()
+        if hash_expr is None:
+            try:
+                row_raw = self._row_expr(db, table)
+                hash_expr = f"cast(conv(substring(md5({row_raw}), 1, 16), 16, 10) as unsigned)"
+            except Exception:
+                hash_expr = None
         with heartbeat_during(self, sides=sides, db=db):
             src_table = self._scope("src", db, table)
             if lo is None or hi is None:
@@ -4198,10 +4207,55 @@ class MySQLEngine(Engine):
             from ..verifiers import gtid_is_subset
             return gtid_is_subset(str(l0), str(curr))
 
-    def wait_cdc_flush(self, db, l0, timeout=300):
+    def wait_cdc_flush(self, db, l0, timeout=None):
         return self.fence_wait(db, l0, timeout=timeout)
 
-    def crossover_watermark_fence(self, db, table, candidate_keys, l0=None, timeout=300):
+    def _compare_pks(self, db, table, candidate_keys):
+        """Recheck candidate keys across src and dst to classify in-flight writes vs true defects."""
+        if not candidate_keys:
+            return [], [], []
+        pks = self._pk_cols(db, table)
+        if not pks:
+            return list(candidate_keys), [], []
+        pk = pks[0]
+        src_table = self._scope("src", db, table)
+        dst_table = self._scope("dst", db, table)
+        k_expr = f"`{pk}`"
+        try:
+            row_raw = self._row_expr(db, table)
+            h_expr = f"cast(conv(substring(md5({row_raw}), 1, 16), 16, 10) as unsigned)"
+        except Exception:
+            h_expr = k_expr
+
+        keys_list = list(candidate_keys)
+        is_num = all(isinstance(x, (int, float)) or (isinstance(x, str) and x.isdigit()) for x in keys_list)
+        if is_num:
+            in_clause = ", ".join(str(int(x)) for x in keys_list)
+        else:
+            in_clause = ", ".join(f"'{str(x)}'" for x in keys_list)
+
+        sql = f"SELECT {k_expr}, {h_expr} FROM {{tbl}} WHERE {k_expr} IN ({in_clause})"
+        try:
+            src_rows = dict(self._q("src", sql.format(tbl=src_table)))
+            dst_rows = dict(self._q("dst", sql.format(tbl=dst_table)))
+        except Exception:
+            return list(candidate_keys), [], []
+
+        missing, extra, changed = [], [], []
+        for k in keys_list:
+            key_lookup = int(k) if (is_num and (int(k) in src_rows or int(k) in dst_rows)) else k
+            in_src = key_lookup in src_rows
+            in_dst = key_lookup in dst_rows
+            if in_src and not in_dst:
+                missing.append(k)
+            elif in_dst and not in_src:
+                extra.append(k)
+            elif in_src and in_dst:
+                if src_rows[key_lookup] != dst_rows[key_lookup]:
+                    changed.append(k)
+        return missing, extra, changed
+
+    def crossover_watermark_fence(self, db, table, candidate_keys, l0=None, timeout=None):
         from ..verifiers import crossover_watermark_fence
         return crossover_watermark_fence(self, db, table, candidate_keys, l0=l0, timeout=timeout)
 
@@ -4803,6 +4857,18 @@ class MySQLEngine(Engine):
                 fres = self.fused_pushdown_verification(db, t)
                 if fres.status in ("ok", "diff"):
                     return Result("data", scope, fres.status, fres.detail), 0, 0
+            except Exception:
+                pass
+
+        if pks and (self.hop.options.get("merkle", False) or getattr(self.hop, "use_merkle", False)):
+            try:
+                mres = self.adaptive_merkle_bucket_diff(db, t, pks[0])
+                if mres.status in ("ok", "diff"):
+                    if mres.status == "diff" and hasattr(self, "crossover_watermark_fence"):
+                        fc = self.crossover_watermark_fence(db, t, mres.mismatched_keys)
+                        if fc.status == "ok":
+                            return Result("data", scope, "ok", f"{t}: OK (CDC in-flight writes converged)"), 0, 0
+                    return Result("data", scope, mres.status, mres.detail), 0, 0
             except Exception:
                 pass
 

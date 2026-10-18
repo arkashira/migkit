@@ -1419,12 +1419,24 @@ class FencingResult:
     proof: List[str] = field(default_factory=list)
 
 
+DEFAULT_FENCE_TIMEOUT = 30.0
+
+
+def get_default_fence_timeout() -> float:
+    try:
+        from . import envkeys
+        val = envkeys.number("MIGKIT_FENCE_TIMEOUT", default=DEFAULT_FENCE_TIMEOUT)
+        return float(val) if val is not None else DEFAULT_FENCE_TIMEOUT
+    except Exception:
+        return DEFAULT_FENCE_TIMEOUT
+
+
 class CrossoverWatermarkFencer:
-    def __init__(self, engine=None, db=None, table=None, timeout=300):
+    def __init__(self, engine=None, db=None, table=None, timeout=None):
         self.engine = engine
         self.db = db
         self.table = table
-        self.timeout = timeout
+        self.timeout = get_default_fence_timeout() if timeout is None else float(timeout)
         self.l0 = None
 
     def capture_l0(self, db=None):
@@ -1477,10 +1489,14 @@ class CrossoverWatermarkFencer:
     def recheck_candidates(self, table, candidate_keys, db=None):
         db = db or self.db
         if hasattr(self.engine, "_compare_pks"):
-            cmp = self.engine._compare_pks(db, table, candidate_keys)
-            if cmp is not None:
-                return cmp
-        return [], [], []
+            try:
+                cmp = self.engine._compare_pks(db, table, candidate_keys)
+                if cmp is not None:
+                    return cmp
+            except Exception:
+                pass
+        cands = sorted(candidate_keys) if candidate_keys else []
+        return cands, [], []
 
     def fence(self, table, candidate_keys, l0=None, db=None, timeout=None):
         db = db or self.db
@@ -1541,7 +1557,103 @@ class CrossoverWatermarkFencer:
             classifications=classifications, proof=proof)
 
 
-def crossover_watermark_fence(engine, db, table, candidate_keys, l0=None, timeout=300):
+def _prove_crossover_position_reached(f) -> bool:
+    pos = str(f.get("current_position", ""))
+    l0 = str(f.get("l0", ""))
+    if not pos or not l0:
+        return False
+    if "/" in l0 or (l0.isdigit() and pos.isdigit()):
+        return lsn_gte(pos, l0)
+    if ":" in l0:
+        return gtid_is_subset(l0, pos)
+    return pos >= l0
+
+
+def _prove_candidate_recheck_convergence(f) -> bool:
+    return bool(f.get("converged") and not f.get("defects"))
+
+
+def _prove_flush_wait_timeout_envelope(f) -> bool:
+    wait_time = float(f.get("wait_time", 0.0))
+    limit = float(f.get("timeout", get_default_fence_timeout()))
+    return wait_time <= limit and bool(f.get("flushed", True))
+
+
+def _prove_benign_inflight_classification(f) -> bool:
+    return bool(f.get("all_candidates_converged", False))
+
+
+def _prove_refuse_unfenced_candidate_drift(f) -> bool:
+    return bool(f.get("defects") or not f.get("flushed", True))
+
+
+def crossover_watermark_rungs():
+    from . import decide
+    return (
+        decide.Rung(
+            "crossover_position_reached",
+            "verify target CDC replication position has reached or surpassed L0 watermark",
+            needs=(
+                decide.Need(
+                    "target apply position reached L0 watermark",
+                    _prove_crossover_position_reached,
+                    "target apply position lags behind L0 watermark",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "candidate_recheck_convergence",
+            "recheck candidate diff keys across source and target for post-crossover convergence",
+            needs=(
+                decide.Need(
+                    "rechecked candidates converged between source and target",
+                    _prove_candidate_recheck_convergence,
+                    "candidate keys continue to diverge across engines",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "flush_wait_timeout_envelope",
+            "wait for CDC apply pipeline flush within dynamic timeout envelope",
+            needs=(
+                decide.Need(
+                    "flush wait completes within timeout budget",
+                    _prove_flush_wait_timeout_envelope,
+                    "CDC flush wait exceeded timeout threshold",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "benign_inflight_classification",
+            "classify converged discrepancies as benign in-flight replication writes",
+            needs=(
+                decide.Need(
+                    "all candidate keys confirmed converged",
+                    _prove_benign_inflight_classification,
+                    "persistent candidate drift detected",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_unfenced_candidate_drift",
+            "refuse benign classification when candidate drift persists after crossover",
+            needs=(
+                decide.Need(
+                    "refuse unfenced persistent candidate drift",
+                    _prove_refuse_unfenced_candidate_drift,
+                    "all candidate differences resolved",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_crossover_watermark(facts):
+    from . import decide
+    return decide.climb("crossover watermark fencing", crossover_watermark_rungs(), facts=decide.Facts(facts))
+
+
+def crossover_watermark_fence(engine, db, table, candidate_keys, l0=None, timeout=None):
     fencer = CrossoverWatermarkFencer(engine, db, table, timeout=timeout)
     return fencer.fence(table, candidate_keys, l0=l0)
 

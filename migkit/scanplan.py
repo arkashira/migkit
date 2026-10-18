@@ -970,10 +970,53 @@ class AdaptiveMerkleResult:
     certified_complete: bool = False
 
 
+DEFAULT_MERKLE_THRESHOLD = 1_000_000
+DEFAULT_MERKLE_BUCKETS = 1024
+DEFAULT_MERKLE_LEAF_THRESHOLD = 16
+DEFAULT_MERKLE_MAX_DEPTH = 8
+
+
+def get_default_merkle_threshold() -> int:
+    try:
+        from . import envkeys
+        val = envkeys.number("MIGKIT_MERKLE_THRESHOLD", default=DEFAULT_MERKLE_THRESHOLD)
+        return int(val) if val is not None else DEFAULT_MERKLE_THRESHOLD
+    except Exception:
+        return DEFAULT_MERKLE_THRESHOLD
+
+
+def get_default_merkle_buckets() -> int:
+    try:
+        from . import envkeys
+        val = envkeys.number("MIGKIT_MERKLE_BUCKETS", default=DEFAULT_MERKLE_BUCKETS)
+        return int(val) if val is not None else DEFAULT_MERKLE_BUCKETS
+    except Exception:
+        return DEFAULT_MERKLE_BUCKETS
+
+
+def get_default_merkle_leaf_threshold() -> int:
+    try:
+        from . import envkeys
+        val = envkeys.number("MIGKIT_MERKLE_LEAF_THRESHOLD", default=DEFAULT_MERKLE_LEAF_THRESHOLD)
+        return int(val) if val is not None else DEFAULT_MERKLE_LEAF_THRESHOLD
+    except Exception:
+        return DEFAULT_MERKLE_LEAF_THRESHOLD
+
+
+def get_default_merkle_max_depth() -> int:
+    try:
+        from . import envkeys
+        val = envkeys.number("MIGKIT_MERKLE_MAX_DEPTH", default=DEFAULT_MERKLE_MAX_DEPTH)
+        return int(val) if val is not None else DEFAULT_MERKLE_MAX_DEPTH
+    except Exception:
+        return DEFAULT_MERKLE_MAX_DEPTH
+
+
 def adaptive_merkle_bucket_query(engine, table, key_col, hash_expr=None, *,
-                                 num_buckets=1024, lo=None, hi=None, width=None,
+                                 num_buckets=None, lo=None, hi=None, width=None,
                                  where="", aliases=False, quote_identifiers=True):
     eng = str(engine).lower()
+    num_buckets = num_buckets or get_default_merkle_buckets()
     k = _quote_ident(eng, key_col, quote_identifiers)
     if lo is not None and hi is not None:
         span = hi - lo + 1
@@ -988,7 +1031,14 @@ def adaptive_merkle_bucket_query(engine, table, key_col, hash_expr=None, *,
         else:
             b_expr = f"(abs(('x' || substr(md5(cast({k} as text)), 1, 8))::bit(32)::bigint) % {num_buckets})"
 
-    h_expr = k if hash_expr is None else hash_expr
+    if hash_expr is None:
+        if eng == "mysql":
+            h_expr = f"cast(conv(substring(md5(cast({k} as char)), 1, 16), 16, 10) as unsigned)"
+        else:
+            h_expr = f"abs(('x' || substr(md5(cast({k} as text)), 1, 16))::bit(64)::bigint)"
+    else:
+        h_expr = hash_expr
+
     if eng == "mysql":
         h_part = h_expr if h_expr.upper().startswith("BIT_XOR(") else f"BIT_XOR({h_expr})"
     else:
@@ -1016,12 +1066,15 @@ def adaptive_merkle_bucket_query(engine, table, key_col, hash_expr=None, *,
 
 
 def adaptive_merkle_bucket_verify(eng, db, table, key_col, *,
-                                  lo=None, hi=None, num_buckets=1024,
+                                  lo=None, hi=None, num_buckets=None,
                                   hash_expr=None, query=None, row_query=None,
                                   source=None, sides=("src", "dst"),
-                                  leaf_threshold=16, max_depth=8,
+                                  leaf_threshold=None, max_depth=None,
                                   quote_identifiers=True):
     from . import leaves
+    num_buckets = num_buckets or get_default_merkle_buckets()
+    leaf_threshold = leaf_threshold or get_default_merkle_leaf_threshold()
+    max_depth = max_depth or get_default_merkle_max_depth()
     dialect = getattr(eng, "CANON_ENGINE", "mysql")
     if source is None:
         source = lambda side, t: t
@@ -1159,6 +1212,98 @@ def fused_pushdown_rungs() -> Tuple[decide.Rung, ...]:
 
 def decide_fused_pushdown(facts: Dict[str, Any]) -> decide.Choice:
     return decide.climb("fused pushdown verification", fused_pushdown_rungs(), facts=decide.Facts(facts))
+
+
+def _prove_hierarchical_merkle_partitioning(f: Dict[str, Any]) -> bool:
+    rows = int(f.get("total_rows", 0))
+    thresh = int(f.get("threshold", get_default_merkle_threshold()))
+    return rows >= thresh and bool(f.get("key_col"))
+
+
+def _prove_content_hash_integrity(f: Dict[str, Any]) -> bool:
+    h = str(f.get("hash_expr", ""))
+    return bool(h) and not f.get("key_only_hashing", False)
+
+
+def _prove_recursive_bisection_envelope(f: Dict[str, Any]) -> bool:
+    depth = int(f.get("depth", 0))
+    max_d = int(f.get("max_depth", get_default_merkle_max_depth()))
+    return depth <= max_d and bool(f.get("bisection_active", True))
+
+
+def _prove_o1_identical_range_pruning(f: Dict[str, Any]) -> bool:
+    return bool(f.get("identical_buckets", 0) > 0 and not f.get("force_full_scan", False))
+
+
+def _prove_refuse_unindexable_merkle_slice(f: Dict[str, Any]) -> bool:
+    rows = int(f.get("total_rows", 0))
+    thresh = int(f.get("threshold", get_default_merkle_threshold()))
+    return rows < thresh or not f.get("key_col")
+
+
+def adaptive_merkle_rungs() -> Tuple[decide.Rung, ...]:
+    return (
+        decide.Rung(
+            "hierarchical_merkle_partitioning",
+            "partition large table (>1M rows) into hierarchical Merkle buckets",
+            needs=(
+                decide.Need(
+                    "table row count exceeds Merkle threshold with indexable key",
+                    _prove_hierarchical_merkle_partitioning,
+                    "table within standard linear range scan envelope",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "content_hash_integrity_preservation",
+            "verify bucket hash evaluates full row contents rather than key alone",
+            needs=(
+                decide.Need(
+                    "full row content hash expression active",
+                    _prove_content_hash_integrity,
+                    "key-only hashing susceptible to content drift blind spots",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "recursive_bisection_envelope",
+            "bisect divergent Merkle buckets recursively within max depth envelope",
+            needs=(
+                decide.Need(
+                    "bisection recursion within configured depth budget",
+                    _prove_recursive_bisection_envelope,
+                    "recursion exceeded max depth limit",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "o1_identical_range_pruning",
+            "prune identical Merkle buckets in O(1) skipping matching data ranges",
+            needs=(
+                decide.Need(
+                    "identical bucket checksums confirmed between source and target",
+                    _prove_o1_identical_range_pruning,
+                    "all buckets divergent requiring deep drilldown",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_unindexable_merkle_slice",
+            "refuse Merkle bisection on small tables or tables without primary key",
+            needs=(
+                decide.Need(
+                    "refuse unindexable or sub-threshold table for Merkle bisection",
+                    _prove_refuse_unindexable_merkle_slice,
+                    "table satisfies Merkle bisection prerequisites",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_adaptive_merkle(facts: Dict[str, Any]) -> decide.Choice:
+    return decide.climb("adaptive merkle diff", adaptive_merkle_rungs(), facts=decide.Facts(facts))
+
 
 
 

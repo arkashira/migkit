@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 import pytest
+from migkit import verifiers
 from migkit.verifiers import (
     CrossoverWatermarkFencer,
     FencingResult,
@@ -13,6 +14,20 @@ from migkit.verifiers import (
 from migkit.engines.postgres import PostgresEngine
 from migkit.engines.mysql import MySQLEngine
 from migkit.result_scope import PracticalProblem, DatabaseSummary, build_grouped_summary
+from tests.rung_branches import HOLDS, REFUSES, branch, watched
+
+PROVES_RUNGS = [
+    ("verifiers", "crossover_watermark_rungs", "crossover_position_reached", "holds"),
+    ("verifiers", "crossover_watermark_rungs", "crossover_position_reached", "refuses"),
+    ("verifiers", "crossover_watermark_rungs", "candidate_recheck_convergence", "holds"),
+    ("verifiers", "crossover_watermark_rungs", "candidate_recheck_convergence", "refuses"),
+    ("verifiers", "crossover_watermark_rungs", "flush_wait_timeout_envelope", "holds"),
+    ("verifiers", "crossover_watermark_rungs", "flush_wait_timeout_envelope", "refuses"),
+    ("verifiers", "crossover_watermark_rungs", "benign_inflight_classification", "holds"),
+    ("verifiers", "crossover_watermark_rungs", "benign_inflight_classification", "refuses"),
+    ("verifiers", "crossover_watermark_rungs", "refuse_unfenced_candidate_drift", "holds"),
+    ("verifiers", "crossover_watermark_rungs", "refuse_unfenced_candidate_drift", "refuses"),
+]
 
 
 def test_lsn_comparison_helpers():
@@ -282,3 +297,76 @@ def test_concurrent_load_simulation():
     assert len(res.defects) == 0
     assert res.defect_class == "in_flight_replication_write"
     assert res.tier == "benign"
+
+
+def test_crossover_watermark_rungs_hold_and_refuse():
+    with watched() as seen:
+        c = verifiers.decide_crossover_watermark({"current_position": "0/2000", "l0": "0/1000"})
+    assert c.rung.name == "crossover_position_reached"
+    assert branch(seen, "crossover_position_reached") == [HOLDS]
+
+    with watched() as seen:
+        c = verifiers.decide_crossover_watermark({"current_position": "0/500", "l0": "0/1000", "converged": True, "defects": False})
+    assert branch(seen, "crossover_position_reached") == [REFUSES]
+    assert c.rung.name == "candidate_recheck_convergence"
+    assert branch(seen, "candidate_recheck_convergence") == [HOLDS]
+
+    with watched() as seen:
+        c = verifiers.decide_crossover_watermark({
+            "current_position": "0/500", "l0": "0/1000", "converged": False,
+            "wait_time": 5.0, "timeout": 30.0, "flushed": True
+        })
+    assert branch(seen, "candidate_recheck_convergence") == [REFUSES]
+    assert c.rung.name == "flush_wait_timeout_envelope"
+    assert branch(seen, "flush_wait_timeout_envelope") == [HOLDS]
+
+    with watched() as seen:
+        c = verifiers.decide_crossover_watermark({
+            "current_position": "0/500", "l0": "0/1000", "converged": False,
+            "wait_time": 50.0, "timeout": 30.0, "all_candidates_converged": True
+        })
+    assert branch(seen, "flush_wait_timeout_envelope") == [REFUSES]
+    assert c.rung.name == "benign_inflight_classification"
+    assert branch(seen, "benign_inflight_classification") == [HOLDS]
+
+    with watched() as seen:
+        c = verifiers.decide_crossover_watermark({
+            "current_position": "0/500", "l0": "0/1000", "converged": False,
+            "wait_time": 50.0, "timeout": 30.0, "all_candidates_converged": False,
+            "defects": True
+        })
+    assert branch(seen, "benign_inflight_classification") == [REFUSES]
+    assert c.rung.name == "refuse_unfenced_candidate_drift"
+    assert branch(seen, "refuse_unfenced_candidate_drift") == [HOLDS]
+
+    with watched() as seen:
+        try:
+            verifiers.decide_crossover_watermark({
+                "current_position": "0/500", "l0": "0/1000", "converged": False,
+                "wait_time": 50.0, "timeout": 30.0, "all_candidates_converged": False,
+                "defects": False, "flushed": True
+            })
+        except Exception:
+            pass
+    assert branch(seen, "refuse_unfenced_candidate_drift") == [REFUSES]
+
+
+def test_absent_compare_pks_does_not_false_ok():
+    class DummyEngine:
+        def src_lsn(self, db):
+            return "0/1000"
+        def is_cdc_applied(self, db, lsn):
+            return True
+
+    eng = DummyEngine()
+    fencer = CrossoverWatermarkFencer(eng, "db", "tbl")
+    res = fencer.fence("tbl", ["k1", "k2"])
+    assert res.status == "diff"
+    assert res.defects == ["k1", "k2"]
+    assert res.defect_class == "application_defect"
+
+
+def test_dynamic_fence_timeout_resolution(monkeypatch):
+    monkeypatch.setenv("MIGKIT_FENCE_TIMEOUT", "45.0")
+    assert verifiers.get_default_fence_timeout() == 45.0
+
