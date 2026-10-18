@@ -16,7 +16,24 @@ from migkit.decomp_budget import (
     LimitAction,
     SpillPolicy,
     TransactionStatus,
+    decompression_budget_rungs,
+    decide_decompression_budget,
 )
+import tests.rung_branches
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("decomp_budget", "decompression_budget_rungs", "streaming_in_memory_decode", "holds"),
+    ("decomp_budget", "decompression_budget_rungs", "streaming_in_memory_decode", "refuses"),
+    ("decomp_budget", "decompression_budget_rungs", "spill_chunk_to_temp_storage", "holds"),
+    ("decomp_budget", "decompression_budget_rungs", "spill_chunk_to_temp_storage", "refuses"),
+    ("decomp_budget", "decompression_budget_rungs", "scale_decoder_buffer_dynamically", "holds"),
+    ("decomp_budget", "decompression_budget_rungs", "scale_decoder_buffer_dynamically", "refuses"),
+    ("decomp_budget", "decompression_budget_rungs", "quarantine_runaway_transaction", "holds"),
+    ("decomp_budget", "decompression_budget_rungs", "quarantine_runaway_transaction", "refuses"),
+    ("decomp_budget", "decompression_budget_rungs", "refuse_decompression_bomb", "holds"),
+]
+
 
 
 @pytest.fixture
@@ -380,3 +397,124 @@ def test_highly_compressible_2gb_transaction_aborts_at_limit_without_oom(temp_di
     assert len(list(os.scandir(temp_dir))) == 0
     assert gov.metrics.transactions_refused == 1
     gov.close()
+
+
+def test_budget_limits_from_facts_and_evaluate_strategy():
+    facts = {
+        "max_memory_bytes": 128 * 1024 * 1024,
+        "max_uncompressed_bytes": 4 * 1024 * 1024 * 1024,
+        "spill_threshold_bytes": 16 * 1024 * 1024,
+        "spill_policy": SpillPolicy.AUTO,
+        "default_limit_action": LimitAction.RESEED,
+    }
+    limits = BudgetLimits.from_facts(facts)
+    assert limits.max_memory_bytes == 128 * 1024 * 1024
+    assert limits.spill_threshold_bytes == 16 * 1024 * 1024
+    assert limits.default_limit_action == LimitAction.RESEED
+
+    choice = limits.evaluate_strategy(active_memory=1024, incoming_chunk=2048)
+    assert choice.rung.name == "streaming_in_memory_decode"
+
+
+def test_decompression_budget_rungs_under_watched():
+    with watched():
+        # 1. streaming_in_memory_decode holds
+        f1 = {
+            "active_memory_bytes": 1024,
+            "chunk_bytes": 4096,
+            "max_memory_bytes": 67108864,
+            "observed_expansion_ratio": 4.0,
+            "max_safe_expansion_ratio": 50.0,
+            "spill_permitted": True,
+            "spill_storage_available": True,
+            "spilled_bytes": 0,
+            "max_disk_spill_bytes": 10737418240,
+            "dynamic_scaling_enabled": True,
+            "current_buffer_bytes": 65536,
+            "max_buffer_ceiling": 33554432,
+            "reseed_handler_registered": False,
+            "atomicity_recoverable": True,
+        }
+        c1 = decide_decompression_budget(f1)
+        assert c1.rung.name == "streaming_in_memory_decode"
+
+        # 2. streaming_in_memory_decode refuses, spill_chunk_to_temp_storage holds
+        f2 = {
+            "active_memory_bytes": 100000000,
+            "chunk_bytes": 4096,
+            "max_memory_bytes": 67108864,
+            "observed_expansion_ratio": 4.0,
+            "max_safe_expansion_ratio": 50.0,
+            "spill_permitted": True,
+            "spill_storage_available": True,
+            "spilled_bytes": 1024,
+            "max_disk_spill_bytes": 10737418240,
+            "dynamic_scaling_enabled": True,
+            "current_buffer_bytes": 65536,
+            "max_buffer_ceiling": 33554432,
+            "reseed_handler_registered": False,
+            "atomicity_recoverable": True,
+        }
+        c2 = decide_decompression_budget(f2)
+        assert c2.rung.name == "spill_chunk_to_temp_storage"
+
+        # 3. spill_chunk_to_temp_storage refuses, scale_decoder_buffer_dynamically holds
+        f3 = {
+            "active_memory_bytes": 100000000,
+            "chunk_bytes": 4096,
+            "max_memory_bytes": 67108864,
+            "observed_expansion_ratio": 4.0,
+            "max_safe_expansion_ratio": 50.0,
+            "spill_permitted": False,
+            "spill_storage_available": False,
+            "spilled_bytes": 100 * 1024 * 1024 * 1024,
+            "max_disk_spill_bytes": 10737418240,
+            "dynamic_scaling_enabled": True,
+            "current_buffer_bytes": 65536,
+            "max_buffer_ceiling": 33554432,
+            "reseed_handler_registered": False,
+            "atomicity_recoverable": True,
+        }
+        c3 = decide_decompression_budget(f3)
+        assert c3.rung.name == "scale_decoder_buffer_dynamically"
+
+        # 4. scale_decoder_buffer_dynamically refuses, quarantine_runaway_transaction holds
+        f4 = {
+            "active_memory_bytes": 100000000,
+            "chunk_bytes": 4096,
+            "max_memory_bytes": 67108864,
+            "observed_expansion_ratio": 4.0,
+            "max_safe_expansion_ratio": 50.0,
+            "spill_permitted": False,
+            "spill_storage_available": False,
+            "spilled_bytes": 100 * 1024 * 1024 * 1024,
+            "max_disk_spill_bytes": 10737418240,
+            "dynamic_scaling_enabled": False,
+            "current_buffer_bytes": 100000000,
+            "max_buffer_ceiling": 33554432,
+            "reseed_handler_registered": True,
+            "atomicity_recoverable": True,
+        }
+        c4 = decide_decompression_budget(f4)
+        assert c4.rung.name == "quarantine_runaway_transaction"
+
+        # 5. quarantine_runaway_transaction refuses, refuse_decompression_bomb holds
+        f5 = {
+            "active_memory_bytes": 100000000,
+            "chunk_bytes": 4096,
+            "max_memory_bytes": 67108864,
+            "observed_expansion_ratio": 4.0,
+            "max_safe_expansion_ratio": 50.0,
+            "spill_permitted": False,
+            "spill_storage_available": False,
+            "spilled_bytes": 100 * 1024 * 1024 * 1024,
+            "max_disk_spill_bytes": 10737418240,
+            "dynamic_scaling_enabled": False,
+            "current_buffer_bytes": 100000000,
+            "max_buffer_ceiling": 33554432,
+            "reseed_handler_registered": False,
+            "atomicity_recoverable": False,
+        }
+        c5 = decide_decompression_budget(f5)
+        assert c5.rung.name == "refuse_decompression_bomb"
+

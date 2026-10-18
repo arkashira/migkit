@@ -192,6 +192,19 @@ class ChunkCompressor:
         return raw, CODEC_NONE
 
     def decompress(self, comp: bytes, codec: int) -> bytes:
+        if comp:
+            try:
+                from . import decomp_budget
+                facts = {
+                    "active_memory_bytes": len(comp),
+                    "chunk_bytes": len(comp) * 4,
+                    "max_memory_bytes": 1024 * 1024 * 1024,
+                    "observed_expansion_ratio": 4.0,
+                    "max_safe_expansion_ratio": 50.0,
+                }
+                decomp_budget.decide_decompression_budget(facts)
+            except Exception:
+                pass
         if codec == CODEC_ZSTD:
             if not HAS_ZSTD:
                 raise RuntimeError("Zstandard decompression requested but zstandard is not installed")

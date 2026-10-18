@@ -9,7 +9,7 @@ from pathlib import Path
 import shutil
 import tempfile
 import threading
-from typing import Any, BinaryIO, Dict, Iterable, Iterator, List, Optional, Union
+from typing import Any, BinaryIO, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 import uuid
 import zlib
 
@@ -18,6 +18,103 @@ try:
     HAS_ZSTD = True
 except ImportError:
     HAS_ZSTD = False
+
+from . import decide
+
+
+def decompression_budget_rungs() -> Tuple[decide.Rung, ...]:
+    """Decision ladder for streaming decompression memory and spill budget (Row 660: NEED12)."""
+    return (
+        decide.Rung(
+            "streaming_in_memory_decode",
+            "decode streaming chunks directly in bounded memory within expansion ratio safety bounds",
+            needs=(
+                decide.Need(
+                    "within memory budget",
+                    lambda f: f.get("active_memory_bytes", 0) + f.get("chunk_bytes", 0) <= f.get("max_memory_bytes", 67108864),
+                    "active memory exceeds limit",
+                ),
+                decide.Need(
+                    "within safe expansion ratio",
+                    lambda f: f.get("observed_expansion_ratio", 1.0) <= f.get("max_safe_expansion_ratio", 50.0),
+                    "decompression expansion ratio exceeds safety limit",
+                ),
+            ),
+            footprint=0,
+            leaves="decode streaming chunks directly in bounded memory",
+        ),
+        decide.Rung(
+            "spill_chunk_to_temp_storage",
+            "spill decompressed chunks to disk spool storage when memory limits are exceeded",
+            needs=(
+                decide.Need(
+                    "spill storage permitted",
+                    lambda f: bool(f.get("spill_permitted", True)),
+                    "spill to disk storage not permitted",
+                ),
+                decide.Need(
+                    "spill storage available",
+                    lambda f: bool(f.get("spill_storage_available", True)),
+                    "spill storage directory not available",
+                ),
+                decide.Need(
+                    "within disk budget",
+                    lambda f: f.get("spilled_bytes", 0) + f.get("chunk_bytes", 0) <= f.get("max_disk_spill_bytes", 10737418240),
+                    "spill bytes exceed disk budget",
+                ),
+            ),
+            footprint=1,
+            leaves="spill decompressed chunks to disk spool storage",
+        ),
+        decide.Rung(
+            "scale_decoder_buffer_dynamically",
+            "dynamically adjust decoder buffer size to prevent chunk fragmentation",
+            needs=(
+                decide.Need(
+                    "dynamic buffer scaling enabled",
+                    lambda f: bool(f.get("dynamic_scaling_enabled", True)),
+                    "dynamic decoder buffer scaling disabled",
+                ),
+                decide.Need(
+                    "within max buffer ceiling",
+                    lambda f: f.get("current_buffer_bytes", 0) <= f.get("max_buffer_ceiling", 33554432),
+                    "decoder buffer exceeds ceiling",
+                ),
+            ),
+            footprint=2,
+            leaves="dynamically adjust decoder buffer size",
+        ),
+        decide.Rung(
+            "quarantine_runaway_transaction",
+            "quarantine runaway transaction and trigger bounded reseed",
+            needs=(
+                decide.Need(
+                    "reseed handler registered",
+                    lambda f: bool(f.get("reseed_handler_registered", False)),
+                    "no reseed handler registered for runaway transaction",
+                ),
+                decide.Need(
+                    "transaction atomicity recoverable",
+                    lambda f: bool(f.get("atomicity_recoverable", True)),
+                    "transaction partial effects cannot be safely recovered",
+                ),
+            ),
+            footprint=3,
+            leaves="quarantine runaway transaction and trigger bounded reseed",
+        ),
+        decide.Rung(
+            "refuse_decompression_bomb",
+            "refuse transaction decompression to protect system memory",
+            footprint=4,
+            leaves="refuse transaction decompression to protect system memory",
+        ),
+    )
+
+
+def decide_decompression_budget(facts: Dict[str, Any]) -> decide.Choice:
+    """Climb the decompression_budget_rungs ladder."""
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("decompression budget strategy", decompression_budget_rungs(), fact_obj)
 
 
 class DecompressionBudgetError(Exception):
@@ -86,6 +183,40 @@ class BudgetLimits:
     max_nested_allocations: int = 32
     spill_policy: SpillPolicy = SpillPolicy.AUTO
     default_limit_action: LimitAction = LimitAction.REFUSE
+
+    @classmethod
+    def from_facts(cls, facts: Dict[str, Any]) -> "BudgetLimits":
+        return cls(
+            max_memory_bytes=facts.get("max_memory_bytes", 64 * 1024 * 1024),
+            max_uncompressed_bytes=facts.get("max_uncompressed_bytes", 2 * 1024 * 1024 * 1024),
+            max_compressed_bytes=facts.get("max_compressed_bytes", 1 * 1024 * 1024 * 1024),
+            spill_threshold_bytes=facts.get("spill_threshold_bytes", 8 * 1024 * 1024),
+            decoder_chunk_size=facts.get("decoder_chunk_size", 64 * 1024),
+            max_decoder_buffer_bytes=facts.get("max_decoder_buffer_bytes", 16 * 1024 * 1024),
+            max_nested_depth=facts.get("max_nested_depth", 8),
+            max_nested_allocations=facts.get("max_nested_allocations", 32),
+            spill_policy=facts.get("spill_policy", SpillPolicy.AUTO),
+            default_limit_action=facts.get("default_limit_action", LimitAction.REFUSE),
+        )
+
+    def evaluate_strategy(self, active_memory: int = 0, incoming_chunk: int = 0) -> decide.Choice:
+        facts = {
+            "active_memory_bytes": active_memory,
+            "chunk_bytes": incoming_chunk,
+            "max_memory_bytes": self.max_memory_bytes,
+            "observed_expansion_ratio": (incoming_chunk / max(1, active_memory)) if active_memory else 1.0,
+            "max_safe_expansion_ratio": 50.0,
+            "spill_permitted": self.spill_policy != SpillPolicy.MEMORY_ONLY,
+            "spill_storage_available": True,
+            "spilled_bytes": 0,
+            "max_disk_spill_bytes": self.max_uncompressed_bytes,
+            "dynamic_scaling_enabled": True,
+            "current_buffer_bytes": self.decoder_chunk_size,
+            "max_buffer_ceiling": self.max_decoder_buffer_bytes,
+            "reseed_handler_registered": self.default_limit_action == LimitAction.RESEED,
+            "atomicity_recoverable": True,
+        }
+        return decide_decompression_budget(facts)
 
 
 @dataclass

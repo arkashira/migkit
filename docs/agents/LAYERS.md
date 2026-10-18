@@ -26,7 +26,7 @@ A package imports its own rank and the ranks below it, never one above. A rank o
 
 Outside the rule: `tools` (the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them); `data` (the files migkit ships as resources).
 
-## Upward imports still listed: 418
+## Upward imports still listed: 419
 
 ### (not listed)
 
@@ -34,6 +34,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/cancel_recovery.py:13` execution -> decision (`decide`)
 - `migkit/checkpoint.py:33` persistence -> decision (`sizing`)
 - `migkit/config.py:446` configuration -> execution (`keepalive`)
+- `migkit/decomp_budget.py:22` execution -> decision (`decide`)
 - `migkit/effect_checkpoint.py:52` persistence -> decision (`decide`)
 - `migkit/engines/mysql.py:11567` engines -> workflows (`ratchet`)
 - `migkit/engines/postgres.py:8006` engines -> workflows (`verifiers`)

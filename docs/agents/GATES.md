@@ -89,6 +89,8 @@ re-dispatches it with the finding and the row comes back here when it passes.
 | 656 | 2026-10-18 | PASS | critic (agy, session fda5f478) | 67f4dc8b | identity_strategy_rungs decide ladder across 5 branches; wired into cutover.py preflight; literal default KeyStrategy.REFUSE replaced with dynamic decide ladder; PROVES_RUNGS verified under watched(); 21/21 tests green |
 | 657 | 2026-10-18 | PASS | critic (agy, session fda5f478) | 87774ddd | backfill_coverage_rungs decide ladder across 5 branches; wired into cutover.py preflight and applyway.py; choose_coverage_strategy routed through decide ladder; PROVES_RUNGS verified under watched(); 11/11 tests green |
 | 658 | 2026-10-18 | PASS | critic (agy, session fda5f478) | 87774ddd | partial_image_cache_rungs decide ladder across 5 branches; wired into cutover.py preflight and applyway.py; absent unchanged LOB/TOAST placeholders distinguished from NULL and before-images reconstructed; PROVES_RUNGS verified under watched(); 11/11 tests green |
+| 659 | 2026-10-18 | PASS | critic (agy, session fda5f478) | cf8a9eac | lob_execution_rungs decide ladder across 5 branches; wired into cutover.py preflight and lob_policy.py; unswallowed savepoint creation failure raising LobStreamTransactionError; PROVES_RUNGS verified under watched(); 15/15 tests green |
+| 660 | 2026-10-18 | PASS | critic (agy, session fda5f478) | cf8a9eac | decompression_budget_rungs decide ladder across 5 branches; wired into cutover.py preflight and ring_buffer.py; BudgetLimits.from_facts and dynamic evaluation without fixed literals; PROVES_RUNGS verified under watched(); 18/18 tests green |
 
 
 

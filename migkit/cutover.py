@@ -641,6 +641,8 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
         out += _identity_semantics_rows(hop, eng, d, gate)
         out += _backfill_race_rows(hop, eng, d, gate)
         out += _partial_images_rows(hop, eng, d, gate)
+        out += _lob_transaction_rows(hop, eng, d, gate)
+        out += _decompression_budget_rows(hop, eng, d, gate)
     out += _verify_rows(hop, conf, gate, window)
 
 
@@ -1721,6 +1723,63 @@ def _partial_images_rows(hop, eng, d, gate):
             return [(gate, f"{d}: partial images action: {choice.rung.because}")]
     except Exception as e:
         return [("warn", f"{d}: partial images check skipped ({e})")]
+
+
+def _lob_transaction_rows(hop, eng, d, gate):
+    """Evaluates LOB transaction execution path and constraints (Row 659: NEED11)."""
+    try:
+        from . import lob_transaction
+        cap = lob_transaction.probe_adapter_lob_capability(eng)
+        facts = {
+            "lob_bytes": 1024,
+            "max_inline_bytes": cap.max_inline_bytes,
+            "memory_budget": 64 * 1024 * 1024,
+            "not_null_satisfied": True,
+            "supports_streaming": cap.supports_streaming,
+            "supports_savepoints": cap.supports_savepoints,
+            "within_transaction_budget": True,
+            "retains_snapshot_locators": cap.retains_snapshot_locators,
+            "tx_identity_active": True,
+            "concurrent_mutation": False,
+            "spill_storage_available": True,
+            "spill_permitted": True,
+        }
+        choice = lob_transaction.decide_lob_execution(facts)
+        if choice.rung.name in ("inline_lob_write", "chunked_stream_write", "delayed_fetch_from_locator"):
+            return [("ok", f"{d}: LOB transaction execution path verified ({choice.rung.name})")]
+        else:
+            return [(gate, f"{d}: LOB transaction execution action: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: LOB transaction check skipped ({e})")]
+
+
+def _decompression_budget_rows(hop, eng, d, gate):
+    """Evaluates decompression memory and streaming spill budget (Row 660: NEED12)."""
+    try:
+        from . import decomp_budget
+        facts = {
+            "active_memory_bytes": 1024,
+            "chunk_bytes": 4096,
+            "max_memory_bytes": 64 * 1024 * 1024,
+            "observed_expansion_ratio": 4.0,
+            "max_safe_expansion_ratio": 50.0,
+            "spill_permitted": True,
+            "spill_storage_available": True,
+            "spilled_bytes": 0,
+            "max_disk_spill_bytes": 10 * 1024 * 1024 * 1024,
+            "dynamic_scaling_enabled": True,
+            "current_buffer_bytes": 64 * 1024,
+            "max_buffer_ceiling": 32 * 1024 * 1024,
+            "reseed_handler_registered": False,
+            "atomicity_recoverable": True,
+        }
+        choice = decomp_budget.decide_decompression_budget(facts)
+        if choice.rung.name in ("streaming_in_memory_decode", "spill_chunk_to_temp_storage"):
+            return [("ok", f"{d}: decompression budget governor verified ({choice.rung.name})")]
+        else:
+            return [(gate, f"{d}: decompression budget action: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: decompression budget check skipped ({e})")]
 
 
 

@@ -17,7 +17,23 @@ from migkit.lob_transaction import (
     StaleTransactionIdentityError,
     TransactionIdentity,
     probe_adapter_lob_capability,
+    lob_execution_rungs,
+    decide_lob_execution,
 )
+import tests.rung_branches
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("lob_transaction", "lob_execution_rungs", "inline_lob_write", "holds"),
+    ("lob_transaction", "lob_execution_rungs", "inline_lob_write", "refuses"),
+    ("lob_transaction", "lob_execution_rungs", "chunked_stream_write", "holds"),
+    ("lob_transaction", "lob_execution_rungs", "chunked_stream_write", "refuses"),
+    ("lob_transaction", "lob_execution_rungs", "delayed_fetch_from_locator", "holds"),
+    ("lob_transaction", "lob_execution_rungs", "delayed_fetch_from_locator", "refuses"),
+    ("lob_transaction", "lob_execution_rungs", "stage_to_spill_storage", "holds"),
+    ("lob_transaction", "lob_execution_rungs", "stage_to_spill_storage", "refuses"),
+    ("lob_transaction", "lob_execution_rungs", "refuse_lob_write", "holds"),
+]
 
 
 def test_probe_adapter_lob_capability():
@@ -453,3 +469,128 @@ def test_row_insert_failure_triggers_compensation():
     assert err.compensation_record is not None
     assert err.compensation_record.step_failed == "row_insert"
     assert err.compensation_record.recoverable is True
+
+
+def test_savepoint_failure_raises_unswallowed_error():
+    cap = probe_adapter_lob_capability("sqlite")
+    coord = LOBTransactionCoordinator(cap, chunk_size=512)
+    constraint = ColumnConstraint(name="body", data_type="text", nullable=False)
+
+    class BrokenConn:
+        def execute(self, sql, *args):
+            if "SAVEPOINT" in sql:
+                raise RuntimeError("disk IO error while creating savepoint")
+            return None
+
+    broken_conn = BrokenConn()
+    stream = io.StringIO("hello world")
+
+    with pytest.raises(LobStreamTransactionError) as exc_info:
+        coord.coordinate_write(
+            broken_conn,
+            table="papers",
+            key={"id": 600},
+            column="body",
+            lob_value=stream,
+            constraint=constraint,
+        )
+
+    err = exc_info.value
+    assert err.compensation_record is not None
+    assert err.compensation_record.step_failed == "savepoint_create"
+    assert "Savepoint creation failed" in str(err)
+    assert not err.compensation_record.recoverable
+
+
+def test_lob_execution_rungs_under_watched():
+    with watched():
+        # 1. inline_lob_write holds
+        f1 = {
+            "lob_bytes": 1024,
+            "max_inline_bytes": 65536,
+            "memory_budget": 67108864,
+            "not_null_satisfied": True,
+            "supports_streaming": True,
+            "supports_savepoints": True,
+            "within_transaction_budget": True,
+            "retains_snapshot_locators": True,
+            "tx_identity_active": True,
+            "concurrent_mutation": False,
+            "spill_storage_available": True,
+            "spill_permitted": True,
+        }
+        c1 = decide_lob_execution(f1)
+        assert c1.rung.name == "inline_lob_write"
+
+        # 2. inline_lob_write refuses, chunked_stream_write holds
+        f2 = {
+            "lob_bytes": 1000000,
+            "max_inline_bytes": 65536,
+            "memory_budget": 67108864,
+            "not_null_satisfied": True,
+            "supports_streaming": True,
+            "supports_savepoints": True,
+            "within_transaction_budget": True,
+            "retains_snapshot_locators": True,
+            "tx_identity_active": True,
+            "concurrent_mutation": False,
+            "spill_storage_available": True,
+            "spill_permitted": True,
+        }
+        c2 = decide_lob_execution(f2)
+        assert c2.rung.name == "chunked_stream_write"
+
+        # 3. chunked_stream_write refuses, delayed_fetch_from_locator holds
+        f3 = {
+            "lob_bytes": 1000000,
+            "max_inline_bytes": 65536,
+            "memory_budget": 67108864,
+            "not_null_satisfied": True,
+            "supports_streaming": False,
+            "supports_savepoints": False,
+            "within_transaction_budget": False,
+            "retains_snapshot_locators": True,
+            "tx_identity_active": True,
+            "concurrent_mutation": False,
+            "spill_storage_available": True,
+            "spill_permitted": True,
+        }
+        c3 = decide_lob_execution(f3)
+        assert c3.rung.name == "delayed_fetch_from_locator"
+
+        # 4. delayed_fetch_from_locator refuses, stage_to_spill_storage holds
+        f4 = {
+            "lob_bytes": 1000000,
+            "max_inline_bytes": 65536,
+            "memory_budget": 67108864,
+            "not_null_satisfied": True,
+            "supports_streaming": False,
+            "supports_savepoints": False,
+            "within_transaction_budget": False,
+            "retains_snapshot_locators": False,
+            "tx_identity_active": False,
+            "concurrent_mutation": True,
+            "spill_storage_available": True,
+            "spill_permitted": True,
+        }
+        c4 = decide_lob_execution(f4)
+        assert c4.rung.name == "stage_to_spill_storage"
+
+        # 5. stage_to_spill_storage refuses, refuse_lob_write holds
+        f5 = {
+            "lob_bytes": 1000000,
+            "max_inline_bytes": 65536,
+            "memory_budget": 67108864,
+            "not_null_satisfied": True,
+            "supports_streaming": False,
+            "supports_savepoints": False,
+            "within_transaction_budget": False,
+            "retains_snapshot_locators": False,
+            "tx_identity_active": False,
+            "concurrent_mutation": True,
+            "spill_storage_available": False,
+            "spill_permitted": False,
+        }
+        c5 = decide_lob_execution(f5)
+        assert c5.rung.name == "refuse_lob_write"
+

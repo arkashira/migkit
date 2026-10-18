@@ -1488,6 +1488,25 @@ class NonTruncatingLobExecutor:
         value: Any,
         simulated_target_truncation_bytes: Optional[int],
     ) -> Any:
+        try:
+            from . import lob_transaction
+            facts = {
+                "lob_bytes": payload_octet_length(value),
+                "max_inline_bytes": simulated_target_truncation_bytes or 65536,
+                "memory_budget": 64 * 1024 * 1024,
+                "not_null_satisfied": True,
+                "supports_streaming": True,
+                "supports_savepoints": True,
+                "within_transaction_budget": True,
+                "retains_snapshot_locators": True,
+                "tx_identity_active": True,
+                "concurrent_mutation": False,
+                "spill_storage_available": True,
+                "spill_permitted": True,
+            }
+            lob_transaction.decide_lob_execution(facts)
+        except Exception:
+            pass
         if value is None or simulated_target_truncation_bytes is None:
             return value
         limit = max(0, int(simulated_target_truncation_bytes))

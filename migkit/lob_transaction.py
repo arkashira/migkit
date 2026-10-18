@@ -7,6 +7,114 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 
+from . import decide
+
+
+def lob_execution_rungs() -> Tuple[decide.Rung, ...]:
+    """Decision ladder for LOB transaction execution path selection (Row 659: NEED11)."""
+    return (
+        decide.Rung(
+            "inline_lob_write",
+            "write LOB inline in single insert/update statement within adapter byte and memory budgets",
+            needs=(
+                decide.Need(
+                    "within inline byte limit",
+                    lambda f: f.get("lob_bytes", 0) <= f.get("max_inline_bytes", 65536),
+                    "lob size exceeds inline limit",
+                ),
+                decide.Need(
+                    "within memory budget",
+                    lambda f: f.get("lob_bytes", 0) <= f.get("memory_budget", 67108864),
+                    "lob size exceeds coordinator memory budget",
+                ),
+                decide.Need(
+                    "not null constraint satisfied",
+                    lambda f: bool(f.get("not_null_satisfied", True)),
+                    "empty or null value violates not null constraint",
+                ),
+            ),
+            footprint=0,
+            leaves="inline LOB write in single statement",
+        ),
+        decide.Rung(
+            "chunked_stream_write",
+            "write LOB in streaming chunks protected by transactional savepoints",
+            needs=(
+                decide.Need(
+                    "streaming supported",
+                    lambda f: bool(f.get("supports_streaming", True)),
+                    "target adapter does not support streaming LOB writes",
+                ),
+                decide.Need(
+                    "savepoints supported",
+                    lambda f: bool(f.get("supports_savepoints", True)),
+                    "target adapter does not support transactional savepoints",
+                ),
+                decide.Need(
+                    "within stream transaction budget",
+                    lambda f: bool(f.get("within_transaction_budget", True)),
+                    "exceeds stream transaction budget",
+                ),
+            ),
+            footprint=1,
+            leaves="chunked stream write with transactional savepoints",
+        ),
+        decide.Rung(
+            "delayed_fetch_from_locator",
+            "retain snapshot locator and fetch LOB on demand during target apply",
+            needs=(
+                decide.Need(
+                    "source retains snapshot locators",
+                    lambda f: bool(f.get("retains_snapshot_locators", True)),
+                    "source adapter does not retain snapshot locators across transactions",
+                ),
+                decide.Need(
+                    "active transaction identity",
+                    lambda f: bool(f.get("tx_identity_active", True)),
+                    "source transaction identity is inactive or expired",
+                ),
+                decide.Need(
+                    "no concurrent row mutation",
+                    lambda f: not bool(f.get("concurrent_mutation", False)),
+                    "source row mutated during delayed fetch window",
+                ),
+            ),
+            footprint=2,
+            leaves="delayed fetch from source snapshot locator",
+        ),
+        decide.Rung(
+            "stage_to_spill_storage",
+            "stage oversized LOB chunk to temporary spool storage before applying",
+            needs=(
+                decide.Need(
+                    "spill storage available",
+                    lambda f: bool(f.get("spill_storage_available", True)),
+                    "auxiliary spill storage not available",
+                ),
+                decide.Need(
+                    "spill policy permits buffering",
+                    lambda f: bool(f.get("spill_permitted", True)),
+                    "spill policy prohibits disk buffering",
+                ),
+            ),
+            footprint=3,
+            leaves="stage oversized LOB chunk to temporary spool storage",
+        ),
+        decide.Rung(
+            "refuse_lob_write",
+            "refuse LOB write to prevent truncation or constraint corruption",
+            footprint=4,
+            leaves="refuse LOB write to prevent truncation or constraint corruption",
+        ),
+    )
+
+
+def decide_lob_execution(facts: Dict[str, Any]) -> decide.Choice:
+    """Climb the lob_execution_rungs ladder."""
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("lob transaction execution", lob_execution_rungs(), fact_obj)
+
+
 class LobTransactionError(Exception):
     pass
 
@@ -133,18 +241,23 @@ class WriteReceipt:
     digest: Optional[str] = None
 
 
-def probe_adapter_lob_capability(engine_or_adapter: Any) -> AdapterLobCapability:
+def probe_adapter_lob_capability(
+    engine_or_adapter: Any,
+    max_inline_bytes: Optional[int] = None,
+) -> AdapterLobCapability:
     name = (
         engine_or_adapter
         if isinstance(engine_or_adapter, str)
         else getattr(engine_or_adapter, "ENGINE_FAMILY", getattr(engine_or_adapter, "engine", "generic"))
     ).lower()
 
+    explicit_inline = max_inline_bytes or getattr(engine_or_adapter, "max_inline_bytes", None)
+
     if "oracle" in name:
         return AdapterLobCapability(
             engine_name="oracle",
             eager_materialize=False,
-            max_inline_bytes=4000,
+            max_inline_bytes=explicit_inline or 4000,
             supports_streaming=True,
             supports_savepoints=True,
             empty_string_is_null=True,
@@ -154,7 +267,7 @@ def probe_adapter_lob_capability(engine_or_adapter: Any) -> AdapterLobCapability
         return AdapterLobCapability(
             engine_name="postgres",
             eager_materialize=False,
-            max_inline_bytes=1024 * 1024,
+            max_inline_bytes=explicit_inline or (1024 * 1024),
             supports_streaming=True,
             supports_savepoints=True,
             empty_string_is_null=False,
@@ -164,7 +277,7 @@ def probe_adapter_lob_capability(engine_or_adapter: Any) -> AdapterLobCapability
         return AdapterLobCapability(
             engine_name="mysql",
             eager_materialize=False,
-            max_inline_bytes=1024 * 1024,
+            max_inline_bytes=explicit_inline or (1024 * 1024),
             supports_streaming=True,
             supports_savepoints=True,
             empty_string_is_null=False,
@@ -174,7 +287,7 @@ def probe_adapter_lob_capability(engine_or_adapter: Any) -> AdapterLobCapability
         return AdapterLobCapability(
             engine_name="sqlite",
             eager_materialize=False,
-            max_inline_bytes=1024 * 1024,
+            max_inline_bytes=explicit_inline or (1024 * 1024),
             supports_streaming=True,
             supports_savepoints=True,
             empty_string_is_null=False,
@@ -183,7 +296,7 @@ def probe_adapter_lob_capability(engine_or_adapter: Any) -> AdapterLobCapability
     return AdapterLobCapability(
         engine_name=name,
         eager_materialize=True,
-        max_inline_bytes=32 * 1024,
+        max_inline_bytes=explicit_inline or (32 * 1024),
         supports_streaming=False,
         supports_savepoints=True,
         empty_string_is_null=False,
@@ -208,6 +321,22 @@ class LOBTransactionCoordinator:
         constraint: ColumnConstraint,
         source_cap: Optional[AdapterLobCapability] = None,
     ) -> LobPricing:
+        facts = {
+            "lob_bytes": lob_size_bytes,
+            "max_inline_bytes": self.capability.max_inline_bytes,
+            "memory_budget": self.memory_budget,
+            "not_null_satisfied": not (not constraint.nullable and (lob_size_bytes == 0 and self.capability.empty_string_is_null)),
+            "supports_streaming": self.capability.supports_streaming,
+            "supports_savepoints": self.capability.supports_savepoints,
+            "within_transaction_budget": lob_size_bytes <= (self.memory_budget * 64),
+            "retains_snapshot_locators": source_cap.retains_snapshot_locators if source_cap else self.capability.retains_snapshot_locators,
+            "tx_identity_active": True,
+            "concurrent_mutation": False,
+            "spill_storage_available": True,
+            "spill_permitted": True,
+        }
+        choice = decide_lob_execution(facts)
+
         prices: Dict[ExecutionPath, PathPrice] = {}
 
         can_inline = (
@@ -215,7 +344,7 @@ class LOBTransactionCoordinator:
             and lob_size_bytes <= self.memory_budget
         )
         if can_inline:
-            inline_cost = 1.0 + (lob_size_bytes / (1024 * 1024))
+            inline_cost = 1.0 + (lob_size_bytes / max(1, self.capability.max_inline_bytes))
             prices[ExecutionPath.INLINE] = PathPrice(
                 path=ExecutionPath.INLINE,
                 estimated_cost=inline_cost,
@@ -237,7 +366,7 @@ class LOBTransactionCoordinator:
         if self.capability.supports_streaming:
             chunks = max(1, math.ceil(lob_size_bytes / self.chunk_size))
             stream_memory = min(lob_size_bytes, self.chunk_size)
-            stream_cost = 2.0 + (chunks * 0.5) + (lob_size_bytes / (1024 * 1024))
+            stream_cost = 2.0 + (chunks * 0.5) + (lob_size_bytes / max(1, self.capability.max_inline_bytes))
             prices[ExecutionPath.STREAMED] = PathPrice(
                 path=ExecutionPath.STREAMED,
                 estimated_cost=stream_cost,
@@ -275,21 +404,27 @@ class LOBTransactionCoordinator:
                 refusal_reason="Source does not retain snapshot locators or target cannot apply",
             )
 
-        feasible_paths = [p for p in (ExecutionPath.INLINE, ExecutionPath.STREAMED) if prices[p].is_feasible]
-        if feasible_paths:
-            best = min(feasible_paths, key=lambda p: prices[p].estimated_cost)
-            recommended = best
+        if choice.rung.name == "inline_lob_write" and prices[ExecutionPath.INLINE].is_feasible:
+            recommended = ExecutionPath.INLINE
+        elif choice.rung.name == "chunked_stream_write" and prices[ExecutionPath.STREAMED].is_feasible:
+            recommended = ExecutionPath.STREAMED
+        elif choice.rung.name == "delayed_fetch_from_locator" and prices[ExecutionPath.DELAYED_FETCH].is_feasible:
+            recommended = ExecutionPath.DELAYED_FETCH
         else:
-            recommended = ExecutionPath.REFUSED
-            refusal_msg = prices[ExecutionPath.STREAMED].refusal_reason or prices[ExecutionPath.INLINE].refusal_reason or "No feasible path under adapter capabilities"
-            prices[ExecutionPath.REFUSED] = PathPrice(
-                path=ExecutionPath.REFUSED,
-                estimated_cost=float("inf"),
-                round_trips=0,
-                peak_memory_bytes=0,
-                is_feasible=False,
-                refusal_reason=refusal_msg,
-            )
+            feasible_paths = [p for p in (ExecutionPath.INLINE, ExecutionPath.STREAMED) if prices[p].is_feasible]
+            if feasible_paths:
+                recommended = min(feasible_paths, key=lambda p: prices[p].estimated_cost)
+            else:
+                recommended = ExecutionPath.REFUSED
+                refusal_msg = prices[ExecutionPath.STREAMED].refusal_reason or prices[ExecutionPath.INLINE].refusal_reason or "No feasible path under adapter capabilities"
+                prices[ExecutionPath.REFUSED] = PathPrice(
+                    path=ExecutionPath.REFUSED,
+                    estimated_cost=float("inf"),
+                    round_trips=0,
+                    peak_memory_bytes=0,
+                    is_feasible=False,
+                    refusal_reason=refusal_msg,
+                )
 
         return LobPricing(recommended_path=recommended, prices=prices)
 
@@ -408,8 +543,20 @@ class LOBTransactionCoordinator:
             try:
                 conn.execute(f"SAVEPOINT {sp_name}")
                 savepoint_active = True
-            except Exception:
-                savepoint_active = False
+            except Exception as exc:
+                rec = CompensationRecord(
+                    table=table,
+                    key=key,
+                    status=CompensationStatus.FAILED,
+                    step_failed="savepoint_create",
+                    error_message=str(exc),
+                    recoverable=False,
+                )
+                raise LobStreamTransactionError(
+                    f"Savepoint creation failed for {table}.{column}: {exc}",
+                    compensation_record=rec,
+                    original_error=exc,
+                )
 
         first_chunk = stream.read(self.chunk_size)
         is_text = isinstance(first_chunk, str)
