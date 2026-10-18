@@ -19,7 +19,23 @@ from migkit.control_upgrade import (
     import_state,
     is_upgrade_in_progress,
     recover_interrupted_upgrade,
+    control_upgrade_rungs,
+    decide_control_upgrade,
 )
+import tests.rung_branches
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("control_upgrade", "control_upgrade_rungs", "direct_schema_migration_without_resync", "holds"),
+    ("control_upgrade", "control_upgrade_rungs", "direct_schema_migration_without_resync", "refuses"),
+    ("control_upgrade", "control_upgrade_rungs", "forward_compatible_resume", "holds"),
+    ("control_upgrade", "control_upgrade_rungs", "forward_compatible_resume", "refuses"),
+    ("control_upgrade", "control_upgrade_rungs", "reconcile_and_stage_state_upgrade", "holds"),
+    ("control_upgrade", "control_upgrade_rungs", "reconcile_and_stage_state_upgrade", "refuses"),
+    ("control_upgrade", "control_upgrade_rungs", "read_only_fallback_downgrade", "holds"),
+    ("control_upgrade", "control_upgrade_rungs", "read_only_fallback_downgrade", "refuses"),
+    ("control_upgrade", "control_upgrade_rungs", "refuse_incompatible_state_schema", "holds"),
+]
 
 
 def test_schema_version_parse_and_ordering():
@@ -407,3 +423,53 @@ def test_full_roundtrip_v1_to_v3_to_v1_preserves_identity_and_positions():
     inv_cp = s1_down.checkpoints.get("inventory") or s1_down.checkpoints.get("hop-sync:inventory")
     assert inv_cp.position.get("last_pk") == 99000 or inv_cp.position.get("last_pk", {}).get("val") == 99000
     assert inv_cp.position.get("lsn") == "0/1A2B3C4"
+
+
+def test_control_upgrade_rungs_under_watched():
+    with watched():
+        # 1. direct_schema_migration_without_resync
+        c1 = decide_control_upgrade({
+            "from_version": 1,
+            "target_version": 2,
+            "has_migration_handler": True,
+            "preserves_invariants": True,
+        })
+        assert c1.rung.name == "direct_schema_migration_without_resync"
+
+        # 2. forward_compatible_resume
+        c2 = decide_control_upgrade({
+            "from_version": 2,
+            "target_version": 2,
+            "state_valid": True,
+        })
+        assert c2.rung.name == "forward_compatible_resume"
+
+        # 3. reconcile_and_stage_state_upgrade
+        c3 = decide_control_upgrade({
+            "from_version": 2,
+            "target_version": 2,
+            "state_valid": False,
+            "staging_available": True,
+            "atomic_swap_supported": True,
+        })
+        assert c3.rung.name == "reconcile_and_stage_state_upgrade"
+
+        # 4. read_only_fallback_downgrade
+        c4 = decide_control_upgrade({
+            "from_version": 3,
+            "target_version": 2,
+            "staging_available": False,
+            "atomic_swap_supported": False,
+            "backward_compatible": True,
+        })
+        assert c4.rung.name == "read_only_fallback_downgrade"
+
+        # 5. refuse_incompatible_state_schema
+        c5 = decide_control_upgrade({
+            "from_version": 3,
+            "target_version": 2,
+            "staging_available": False,
+            "atomic_swap_supported": False,
+            "backward_compatible": False,
+        })
+        assert c5.rung.name == "refuse_incompatible_state_schema"

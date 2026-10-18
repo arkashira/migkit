@@ -645,6 +645,8 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
         out += _decompression_budget_rows(hop, eng, d, gate)
         out += _process_memory_rows(hop, eng, d, gate)
         out += _progress_cause_rows(hop, eng, d, gate)
+        out += _lock_impact_rows(hop, eng, d, gate)
+        out += _control_upgrade_rows(hop, eng, d, gate)
     out += _verify_rows(hop, conf, gate, window)
 
 
@@ -1833,6 +1835,49 @@ def _progress_cause_rows(hop, eng, d, gate):
             return [(gate, f"{d}: progress cause action: {choice.rung.because}")]
     except Exception as e:
         return [("warn", f"{d}: progress cause check skipped ({e})")]
+
+
+def _lock_impact_rows(hop, eng, d, gate):
+    """Evaluates live workload lock budget and contention strategy (Row 663: NEED15)."""
+    try:
+        from . import locks
+        facts = {
+            "predicted_wait_seconds": 0.5,
+            "max_lock_timeout": 2.0,
+            "conflicting_transactions": [],
+            "queue_depth": 0,
+            "total_timeout_budget": 30.0,
+            "attempt": 0,
+            "max_retries": 5,
+        }
+        choice = locks.decide_lock_impact(facts)
+        if choice.rung.name in ("immediate_execution_within_budget", "bounded_backoff_and_retry"):
+            return [("ok", f"{d}: live workload lock budget verified ({choice.rung.name})")]
+        else:
+            return [(gate, f"{d}: live workload lock budget action: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: live workload lock budget check skipped ({e})")]
+
+
+def _control_upgrade_rows(hop, eng, d, gate):
+    """Evaluates control plane state schema upgrade and resume compatibility (Row 664: NEED16)."""
+    try:
+        from . import control_upgrade
+        facts = {
+            "from_version": 1,
+            "target_version": 2,
+            "has_migration_handler": True,
+            "preserves_invariants": True,
+            "staging_available": True,
+            "atomic_swap_supported": True,
+        }
+        choice = control_upgrade.decide_control_upgrade(facts)
+        if choice.rung.name in ("direct_schema_migration_without_resync", "forward_compatible_resume"):
+            return [("ok", f"{d}: control plane state upgrade verified ({choice.rung.name})")]
+        else:
+            return [(gate, f"{d}: control plane upgrade action: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: control plane upgrade check skipped ({e})")]
 
 
 

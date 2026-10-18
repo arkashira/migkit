@@ -22,6 +22,103 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Collection, Dict, List, Optional, Tuple, Union
 
+from . import decide
+
+
+def lock_impact_rungs() -> Tuple[decide.Rung, ...]:
+    """Decision ladder for live workload lock impact and execution strategy (Row 663: NEED15)."""
+    return (
+        decide.Rung(
+            "immediate_execution_within_budget",
+            "execute DDL immediately within lock budget when no blocking contention is observed",
+            needs=(
+                decide.Need(
+                    "predicted wait within timeout",
+                    lambda f: f.get("predicted_wait_seconds", 0.0) <= f.get("max_lock_timeout", 2.0),
+                    "predicted lock wait exceeds max lock timeout",
+                ),
+                decide.Need(
+                    "zero conflicting transactions",
+                    lambda f: len(f.get("conflicting_transactions", [])) == 0,
+                    "active conflicting transactions detected",
+                ),
+                decide.Need(
+                    "queue depth clear",
+                    lambda f: f.get("queue_depth", 0) == 0,
+                    "waiting lock queue depth is non-zero",
+                ),
+            ),
+            footprint=0,
+            leaves="execute statement immediately within lock budget",
+        ),
+        decide.Rung(
+            "bounded_backoff_and_retry",
+            "execute statement with exponential backoff and bounded retry under transient lock pressure",
+            needs=(
+                decide.Need(
+                    "predicted wait within total budget",
+                    lambda f: f.get("predicted_wait_seconds", 0.0) <= f.get("total_timeout_budget", 30.0),
+                    "predicted lock wait exceeds total budget",
+                ),
+                decide.Need(
+                    "retries available",
+                    lambda f: f.get("attempt", 0) < f.get("max_retries", 5),
+                    "max retries exhausted",
+                ),
+            ),
+            footprint=1,
+            leaves="retry execution with bounded backoff under transient contention",
+        ),
+        decide.Rung(
+            "expand_contract_phased_execution",
+            "decompose high-locking statement into phased expand-contract steps",
+            needs=(
+                decide.Need(
+                    "phased migration applicable",
+                    lambda f: bool(f.get("phased_plan_available", False)),
+                    "no phased expand-contract decomposition available",
+                ),
+                decide.Need(
+                    "table rewrite required",
+                    lambda f: bool(f.get("table_rewrite", False)),
+                    "statement does not require table rewrite",
+                ),
+            ),
+            footprint=2,
+            leaves="decompose into phased expand-contract online steps",
+        ),
+        decide.Rung(
+            "quarantine_and_defer_to_maintenance_window",
+            "defer execution to low-traffic maintenance window due to sustained lock contention",
+            needs=(
+                decide.Need(
+                    "deferral permitted",
+                    lambda f: bool(f.get("deferral_permitted", False)),
+                    "deferral to maintenance window not permitted",
+                ),
+                decide.Need(
+                    "contention sustained",
+                    lambda f: bool(f.get("sustained_contention", False)),
+                    "contention is not sustained",
+                ),
+            ),
+            footprint=3,
+            leaves="defer DDL execution to scheduled maintenance window",
+        ),
+        decide.Rung(
+            "refuse_unsafe_lock_contention",
+            "refuse execution to protect live transaction throughput from lock exhaustion",
+            footprint=4,
+            leaves="refuse execution to protect live transaction workload",
+        ),
+    )
+
+
+def decide_lock_impact(facts: Dict[str, Any]) -> decide.Choice:
+    """Climb the lock_impact_rungs ladder."""
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("live workload lock impact", lock_impact_rungs(), fact_obj)
+
 # PostgreSQL lock modes, least to most disruptive. The names are the ones
 # pg_locks reports, so a static verdict and a measured one are comparable.
 MODES = [
@@ -210,6 +307,17 @@ class LockBudget:
     backoff_factor: float = 2.0
     max_backoff: float = 5.0
     total_timeout_budget: float = 30.0
+
+    @classmethod
+    def from_facts(cls, facts: Dict[str, Any]) -> "LockBudget":
+        return cls(
+            max_lock_timeout=float(facts.get("max_lock_timeout", 2.0)),
+            max_retries=int(facts.get("max_retries", 5)),
+            initial_backoff=float(facts.get("initial_backoff", 0.2)),
+            backoff_factor=float(facts.get("backoff_factor", 2.0)),
+            max_backoff=float(facts.get("max_backoff", 5.0)),
+            total_timeout_budget=float(facts.get("total_timeout_budget", 30.0)),
+        )
 
 
 @dataclass
@@ -975,6 +1083,13 @@ def execute_with_lock_budget(
         try:
             _run_sql(runner, timeout_sql)
             res = _run_sql(runner, statement)
+            if hasattr(runner, "commit") and callable(runner.commit):
+                runner.commit()
+            elif eng == "postgres":
+                try:
+                    _run_sql(runner, "COMMIT;")
+                except Exception:
+                    pass
             return {
                 "status": "applied",
                 "attempts": attempt + 1,

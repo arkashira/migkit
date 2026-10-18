@@ -12,7 +12,103 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from . import checkpoint as cp_mod
+from . import decide
 from . import durable
+
+
+def control_upgrade_rungs() -> Tuple[decide.Rung, ...]:
+    """Decision ladder for control plane state schema migration and resume (Row 664: NEED16)."""
+    return (
+        decide.Rung(
+            "direct_schema_migration_without_resync",
+            "upgrade control plane schema in-place or staged without discarding checkpoints or resyncing data",
+            needs=(
+                decide.Need(
+                    "upgrade requested",
+                    lambda f: f.get("from_version", 1) < f.get("target_version", 2),
+                    "target version is not greater than source version",
+                ),
+                decide.Need(
+                    "migration handler exists",
+                    lambda f: bool(f.get("has_migration_handler", True)),
+                    "no migration transformation registered for this version transition",
+                ),
+                decide.Need(
+                    "preserves invariants",
+                    lambda f: bool(f.get("preserves_invariants", True)),
+                    "schema migration violates state invariants or requires full resync",
+                ),
+            ),
+            footprint=0,
+            leaves="migrate control plane state schema directly without data resync",
+        ),
+        decide.Rung(
+            "forward_compatible_resume",
+            "resume existing control plane state when schema versions match",
+            needs=(
+                decide.Need(
+                    "versions identical",
+                    lambda f: f.get("from_version", 1) == f.get("target_version", 1),
+                    "schema versions differ",
+                ),
+                decide.Need(
+                    "state valid",
+                    lambda f: bool(f.get("state_valid", True)),
+                    "state validation or digest check failed",
+                ),
+            ),
+            footprint=1,
+            leaves="resume existing control state directly",
+        ),
+        decide.Rung(
+            "reconcile_and_stage_state_upgrade",
+            "stage upgraded state in isolated directory and swap atomically to prevent corruption",
+            needs=(
+                decide.Need(
+                    "staging supported",
+                    lambda f: bool(f.get("staging_available", True)),
+                    "staging directory cannot be provisioned",
+                ),
+                decide.Need(
+                    "atomic swap supported",
+                    lambda f: bool(f.get("atomic_swap_supported", True)),
+                    "filesystem does not support atomic rename swap",
+                ),
+            ),
+            footprint=2,
+            leaves="stage state upgrade and execute atomic swap",
+        ),
+        decide.Rung(
+            "read_only_fallback_downgrade",
+            "operate in read-only compatibility mode when running against newer state schema",
+            needs=(
+                decide.Need(
+                    "downgrade detected",
+                    lambda f: f.get("from_version", 2) > f.get("target_version", 1),
+                    "version transition is not a downgrade",
+                ),
+                decide.Need(
+                    "backward compatibility supported",
+                    lambda f: bool(f.get("backward_compatible", False)),
+                    "newer state schema not backward compatible",
+                ),
+            ),
+            footprint=3,
+            leaves="fall back to read-only operation under newer state schema",
+        ),
+        decide.Rung(
+            "refuse_incompatible_state_schema",
+            "refuse execution to protect checkpoint integrity from unmigratable schema",
+            footprint=4,
+            leaves="refuse execution due to incompatible state schema",
+        ),
+    )
+
+
+def decide_control_upgrade(facts: Dict[str, Any]) -> decide.Choice:
+    """Climb the control_upgrade_rungs ladder."""
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("control plane state upgrade", control_upgrade_rungs(), fact_obj)
 
 
 class StateSchemaVersion(int, Enum):

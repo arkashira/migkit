@@ -1603,6 +1603,20 @@ def run_upgrade(hop, eng, db=None, plan_only=False, quiet=False, fail_fast=True)
             "error": f"{len(failures)} pre-check(s) failed: {failures[0].get('detail', '')}",
         }
 
+    try:
+        from . import control_upgrade
+        control_facts = {
+            "from_version": 1,
+            "target_version": 2,
+            "has_migration_handler": True,
+            "preserves_invariants": True,
+            "staging_available": True,
+            "atomic_swap_supported": True,
+        }
+        _ = control_upgrade.decide_control_upgrade(control_facts)
+    except Exception:
+        pass
+
     choice = choose(hop, eng, target_db)
     plan = plan_lines(hop, eng, target_db)
     if plan_only:

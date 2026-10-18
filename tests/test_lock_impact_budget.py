@@ -19,7 +19,23 @@ from migkit.locks import (
     predict_lock_wait,
     probe_live_locks,
     probe_lock_behavior,
+    lock_impact_rungs,
+    decide_lock_impact,
 )
+import tests.rung_branches
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("locks", "lock_impact_rungs", "immediate_execution_within_budget", "holds"),
+    ("locks", "lock_impact_rungs", "immediate_execution_within_budget", "refuses"),
+    ("locks", "lock_impact_rungs", "bounded_backoff_and_retry", "holds"),
+    ("locks", "lock_impact_rungs", "bounded_backoff_and_retry", "refuses"),
+    ("locks", "lock_impact_rungs", "expand_contract_phased_execution", "holds"),
+    ("locks", "lock_impact_rungs", "expand_contract_phased_execution", "refuses"),
+    ("locks", "lock_impact_rungs", "quarantine_and_defer_to_maintenance_window", "holds"),
+    ("locks", "lock_impact_rungs", "quarantine_and_defer_to_maintenance_window", "refuses"),
+    ("locks", "lock_impact_rungs", "refuse_unsafe_lock_contention", "holds"),
+]
 
 
 def test_parse_version():
@@ -385,3 +401,76 @@ def test_probe_live_locks_parsing():
     assert locks[0]["lock_mode"] == "RowExclusiveLock"
     assert locks[0]["duration"] == 3.2
     assert locks[0]["waiting"] is False
+
+
+def test_lock_budget_from_facts():
+    facts = {
+        "max_lock_timeout": 1.5,
+        "max_retries": 4,
+        "initial_backoff": 0.1,
+        "backoff_factor": 1.8,
+        "max_backoff": 4.0,
+        "total_timeout_budget": 25.0,
+    }
+    b = LockBudget.from_facts(facts)
+    assert b.max_lock_timeout == 1.5
+    assert b.max_retries == 4
+    assert b.initial_backoff == 0.1
+    assert b.backoff_factor == 1.8
+    assert b.max_backoff == 4.0
+    assert b.total_timeout_budget == 25.0
+
+
+def test_lock_impact_rungs_under_watched():
+    with watched():
+        # 1. immediate_execution_within_budget
+        c1 = decide_lock_impact({
+            "predicted_wait_seconds": 0.5,
+            "max_lock_timeout": 2.0,
+            "conflicting_transactions": [],
+            "queue_depth": 0,
+        })
+        assert c1.rung.name == "immediate_execution_within_budget"
+
+        # 2. bounded_backoff_and_retry
+        c2 = decide_lock_impact({
+            "predicted_wait_seconds": 5.0,
+            "max_lock_timeout": 2.0,
+            "conflicting_transactions": [{"pid": 123}],
+            "queue_depth": 1,
+            "total_timeout_budget": 30.0,
+            "attempt": 1,
+            "max_retries": 5,
+        })
+        assert c2.rung.name == "bounded_backoff_and_retry"
+
+        # 3. expand_contract_phased_execution
+        c3 = decide_lock_impact({
+            "predicted_wait_seconds": 35.0,
+            "max_lock_timeout": 2.0,
+            "total_timeout_budget": 30.0,
+            "phased_plan_available": True,
+            "table_rewrite": True,
+        })
+        assert c3.rung.name == "expand_contract_phased_execution"
+
+        # 4. quarantine_and_defer_to_maintenance_window
+        c4 = decide_lock_impact({
+            "predicted_wait_seconds": 35.0,
+            "max_lock_timeout": 2.0,
+            "total_timeout_budget": 30.0,
+            "phased_plan_available": False,
+            "deferral_permitted": True,
+            "sustained_contention": True,
+        })
+        assert c4.rung.name == "quarantine_and_defer_to_maintenance_window"
+
+        # 5. refuse_unsafe_lock_contention
+        c5 = decide_lock_impact({
+            "predicted_wait_seconds": 35.0,
+            "max_lock_timeout": 2.0,
+            "total_timeout_budget": 30.0,
+            "phased_plan_available": False,
+            "deferral_permitted": False,
+        })
+        assert c5.rung.name == "refuse_unsafe_lock_contention"
