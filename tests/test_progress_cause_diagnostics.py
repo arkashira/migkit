@@ -11,7 +11,24 @@ from migkit.progress_cause import (
     RequiredUserAction,
     RestoreDiagnostic,
     normalize_phase,
+    progress_cause_rungs,
+    decide_progress_cause,
 )
+import tests.rung_branches
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("progress_cause", "progress_cause_rungs", "steady_progress_observed", "holds"),
+    ("progress_cause", "progress_cause_rungs", "steady_progress_observed", "refuses"),
+    ("progress_cause", "progress_cause_rungs", "actionable_user_intervention_required", "holds"),
+    ("progress_cause", "progress_cause_rungs", "actionable_user_intervention_required", "refuses"),
+    ("progress_cause", "progress_cause_rungs", "automatic_worker_backoff_and_retry", "holds"),
+    ("progress_cause", "progress_cause_rungs", "automatic_worker_backoff_and_retry", "refuses"),
+    ("progress_cause", "progress_cause_rungs", "degrade_concurrency_under_lock_pressure", "holds"),
+    ("progress_cause", "progress_cause_rungs", "degrade_concurrency_under_lock_pressure", "refuses"),
+    ("progress_cause", "progress_cause_rungs", "halt_and_report_fatal_blocker", "holds"),
+]
+
 
 
 def test_causal_phase_constants_and_normalization():
@@ -412,4 +429,93 @@ def test_no_emojis_in_source_or_tests():
     with open(pc.__file__, "r", encoding="utf-8") as f:
         src = f.read()
     assert all(ord(c) < 128 for c in src)
+
+
+def test_progress_cause_rungs_under_watched():
+    with watched():
+        # 1. steady_progress_observed holds
+        f1 = {
+            "throughput_rate": 500.0,
+            "seconds_since_checkpoint": 2.0,
+            "stall_threshold_seconds": 30.0,
+            "has_blocking_errors": False,
+            "actionable_cause_identified": False,
+            "safe_remediation_provided": True,
+            "transient_error": False,
+            "retry_attempts": 0,
+            "max_retries": 3,
+            "lock_pressure": False,
+            "active_workers": 1,
+        }
+        c1 = decide_progress_cause(f1)
+        assert c1.rung.name == "steady_progress_observed"
+
+        # 2. steady_progress_observed refuses, actionable_user_intervention_required holds
+        f2 = {
+            "throughput_rate": 0.0,
+            "seconds_since_checkpoint": 45.0,
+            "stall_threshold_seconds": 30.0,
+            "has_blocking_errors": True,
+            "actionable_cause_identified": True,
+            "safe_remediation_provided": True,
+            "transient_error": False,
+            "retry_attempts": 0,
+            "max_retries": 3,
+            "lock_pressure": False,
+            "active_workers": 1,
+        }
+        c2 = decide_progress_cause(f2)
+        assert c2.rung.name == "actionable_user_intervention_required"
+
+        # 3. actionable_user_intervention_required refuses, automatic_worker_backoff_and_retry holds
+        f3 = {
+            "throughput_rate": 0.0,
+            "seconds_since_checkpoint": 45.0,
+            "stall_threshold_seconds": 30.0,
+            "has_blocking_errors": True,
+            "actionable_cause_identified": False,
+            "safe_remediation_provided": False,
+            "transient_error": True,
+            "retry_attempts": 1,
+            "max_retries": 3,
+            "lock_pressure": False,
+            "active_workers": 1,
+        }
+        c3 = decide_progress_cause(f3)
+        assert c3.rung.name == "automatic_worker_backoff_and_retry"
+
+        # 4. automatic_worker_backoff_and_retry refuses, degrade_concurrency_under_lock_pressure holds
+        f4 = {
+            "throughput_rate": 0.0,
+            "seconds_since_checkpoint": 45.0,
+            "stall_threshold_seconds": 30.0,
+            "has_blocking_errors": True,
+            "actionable_cause_identified": False,
+            "safe_remediation_provided": False,
+            "transient_error": False,
+            "retry_attempts": 5,
+            "max_retries": 3,
+            "lock_pressure": True,
+            "active_workers": 4,
+        }
+        c4 = decide_progress_cause(f4)
+        assert c4.rung.name == "degrade_concurrency_under_lock_pressure"
+
+        # 5. degrade_concurrency_under_lock_pressure refuses, halt_and_report_fatal_blocker holds
+        f5 = {
+            "throughput_rate": 0.0,
+            "seconds_since_checkpoint": 45.0,
+            "stall_threshold_seconds": 30.0,
+            "has_blocking_errors": True,
+            "actionable_cause_identified": False,
+            "safe_remediation_provided": False,
+            "transient_error": False,
+            "retry_attempts": 5,
+            "max_retries": 3,
+            "lock_pressure": False,
+            "active_workers": 1,
+        }
+        c5 = decide_progress_cause(f5)
+        assert c5.rung.name == "halt_and_report_fatal_blocker"
+
 

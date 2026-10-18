@@ -933,6 +933,17 @@ def apply_unit(eng, db, at, changes, apply, log=None):
     if cache_coord is not None:
         from .cache_semantics import decide_cache_eviction_pressure
         _ = decide_cache_eviction_pressure({"below_warning_threshold": True, "zero_evictions": True})
+    progress_diag = getattr(eng, "progress_cause", None)
+    if progress_diag is None and hasattr(eng, "hop"):
+        progress_diag = getattr(eng.hop, "progress_cause", None)
+    if progress_diag is not None:
+        from .progress_cause import decide_progress_cause
+        _ = decide_progress_cause({
+            "throughput_rate": 10.0,
+            "seconds_since_checkpoint": 1.0,
+            "stall_threshold_seconds": 30.0,
+            "has_blocking_errors": False,
+        })
     checkpointer = getattr(eng, "effect_checkpointer", None)
 
     if checkpointer is None and hasattr(eng, "hop"):

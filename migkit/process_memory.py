@@ -6,6 +6,108 @@ import signal
 import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+from . import decide
+
+
+def process_memory_budget_rungs() -> Tuple[decide.Rung, ...]:
+    """Decision ladder for process and worker memory budget allocation (Row 661: NEED13)."""
+    return (
+        decide.Rung(
+            "allocate_full_worker_pool",
+            "allocate full worker pool under standard memory budget and headroom envelope",
+            needs=(
+                decide.Need(
+                    "within total memory ceiling",
+                    lambda f: f.get("projected_bytes", 0) <= f.get("total_budget_bytes", 1073741824),
+                    "projected allocation exceeds total memory budget ceiling",
+                ),
+                decide.Need(
+                    "headroom adequate",
+                    lambda f: f.get("headroom_ratio", 0.0) >= f.get("min_headroom_ratio", 0.15),
+                    "available memory headroom ratio inadequate",
+                ),
+                decide.Need(
+                    "no active oom pressure",
+                    lambda f: not bool(f.get("oom_pressure", False)),
+                    "system reports active out-of-memory pressure",
+                ),
+            ),
+            footprint=0,
+            leaves="allocate full worker pool under standard memory envelope",
+        ),
+        decide.Rung(
+            "throttle_batch_and_concurrency",
+            "throttle worker concurrency and batch sizing to fit within available memory",
+            needs=(
+                decide.Need(
+                    "concurrency can scale down",
+                    lambda f: f.get("min_viable_workers", 1) <= f.get("available_worker_slots", 1),
+                    "minimum viable worker concurrency cannot be scheduled",
+                ),
+                decide.Need(
+                    "batch can scale down",
+                    lambda f: f.get("min_viable_batch", 1) <= f.get("effective_batch_size", 100),
+                    "effective batch size cannot be throttled further",
+                ),
+                decide.Need(
+                    "within degraded budget",
+                    lambda f: f.get("throttled_bytes", 0) <= f.get("total_budget_bytes", 1073741824),
+                    "throttled allocation still exceeds memory budget",
+                ),
+            ),
+            footprint=1,
+            leaves="throttle worker concurrency and batch sizing to fit memory",
+        ),
+        decide.Rung(
+            "spill_queues_to_auxiliary_storage",
+            "spill driver prefetch and worker queues to auxiliary memory-mapped storage",
+            needs=(
+                decide.Need(
+                    "queue spill supported",
+                    lambda f: bool(f.get("queue_spill_supported", True)),
+                    "queue spooling to auxiliary storage not supported",
+                ),
+                decide.Need(
+                    "auxiliary storage available",
+                    lambda f: bool(f.get("auxiliary_storage_available", True)),
+                    "no auxiliary storage available for queue spooling",
+                ),
+            ),
+            footprint=2,
+            leaves="spill worker queues to auxiliary disk storage",
+        ),
+        decide.Rung(
+            "quarantine_exhausted_process",
+            "quarantine failed worker process and initiate state reconciliation",
+            needs=(
+                decide.Need(
+                    "reconciliation supported",
+                    lambda f: bool(f.get("reconciliation_supported", True)),
+                    "state reconciliation not supported for failed worker",
+                ),
+                decide.Need(
+                    "isolated process teardown",
+                    lambda f: bool(f.get("isolated_process_teardown", True)),
+                    "cannot safely tear down isolated worker process",
+                ),
+            ),
+            footprint=3,
+            leaves="quarantine failed worker process and initiate state reconciliation",
+        ),
+        decide.Rung(
+            "refuse_memory_admission",
+            "refuse worker admission to prevent fatal host out-of-memory",
+            footprint=4,
+            leaves="refuse worker admission to prevent fatal host out-of-memory",
+        ),
+    )
+
+
+def decide_process_memory_budget(facts: Dict[str, Any]) -> decide.Choice:
+    """Climb the process_memory_budget_rungs ladder."""
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("process memory budget allocation", process_memory_budget_rungs(), fact_obj)
+
 
 class ProcessMemoryError(RuntimeError):
     pass
@@ -153,11 +255,16 @@ def estimate_worker_memory(
     batch_size: int = 1000,
     prefetch_rows: Optional[int] = None,
     queue_capacity: Optional[int] = None,
+    base_heap_bytes: Optional[int] = None,
+    max_prefetch_cap: Optional[int] = None,
+    max_queue_cap: Optional[int] = None,
 ) -> Dict[MemoryCategory, int]:
-    base_heap = 8 * 1024 * 1024
+    base_heap = base_heap_bytes if base_heap_bytes is not None else (8 * 1024 * 1024)
     row_b = max(1, int(row_size_bytes))
-    eff_prefetch = prefetch_rows if prefetch_rows is not None else min(500, max(1, (4 * 1024 * 1024) // row_b))
-    eff_queue = queue_capacity if queue_capacity is not None else min(100, max(1, (4 * 1024 * 1024) // row_b))
+    pref_cap = max_prefetch_cap or 500
+    q_cap = max_queue_cap or 100
+    eff_prefetch = prefetch_rows if prefetch_rows is not None else min(pref_cap, max(1, (4 * 1024 * 1024) // row_b))
+    eff_queue = queue_capacity if queue_capacity is not None else min(q_cap, max(1, (4 * 1024 * 1024) // row_b))
 
     return {
         MemoryCategory.CHILD_HEAP: max(base_heap, int(batch_size * row_b * 1.2)),
@@ -322,6 +429,8 @@ class ProcessMemoryGovernor:
         self,
         row_size_bytes: int,
         min_batch_size: int = 1,
+        headroom_factor: Optional[float] = None,
+        max_batch_ceiling: Optional[int] = None,
     ) -> Tuple[int, int]:
         with self._lock:
             avail = self.available_bytes()
@@ -331,7 +440,9 @@ class ProcessMemoryGovernor:
             if row_b > avail:
                 return 0, 0
 
-            target_batch = max(min_batch_size, min(100, int((avail * 0.4) // (row_b * 1.2))))
+            ratio = headroom_factor if headroom_factor is not None else 0.4
+            ceiling = max_batch_ceiling or 100
+            target_batch = max(min_batch_size, min(ceiling, int((avail * ratio) // (row_b * 1.2))))
             while target_batch >= 1:
                 req = estimate_worker_memory(
                     row_size_bytes=row_size_bytes,

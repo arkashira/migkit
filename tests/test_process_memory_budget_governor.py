@@ -17,7 +17,24 @@ from migkit.process_memory import (
     classify_process_failure,
     estimate_worker_memory,
     reconcile_target_state,
+    process_memory_budget_rungs,
+    decide_process_memory_budget,
 )
+import tests.rung_branches
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("process_memory", "process_memory_budget_rungs", "allocate_full_worker_pool", "holds"),
+    ("process_memory", "process_memory_budget_rungs", "allocate_full_worker_pool", "refuses"),
+    ("process_memory", "process_memory_budget_rungs", "throttle_batch_and_concurrency", "holds"),
+    ("process_memory", "process_memory_budget_rungs", "throttle_batch_and_concurrency", "refuses"),
+    ("process_memory", "process_memory_budget_rungs", "spill_queues_to_auxiliary_storage", "holds"),
+    ("process_memory", "process_memory_budget_rungs", "spill_queues_to_auxiliary_storage", "refuses"),
+    ("process_memory", "process_memory_budget_rungs", "quarantine_exhausted_process", "holds"),
+    ("process_memory", "process_memory_budget_rungs", "quarantine_exhausted_process", "refuses"),
+    ("process_memory", "process_memory_budget_rungs", "refuse_memory_admission", "holds"),
+]
+
 
 
 def test_governor_budget_allocation_and_release():
@@ -290,3 +307,107 @@ def test_governor_preserves_invariants_under_failure_and_resume():
     assert plan.reconciled_position == 3000
     assert plan.workers <= 2
     assert plan.total_allocated <= gov.usable_budget_bytes
+
+
+def test_process_memory_budget_rungs_under_watched():
+    with watched():
+        # 1. allocate_full_worker_pool holds
+        f1 = {
+            "projected_bytes": 100 * 1024 * 1024,
+            "total_budget_bytes": 1024 * 1024 * 1024,
+            "headroom_ratio": 0.4,
+            "min_headroom_ratio": 0.15,
+            "oom_pressure": False,
+            "min_viable_workers": 1,
+            "available_worker_slots": 4,
+            "min_viable_batch": 10,
+            "effective_batch_size": 100,
+            "throttled_bytes": 20 * 1024 * 1024,
+            "queue_spill_supported": True,
+            "auxiliary_storage_available": True,
+            "reconciliation_supported": True,
+            "isolated_process_teardown": True,
+        }
+        c1 = decide_process_memory_budget(f1)
+        assert c1.rung.name == "allocate_full_worker_pool"
+
+        # 2. allocate_full_worker_pool refuses, throttle_batch_and_concurrency holds
+        f2 = {
+            "projected_bytes": 2000 * 1024 * 1024,
+            "total_budget_bytes": 1024 * 1024 * 1024,
+            "headroom_ratio": 0.05,
+            "min_headroom_ratio": 0.15,
+            "oom_pressure": False,
+            "min_viable_workers": 1,
+            "available_worker_slots": 4,
+            "min_viable_batch": 10,
+            "effective_batch_size": 100,
+            "throttled_bytes": 200 * 1024 * 1024,
+            "queue_spill_supported": True,
+            "auxiliary_storage_available": True,
+            "reconciliation_supported": True,
+            "isolated_process_teardown": True,
+        }
+        c2 = decide_process_memory_budget(f2)
+        assert c2.rung.name == "throttle_batch_and_concurrency"
+
+        # 3. throttle_batch_and_concurrency refuses, spill_queues_to_auxiliary_storage holds
+        f3 = {
+            "projected_bytes": 2000 * 1024 * 1024,
+            "total_budget_bytes": 1024 * 1024 * 1024,
+            "headroom_ratio": 0.05,
+            "min_headroom_ratio": 0.15,
+            "oom_pressure": False,
+            "min_viable_workers": 5,
+            "available_worker_slots": 2,
+            "min_viable_batch": 500,
+            "effective_batch_size": 100,
+            "throttled_bytes": 2000 * 1024 * 1024,
+            "queue_spill_supported": True,
+            "auxiliary_storage_available": True,
+            "reconciliation_supported": True,
+            "isolated_process_teardown": True,
+        }
+        c3 = decide_process_memory_budget(f3)
+        assert c3.rung.name == "spill_queues_to_auxiliary_storage"
+
+        # 4. spill_queues_to_auxiliary_storage refuses, quarantine_exhausted_process holds
+        f4 = {
+            "projected_bytes": 2000 * 1024 * 1024,
+            "total_budget_bytes": 1024 * 1024 * 1024,
+            "headroom_ratio": 0.05,
+            "min_headroom_ratio": 0.15,
+            "oom_pressure": False,
+            "min_viable_workers": 5,
+            "available_worker_slots": 2,
+            "min_viable_batch": 500,
+            "effective_batch_size": 100,
+            "throttled_bytes": 2000 * 1024 * 1024,
+            "queue_spill_supported": False,
+            "auxiliary_storage_available": False,
+            "reconciliation_supported": True,
+            "isolated_process_teardown": True,
+        }
+        c4 = decide_process_memory_budget(f4)
+        assert c4.rung.name == "quarantine_exhausted_process"
+
+        # 5. quarantine_exhausted_process refuses, refuse_memory_admission holds
+        f5 = {
+            "projected_bytes": 2000 * 1024 * 1024,
+            "total_budget_bytes": 1024 * 1024 * 1024,
+            "headroom_ratio": 0.05,
+            "min_headroom_ratio": 0.15,
+            "oom_pressure": False,
+            "min_viable_workers": 5,
+            "available_worker_slots": 2,
+            "min_viable_batch": 500,
+            "effective_batch_size": 100,
+            "throttled_bytes": 2000 * 1024 * 1024,
+            "queue_spill_supported": False,
+            "auxiliary_storage_available": False,
+            "reconciliation_supported": False,
+            "isolated_process_teardown": False,
+        }
+        c5 = decide_process_memory_budget(f5)
+        assert c5.rung.name == "refuse_memory_admission"
+

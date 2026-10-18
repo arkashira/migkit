@@ -2,7 +2,104 @@ import dataclasses
 import re
 import signal
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+from . import decide
+
+
+def progress_cause_rungs() -> Tuple[decide.Rung, ...]:
+    """Decision ladder for progress cause and blocker diagnostics (Row 662: NEED14)."""
+    return (
+        decide.Rung(
+            "steady_progress_observed",
+            "steady progress observed with active checkpoints and positive throughput rate",
+            needs=(
+                decide.Need(
+                    "throughput positive",
+                    lambda f: f.get("throughput_rate", 0.0) > 0.0,
+                    "measured throughput rate is zero or negative",
+                ),
+                decide.Need(
+                    "checkpoint lag bounded",
+                    lambda f: f.get("seconds_since_checkpoint", 0.0) <= f.get("stall_threshold_seconds", 30.0),
+                    "checkpoint lag exceeds stall threshold",
+                ),
+                decide.Need(
+                    "no blocking errors",
+                    lambda f: not bool(f.get("has_blocking_errors", False)),
+                    "active blocking errors detected in pipeline",
+                ),
+            ),
+            footprint=0,
+            leaves="steady progress observed within throughput bounds",
+        ),
+        decide.Rung(
+            "actionable_user_intervention_required",
+            "progress blocked by external prerequisite requiring explicit user resolution",
+            needs=(
+                decide.Need(
+                    "actionable cause identified",
+                    lambda f: bool(f.get("actionable_cause_identified", False)),
+                    "no actionable prerequisite cause identified",
+                ),
+                decide.Need(
+                    "safe remediation provided",
+                    lambda f: bool(f.get("safe_remediation_provided", True)),
+                    "no safe remediation procedure available",
+                ),
+            ),
+            footprint=1,
+            leaves="actionable prerequisite identified with concrete user remediation command",
+        ),
+        decide.Rung(
+            "automatic_worker_backoff_and_retry",
+            "transient contention resolvable via backoff and bounded retry",
+            needs=(
+                decide.Need(
+                    "transient error detected",
+                    lambda f: bool(f.get("transient_error", False)),
+                    "error is not transient contention",
+                ),
+                decide.Need(
+                    "retry budget available",
+                    lambda f: f.get("retry_attempts", 0) < f.get("max_retries", 3),
+                    "retry budget exhausted",
+                ),
+            ),
+            footprint=2,
+            leaves="automatic worker backoff and bounded retry",
+        ),
+        decide.Rung(
+            "degrade_concurrency_under_lock_pressure",
+            "degrade worker concurrency under sustained lock contention to prevent deadlock",
+            needs=(
+                decide.Need(
+                    "lock pressure sustained",
+                    lambda f: bool(f.get("lock_pressure", False)),
+                    "lock contention not sustained",
+                ),
+                decide.Need(
+                    "workers can degrade",
+                    lambda f: f.get("active_workers", 1) > 1,
+                    "worker concurrency cannot be degraded below 1",
+                ),
+            ),
+            footprint=3,
+            leaves="degrade worker concurrency under lock pressure",
+        ),
+        decide.Rung(
+            "halt_and_report_fatal_blocker",
+            "halt execution and report unresolvable causal blocker",
+            footprint=4,
+            leaves="halt execution and report unresolvable causal blocker",
+        ),
+    )
+
+
+def decide_progress_cause(facts: Dict[str, Any]) -> decide.Choice:
+    """Climb the progress_cause_rungs ladder."""
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("progress cause diagnostics", progress_cause_rungs(), fact_obj)
 
 
 class CausalPhase:
@@ -616,7 +713,7 @@ class ProgressCauseTracker:
         )
         if net_match or "route to host" in err.lower() or "connection refused" in err.lower():
             host = "target"
-            port = "5432"
+            port = None
             if net_match and net_match.group(1):
                 host = net_match.group(1)
             if net_match and len(net_match.groups()) >= 2 and net_match.group(2):
@@ -625,7 +722,13 @@ class ProgressCauseTracker:
                 hp = re.search(r"(\d+\.\d+\.\d+\.\d+)(?:\s+port\s+|\:)(\d+)", err)
                 if hp:
                     host, port = hp.group(1), hp.group(2)
-            rec = f"nc -zv {host} {port} && check security group egress/ingress"
+                elif command:
+                    p_cmd = re.search(r"-p\s+([0-9]+)", command)
+                    if p_cmd:
+                        port = p_cmd.group(1)
+            port_str = str(port) if port is not None else "PORT"
+            rec = f"nc -zv {host} {port_str} && check security group egress/ingress"
+            endpoint_str = f"{host}:{port_str}" if port is not None else host
             return ProgressDiagnosis(
                 phase=CausalPhase.NETWORK_ROUTE,
                 is_stalled=False,
@@ -635,7 +738,7 @@ class ProgressCauseTracker:
                 eta_status=EtaStatus.BLOCKED_BY_USER_ACTION,
                 eta_seconds=None,
                 fake_percentage_suppressed=True,
-                blocking_operation=f"child process network unreachable to {host}:{port}",
+                blocking_operation=f"child process network unreachable to {endpoint_str}",
                 next_step_recommendation=rec,
             )
 

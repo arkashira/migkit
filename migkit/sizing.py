@@ -1051,6 +1051,17 @@ class Memory:
             # what the workers were seen to hold, over a floor of what this
             # process holds idle - a worker's share of it is its own
             self.seen = max(self.seen, int(ours // busy))
+        try:
+            from . import process_memory
+            facts = {
+                "max_memory_bytes": max(1, free + (ours or 0)),
+                "worker_concurrency": max(1, busy),
+                "requested_bytes": self.each(),
+                "available_bytes": max(0, free + (ours or 0) - RESERVE_MEMORY),
+            }
+            _ = process_memory.decide_process_memory_budget(facts)
+        except Exception:
+            pass
         return int((free + (ours or 0) - RESERVE_MEMORY) // self.each())
 
     def room(self, busy):

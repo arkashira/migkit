@@ -91,6 +91,8 @@ re-dispatches it with the finding and the row comes back here when it passes.
 | 658 | 2026-10-18 | PASS | critic (agy, session fda5f478) | 87774ddd | partial_image_cache_rungs decide ladder across 5 branches; wired into cutover.py preflight and applyway.py; absent unchanged LOB/TOAST placeholders distinguished from NULL and before-images reconstructed; PROVES_RUNGS verified under watched(); 11/11 tests green |
 | 659 | 2026-10-18 | PASS | critic (agy, session fda5f478) | cf8a9eac | lob_execution_rungs decide ladder across 5 branches; wired into cutover.py preflight and lob_policy.py; unswallowed savepoint creation failure raising LobStreamTransactionError; PROVES_RUNGS verified under watched(); 15/15 tests green |
 | 660 | 2026-10-18 | PASS | critic (agy, session fda5f478) | cf8a9eac | decompression_budget_rungs decide ladder across 5 branches; wired into cutover.py preflight and ring_buffer.py; BudgetLimits.from_facts and dynamic evaluation without fixed literals; PROVES_RUNGS verified under watched(); 18/18 tests green |
+| 661 | 2026-10-18 | PASS | critic (agy, session fda5f478) | 1bebb348 | process_memory_budget_rungs decide ladder across 5 branches; wired into cutover.py preflight and sizing.py fits; dynamic bounds for base_heap, prefetch, and headroom; PROVES_RUNGS verified under watched(); 14/14 tests green |
+| 662 | 2026-10-18 | PASS | critic (agy, session fda5f478) | 1bebb348 | progress_cause_rungs decide ladder across 5 branches; wired into cutover.py preflight and tailctl.py apply_unit; dynamic endpoint and port diagnostics without hardcoded 5432; PROVES_RUNGS verified under watched(); 22/22 tests green |
 
 
 
