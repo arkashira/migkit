@@ -4,6 +4,16 @@ import collections
 import pytest
 
 from migkit import anti_corruption as ac
+import tests.rung_branches
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("anti_corruption", "anti_corruption_mutation_rungs", "certified_mutation_pass", "holds"),
+    ("anti_corruption", "anti_corruption_mutation_rungs", "certified_mutation_pass", "refuses"),
+    ("anti_corruption", "anti_corruption_mutation_rungs", "proof_debt_review", "holds"),
+    ("anti_corruption", "anti_corruption_mutation_rungs", "proof_debt_review", "refuses"),
+    ("anti_corruption", "anti_corruption_mutation_rungs", "false_same_refusal", "holds"),
+]
 
 ROWS = (("a", 1), ("b", 2), ("c", 3))
 WORLD = ac.World(rows=ROWS, grants=frozenset({"app:select"}),
@@ -155,3 +165,22 @@ def test_the_report_is_ascii_unix_lines():
                report.lines())
     src = open(ac.__file__, "rb").read()
     assert all(b < 128 for b in src)
+
+
+def test_anti_corruption_mutation_rungs_under_watched():
+    with watched() as seen:
+        # 1. certified_mutation_pass holds
+        rep_full = _run(_ver("full", everything, *ac.CLASSES))
+        c_pass = ac.decide_mutation_gate(rep_full)
+        assert c_pass.rung.name == "certified_mutation_pass"
+
+        # 2. certified_mutation_pass refuses, proof_debt_review holds
+        rep_rows = _run(_ver("rows", multiset_exact, ac.CONTENT, ac.MULTIPLICITY, ac.COMPLETENESS))
+        c_debt = ac.decide_mutation_gate(rep_rows)
+        assert c_debt.rung.name == "proof_debt_review"
+
+        # 3. certified_mutation_pass refuses, proof_debt_review refuses, false_same_refusal holds
+        rep_false = _run(_ver("count", count_only, ac.CONTENT))
+        c_refuse = ac.decide_mutation_gate(rep_false)
+        assert c_refuse.rung.name == "false_same_refusal"
+

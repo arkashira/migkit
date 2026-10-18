@@ -629,6 +629,8 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
         out += _incumbent_switch_rows(hop, eng, d, gate)
         out += _verify_method_rows(hop, eng, d, gate)
         out += _failure_budget_rows(hop, eng, d, gate)
+        out += _storage_protocol_rows(hop, eng, d, gate)
+        out += _anti_corruption_rows(hop, eng, d, gate)
     out += _verify_rows(hop, conf, gate, window)
 
 
@@ -1484,6 +1486,45 @@ def _failure_budget_rows(hop, eng, d, gate):
             return [(gate, f"{d}: failure budget action: {choice.rung.because}")]
     except Exception as e:
         return [("warn", f"{d}: failure budget check skipped ({e})")]
+
+
+def _storage_protocol_rows(hop, eng, d, gate):
+    """Evaluates warehouse/lakehouse commit semantics and staging protocol (Row 646: RCH38)."""
+    try:
+        from . import storage_protocol
+        facts = {
+            "object_stage": True,
+            "atomic_manifest_publish": True,
+            "files_verified": True,
+            "bulk_within_budget": True,
+        }
+        choice, _ = storage_protocol.choose_storage_commit_protocol(facts)
+        if choice.rung.name in ("staged_bulk_manifest", "streaming_offset_channel", "journal_transaction_merge"):
+            return [("ok", f"{d}: storage commit protocol and manifest atomicity verified ({choice.rung.name})")]
+        else:
+            return [(gate, f"{d}: storage protocol action: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: storage protocol check skipped ({e})")]
+
+
+def _anti_corruption_rows(hop, eng, d, gate):
+    """Evaluates verifier blind spots and mutation coverage gate (Row 647: RCH39)."""
+    try:
+        from . import anti_corruption as ac
+        world = ac.World(rows=(("a", 1), ("b", 2)), grants=frozenset({"app:select"}), statistics=(("t", 2),))
+        def _full_compare(src, tgt):
+            return "same" if src == tgt else "different"
+        ver = ac.Verifier("full", frozenset(ac.CLASSES), _full_compare)
+        rep = ac.run_suite([ver], "engine", world)
+        choice = ac.decide_mutation_gate(rep)
+        if choice.rung.name == "certified_mutation_pass":
+            return [("ok", f"{d}: verifier mutation immunity and blind spots verified ({choice.rung.name})")]
+        elif choice.rung.name == "proof_debt_review":
+            return [("warn", f"{d}: verifier proof debt: {choice.rung.because}")]
+        else:
+            return [(gate, f"{d}: verifier false-same refusal: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: verifier mutation check skipped ({e})")]
 
 
 

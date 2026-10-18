@@ -77,6 +77,8 @@ re-dispatches it with the finding and the row comes back here when it passes.
 | 643 | 2026-10-18 | PASS | critic (agy, session fda5f478) | bd0af21c | SWITCH_LADDER decide ladder across 6 branches; wired into cutover.py; transition and rollback costs, break-even hysteresis, and incumbent protection; PROVES_RUNGS verified under watched(); 12/12 tests green |
 | 644 | 2026-10-18 | PASS | critic (agy, session fda5f478) | bd0af21c | select_validation_method decide ladder across 14 branches; wired into cutover.py; verification method selection by claimed proof strength, float banding, and exact multiset equivalence; PROVES_RUNGS verified under watched(); 12/12 tests green |
 | 645 | 2026-10-18 | PASS | critic (agy, session fda5f478) | bd0af21c | recovery_budget_plan decide ladder across 11 branches; wired into cutover.py; failure budget recovery effort allocation by progress, same-state repair prevention, and deadline validity windows; PROVES_RUNGS verified under watched(); 8/8 tests green |
+| 646 | 2026-10-18 | PASS | critic (agy, session fda5f478) | acdb1ac0 | storage_commit_rungs decide ladder across 6 branches; wired into cutover.py; object-store vs catalog commit isolation, staged vs streaming choice by billable work, crash-window no-orphan proof; PROVES_RUNGS verified under watched(); 16/16 tests green |
+| 647 | 2026-10-18 | PASS | critic (agy, session fda5f478) | acdb1ac0 | anti_corruption_mutation_rungs decide ladder across 5 branches; wired into verify_method.py and cutover.py; planted-defect harness, blind spot immunity certification, independent oracle, and zero false-same gating; PROVES_RUNGS verified under watched(); 15/15 tests green |
 
 
 

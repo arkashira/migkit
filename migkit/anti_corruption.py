@@ -25,6 +25,8 @@ import collections
 import dataclasses
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
+from . import decide
+
 ACTION, REVIEW, BENIGN, PASS = "ACTION", "REVIEW", "BENIGN", "PASS"
 
 SCOPE, MULTIPLICITY, CONTENT, COMPLETENESS, PRIVILEGES, STATISTICS = (
@@ -209,3 +211,56 @@ def release_gate(report: Report) -> Tuple[str, List[str]]:
     if report.proof_debt():
         return REVIEW, lines
     return PASS, lines
+
+
+def anti_corruption_mutation_rungs() -> Tuple[decide.Rung, ...]:
+    """Decision ladder for verifier mutation blind spots and proof debt certification."""
+    return (
+        decide.Rung(
+            "certified_mutation_pass",
+            "verifier caught all claimed planted defects with zero false-sames",
+            needs=(
+                decide.Need(
+                    "zero false-sames across all claimed defect classes",
+                    lambda f: not bool(f.get("has_false_same", False)),
+                    "a verifier returned false-same on a claimed defect class",
+                ),
+                decide.Need(
+                    "zero unclaimed proof debt",
+                    lambda f: not bool(f.get("has_proof_debt", False)),
+                    "verifier has uninspected proof debt on unclaimed defect classes",
+                ),
+            ),
+            footprint=0,
+            leaves="nothing",
+        ),
+        decide.Rung(
+            "proof_debt_review",
+            "verifier caught claimed classes but leaves explicit proof debt",
+            needs=(
+                decide.Need(
+                    "zero false-sames across all claimed defect classes",
+                    lambda f: not bool(f.get("has_false_same", False)),
+                    "a verifier returned false-same on a claimed defect class",
+                ),
+            ),
+            footprint=1,
+            leaves="recorded proof debt in the verification report",
+        ),
+        decide.Rung(
+            "false_same_refusal",
+            "refuse verifier certification due to false-same on a planted defect",
+            footprint=2,
+            leaves="blocked release gate",
+        ),
+    )
+
+
+def decide_mutation_gate(report: Report) -> decide.Choice:
+    """Climb the anti_corruption_mutation_rungs ladder on a mutation report."""
+    facts = decide.Facts({
+        "has_false_same": report.release_blocked(),
+        "has_proof_debt": bool(report.proof_debt()),
+    })
+    return decide.climb("verifier mutation certification", anti_corruption_mutation_rungs(), facts)
+

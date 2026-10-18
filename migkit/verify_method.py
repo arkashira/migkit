@@ -2400,3 +2400,17 @@ class ColdStartByteWeightedEta:
         progress_fraction = min(1.0, self.verified_bytes / max(1, self.total_bytes))
         blended_rate = (progress_fraction * observed_rate) + ((1.0 - progress_fraction) * cold_rate)
         return remaining / max(1.0, blended_rate)
+
+
+def audit_verifier_anti_corruption(verifier_fn, claimed_classes, engine="postgres"):
+    """Evaluate verifier immunity against known blind spots via anti_corruption."""
+    from . import anti_corruption as ac
+    world = ac.World(
+        rows=(("alpha", 1), ("beta", 2), ("gamma", 3)),
+        grants=frozenset({"app:select"}),
+        statistics=(("t", 3),),
+    )
+    v = ac.Verifier("candidate", frozenset(claimed_classes), verifier_fn)
+    report = ac.run_suite([v], engine, world)
+    return ac.decide_mutation_gate(report)
+
