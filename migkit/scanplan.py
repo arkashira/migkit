@@ -31,6 +31,7 @@ import json
 import threading
 import time
 from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import decide
 
@@ -779,7 +780,14 @@ def fused_pushdown_query(engine, table, hash_expr=None, *,
         h_part = str(hash_agg)
     elif hash_expr is not None:
         if hash_algo == "xor":
-            h_part = f"BIT_XOR({hash_expr})" if eng == "mysql" else f"bit_xor({hash_expr})"
+            if eng == "mysql":
+                if not any(fn in str(hash_expr).lower() for fn in ("conv(", "cast(", "crc32(")):
+                    int_expr = f"cast(conv(substring(md5({hash_expr}), 1, 16), 16, 10) as unsigned)"
+                else:
+                    int_expr = hash_expr
+                h_part = f"coalesce(BIT_XOR({int_expr}), 0)"
+            else:
+                h_part = f"coalesce(bit_xor({hash_expr}), 0)"
         else:
             h_part = f"coalesce(sum({hash_expr}), 0)"
     else:
@@ -1067,6 +1075,90 @@ def keyless_slice_query(engine, table, slice_predicate, **kwargs):
 def keyless_slice_verify(eng, db, table, **kwargs):
     from . import keyless
     return keyless.keyless_slice_verify(eng, db, table, **kwargs)
+
+
+def _prove_single_query_pushdown(f: Dict[str, Any]) -> bool:
+    return bool(f.get("fused", True)) and int(f.get("total_rows", 0)) <= int(f.get("single_query_threshold", 500000)) and len(f.get("parts", []) or []) <= 1
+
+
+def _prove_charset_anomaly_detection(f: Dict[str, Any]) -> bool:
+    return bool(f.get("has_text_columns", False)) or bool(f.get("text_columns", ()))
+
+
+def _prove_null_empty_drift_fencing(f: Dict[str, Any]) -> bool:
+    return bool(f.get("has_null_empty_conditions", False)) or bool(f.get("null_empty_conditions", ())) or bool(f.get("null_empty_columns", ()))
+
+
+def _prove_partitioned_range_pushdown(f: Dict[str, Any]) -> bool:
+    return bool(f.get("partitioned", False)) or len(f.get("parts", []) or []) > 1 or int(f.get("total_rows", 0)) > int(f.get("single_query_threshold", 500000))
+
+
+def _prove_refuse_unpushable_aggregation(f: Dict[str, Any]) -> bool:
+    return bool(f.get("unpushable", False)) or not bool(f.get("can_aggregate", True))
+
+
+def fused_pushdown_rungs() -> Tuple[decide.Rung, ...]:
+    return (
+        decide.Rung(
+            "single_query_fused_pushdown",
+            "execute fused aggregation in a single query across row count, hash, and value anomalies",
+            needs=(
+                decide.Need(
+                    "table fits single pushdown query envelope",
+                    _prove_single_query_pushdown,
+                    "table requires partitioned range slicing or exceeds threshold",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "charset_anomaly_detection",
+            "fuse replacement character detection into pushdown query for text columns",
+            needs=(
+                decide.Need(
+                    "text columns present for charset screening",
+                    _prove_charset_anomaly_detection,
+                    "no text columns requiring charset screening",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "null_empty_drift_fencing",
+            "fuse null versus empty string differentiation into pushdown verification",
+            needs=(
+                decide.Need(
+                    "null/empty conditions specified",
+                    _prove_null_empty_drift_fencing,
+                    "no null/empty conditions present",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "partitioned_range_pushdown",
+            "execute fused pushdown verification partitioned across key or block slices",
+            needs=(
+                decide.Need(
+                    "partitioned range slicing active",
+                    _prove_partitioned_range_pushdown,
+                    "table fits single pushdown query",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_unpushable_aggregation",
+            "refuse pushdown verification when dialect lacks required aggregate functions",
+            needs=(
+                decide.Need(
+                    "refuse unpushable pushdown aggregation",
+                    _prove_refuse_unpushable_aggregation,
+                    "aggregation pushdown fully supported by engine",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_fused_pushdown(facts: Dict[str, Any]) -> decide.Choice:
+    return decide.climb("fused pushdown verification", fused_pushdown_rungs(), facts=decide.Facts(facts))
 
 
 

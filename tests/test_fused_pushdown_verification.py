@@ -2,6 +2,56 @@ from types import SimpleNamespace
 from migkit import scanplan
 from migkit.engines.mysql import MySQLEngine
 from migkit.engines.postgres import PostgresEngine
+from tests.rung_branches import HOLDS, REFUSES, branch, watched, why
+
+PROVES_RUNGS = [
+    ("scanplan", "fused_pushdown_rungs", "single_query_fused_pushdown", "holds"),
+    ("scanplan", "fused_pushdown_rungs", "single_query_fused_pushdown", "refuses"),
+    ("scanplan", "fused_pushdown_rungs", "charset_anomaly_detection", "holds"),
+    ("scanplan", "fused_pushdown_rungs", "charset_anomaly_detection", "refuses"),
+    ("scanplan", "fused_pushdown_rungs", "null_empty_drift_fencing", "holds"),
+    ("scanplan", "fused_pushdown_rungs", "null_empty_drift_fencing", "refuses"),
+    ("scanplan", "fused_pushdown_rungs", "partitioned_range_pushdown", "holds"),
+    ("scanplan", "fused_pushdown_rungs", "partitioned_range_pushdown", "refuses"),
+    ("scanplan", "fused_pushdown_rungs", "refuse_unpushable_aggregation", "holds"),
+    ("scanplan", "fused_pushdown_rungs", "refuse_unpushable_aggregation", "refuses"),
+]
+
+
+def test_fused_pushdown_rungs_hold_and_refuse():
+    with watched() as seen:
+        c = scanplan.decide_fused_pushdown({"fused": True, "total_rows": 1000, "single_query_threshold": 500000, "parts": []})
+    assert c.rung.name == "single_query_fused_pushdown"
+    assert branch(seen, "single_query_fused_pushdown") == [HOLDS]
+
+    with watched() as seen:
+        c = scanplan.decide_fused_pushdown({"fused": False, "has_text_columns": True})
+    assert branch(seen, "single_query_fused_pushdown") == [REFUSES]
+    assert c.rung.name == "charset_anomaly_detection"
+    assert branch(seen, "charset_anomaly_detection") == [HOLDS]
+
+    with watched() as seen:
+        c = scanplan.decide_fused_pushdown({"fused": False, "has_text_columns": False, "has_null_empty_conditions": True})
+    assert branch(seen, "charset_anomaly_detection") == [REFUSES]
+    assert c.rung.name == "null_empty_drift_fencing"
+    assert branch(seen, "null_empty_drift_fencing") == [HOLDS]
+
+    with watched() as seen:
+        c = scanplan.decide_fused_pushdown({"fused": False, "has_text_columns": False, "has_null_empty_conditions": False, "partitioned": True})
+    assert branch(seen, "null_empty_drift_fencing") == [REFUSES]
+    assert c.rung.name == "partitioned_range_pushdown"
+    assert branch(seen, "partitioned_range_pushdown") == [HOLDS]
+
+    with watched() as seen:
+        c = scanplan.decide_fused_pushdown({"fused": False, "has_text_columns": False, "has_null_empty_conditions": False, "partitioned": False, "parts": [], "total_rows": 100, "unpushable": True})
+    assert branch(seen, "partitioned_range_pushdown") == [REFUSES]
+    assert c.rung.name == "refuse_unpushable_aggregation"
+    assert branch(seen, "refuse_unpushable_aggregation") == [HOLDS]
+
+    with watched() as seen:
+        c = scanplan.decide_fused_pushdown({"fused": False, "has_text_columns": False, "has_null_empty_conditions": False, "partitioned": False, "parts": [], "total_rows": 100, "unpushable": False, "can_aggregate": True})
+    assert branch(seen, "refuse_unpushable_aggregation") == [REFUSES]
+
 
 
 def test_fused_pushdown_query_sql_structure():

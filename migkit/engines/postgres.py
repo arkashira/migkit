@@ -7277,6 +7277,13 @@ select json_build_object(
     def _own_check_data(self, db, table=None, stream=None, with_counts=False,
                         consistent=False):
         if table:
+            if self.hop.options.get("fused", False):
+                try:
+                    fres = self.fused_pushdown_verification(db, table)
+                    if fres.status in ("ok", "diff"):
+                        return [fres]
+                except Exception:
+                    pass
             r = self._drilldown_native(db, table)
             status = "ok" if r and not any(r) else "diff" if r else "error"
             detail = (f"missing={r[0]} extra={r[1]} changed={r[2]}"

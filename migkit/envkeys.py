@@ -175,6 +175,8 @@ VARS = {
                              " or clone", "number"),
     "MIGKIT_CLOUD_WAIT": Var("seconds a cloud's restore or clone is given",
                              "number"),
+    "MIGKIT_LOB_THRESHOLD": Var("bytes above which a LOB column is hashed via server projection",
+                                "whole", 64 * 1024, least=1024),
     # ---- schedule -------------------------------------------------------
     "MIGKIT_SCHEDULED": Var("the command runs in its hop's schedule",
                             "flag", False),

@@ -4081,7 +4081,8 @@ class MySQLEngine(Engine):
                 text_columns = []
         if hash_expr is None and hash_agg is None:
             try:
-                hash_expr = self._row_expr(db, table)
+                row_raw = self._row_expr(db, table)
+                hash_expr = f"cast(conv(substring(md5({row_raw}), 1, 16), 16, 10) as unsigned)"
             except Exception:
                 hash_expr = None
         with heartbeat_during(self, sides=sides, db=db):
@@ -4796,6 +4797,14 @@ class MySQLEngine(Engine):
                 return Result("data", scope, "ok", detail), ra, rb
             if verdict == "diff":
                 return self._drilldown(db, t, pks, expr, [""])
+
+        if self.hop.options.get("fused", False):
+            try:
+                fres = self.fused_pushdown_verification(db, t)
+                if fres.status in ("ok", "diff"):
+                    return Result("data", scope, fres.status, fres.detail), 0, 0
+            except Exception:
+                pass
 
         # Ranges come from the shared planner rather than being built here, so
         # both engines get the same guarantee: the ranges cover the whole

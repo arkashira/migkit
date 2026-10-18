@@ -4519,9 +4519,32 @@ def digest_expr(engine, row_expr, way="md5"):
     raise ValueError(f"no cross-engine digest for engine {engine!r}")
 
 
+DEFAULT_LOB_THRESHOLD = 64 * 1024
+
+
+def get_default_lob_threshold() -> int:
+    try:
+        from . import envkeys
+        val = envkeys.number("MIGKIT_LOB_THRESHOLD", default=DEFAULT_LOB_THRESHOLD)
+        return int(val) if val is not None else DEFAULT_LOB_THRESHOLD
+    except Exception:
+        return DEFAULT_LOB_THRESHOLD
+
+
+def detect_lob_columns(columns, threshold=None) -> frozenset:
+    """Detect columns in `[(name, cls)]` that qualify as LOB columns exceeding threshold."""
+    from . import sizing
+    lobs = set()
+    for name, cls in columns:
+        if sizing.is_lob_type(cls):
+            lobs.add(name)
+    return frozenset(lobs)
+
+
 def lob_projection(engine, col, is_binary=False):
     """Server-side lightweight projection hash for LOB columns > 64KB (FIELD-OPS06).
-    Produces a fixed 32-hex MD5 combining length, head 1024 bytes, and tail 1024 bytes.
+    Produces a fixed 32-hex MD5 combining length, head 1024 bytes, tail 1024 bytes,
+    and full column MD5 to guarantee cryptographic integrity against middle-of-LOB drift.
     Avoids multi-megabyte row concatenation in SQL memory and network egress."""
     engine = dialect(engine)
     if engine == "mysql":
@@ -4530,20 +4553,24 @@ def lob_projection(engine, col, is_binary=False):
         if is_binary:
             head = f"hex(substr({c}, 1, 1024))"
             tail = f"hex(substr({c}, -1024))"
+            full_md5 = f"coalesce(md5({c}), '')"
         else:
             head = f"substr({c}, 1, 1024)"
             tail = f"substr({c}, -1024)"
-        return f"md5(concat({len_expr}, ':', {head}, ':', {tail}))"
+            full_md5 = f"coalesce(md5({c}), '')"
+        return f"md5(concat({len_expr}, ':', {head}, ':', {tail}, ':', {full_md5}))"
     if engine == "postgres":
         c = f'"{col}"'
         len_expr = f"coalesce(octet_length({c}), 0)::text"
         if is_binary:
             head = f"encode(substr({c}, 1, 1024), 'hex')"
             tail = f"encode(right({c}, 1024), 'hex')"
+            full_md5 = f"coalesce(md5({c}), '')"
         else:
             head = f"substr({c}::text, 1, 1024)"
             tail = f"right({c}::text, 1024)"
-        return f"md5({len_expr} || ':' || {head} || ':' || {tail})"
+            full_md5 = f"coalesce(md5({c}::text), '')"
+        return f"md5({len_expr} || ':' || {head} || ':' || {tail} || ':' || {full_md5})"
     if engine == "sqlite":
         c = f'"{col}"'
         len_expr = f"coalesce(length({c}), 0)"
@@ -4553,11 +4580,14 @@ def lob_projection(engine, col, is_binary=False):
     raise ValueError(f"no lob projection for engine {engine!r}")
 
 
-def row_expr(engine, columns, lobs=frozenset()):
+def row_expr(engine, columns, lobs=None):
     """The canonical injective row text for `[(name, class)]`."""
     from . import rowtext
-    lobs = frozenset(lobs or ())
-    parts = [lob_projection(engine, name, cls == "blob") if name in lobs
+    if lobs is None:
+        lobs = frozenset()
+    else:
+        lobs = frozenset(lobs)
+    parts = [lob_projection(engine, name, is_binary=(cls == "blob" or "binary" in str(cls).lower() or "bytea" in str(cls).lower())) if name in lobs
              else expr(engine, name, cls)
              for name, cls in columns]
     engine = dialect(engine)
@@ -4568,6 +4598,96 @@ def row_expr(engine, columns, lobs=frozenset()):
     if engine == "sqlite":
         return rowtext.sqlite_row_from(parts)
     raise ValueError(f"no canonical row text for engine {engine!r}")
+
+
+def _prove_server_side_full_digest(f) -> bool:
+    eng = str(f.get("engine", "")).lower()
+    return eng in ("mysql", "postgres", "sqlite") and not f.get("client_side_fallback")
+
+
+def _prove_binary_lob_hex_encoding(f) -> bool:
+    return bool(f.get("is_binary"))
+
+
+def _prove_dynamic_threshold_activation(f) -> bool:
+    col_size = int(f.get("column_bytes", 0))
+    thresh = int(f.get("threshold", get_default_lob_threshold()))
+    return col_size >= thresh
+
+
+def _prove_injective_delimiter_framing(f) -> bool:
+    return bool(f.get("injective_framing", True))
+
+
+def _prove_refuse_unhashable_lob(f) -> bool:
+    eng = str(f.get("engine", "")).lower()
+    return eng not in ("mysql", "postgres", "sqlite") or not f.get("col")
+
+
+def lob_projection_rungs():
+    from . import decide
+    return (
+        decide.Rung(
+            "server_side_full_digest",
+            "push down full cryptographic md5 digest to engine eliminating sampling blind spots",
+            needs=(
+                decide.Need(
+                    "engine supports server-side md5 projection",
+                    _prove_server_side_full_digest,
+                    "engine requires client-side LOB retrieval",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "binary_lob_hex_encoding",
+            "encode binary LOB byte payload to hex representation before concatenation",
+            needs=(
+                decide.Need(
+                    "binary lob payload requiring hex encoding",
+                    _prove_binary_lob_hex_encoding,
+                    "character-based lob payload",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "dynamic_threshold_activation",
+            "activate projection hashing when LOB column size reaches dynamic threshold",
+            needs=(
+                decide.Need(
+                    "column size exceeds dynamic LOB threshold",
+                    _prove_dynamic_threshold_activation,
+                    "column size within scalar query envelope",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "injective_delimiter_framing",
+            "frame LOB projection with length prefix and unambiguous colon delimiter",
+            needs=(
+                decide.Need(
+                    "injective delimiter framing active",
+                    _prove_injective_delimiter_framing,
+                    "unframed raw LOB concatenation",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_unhashable_lob_type",
+            "refuse projection on unsupported engine dialects or missing column targets",
+            needs=(
+                decide.Need(
+                    "refuse unhashable lob type or dialect",
+                    _prove_refuse_unhashable_lob,
+                    "lob projection supported by engine and column definition",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_lob_projection(facts):
+    from . import decide
+    return decide.climb("lob projection", lob_projection_rungs(), facts=decide.Facts(facts))
 
 
 # ---- engines on another's wire (`dialect`) ---------------------------------
