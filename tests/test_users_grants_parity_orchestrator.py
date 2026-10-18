@@ -306,3 +306,138 @@ def test_mysql_engine_parity_generation():
     valid, errors = orchestrator.verify_ddl(grants, revokes)
     assert valid is True
     assert errors == []
+
+
+def test_passwordless_user_locking_and_hashes():
+    orchestrator = UsersGrantsParityOrchestrator(engine="mysql")
+    src_roles = {
+        "locked_user@%": Role(name="locked_user@%", login=True),
+        "hashed_user@%": Role(
+            name="hashed_user@%",
+            login=True,
+            password_hash="*2470C0C06DEE42FD1618BB99005ADCA2EC9D1E19",
+        ),
+        "sha2_user@%": Role(
+            name="sha2_user@%",
+            login=True,
+            password_hash="$caching_sha2_password$somehash",
+        ),
+    }
+    dst_roles = {}
+    report = orchestrator.run_parity_audit(
+        src_roles=src_roles,
+        dst_roles=dst_roles,
+        src_object_grants=[],
+        dst_object_grants=[],
+    )
+    grants = report.grant_scripts
+    assert any("CREATE USER IF NOT EXISTS 'locked_user'@'%' ACCOUNT LOCK;" in s for s in grants)
+    assert any("CREATE USER IF NOT EXISTS 'hashed_user'@'%' IDENTIFIED WITH mysql_native_password AS '*2470C0C06DEE42FD1618BB99005ADCA2EC9D1E19';" in s for s in grants)
+    assert any("CREATE USER IF NOT EXISTS 'sha2_user'@'%' IDENTIFIED WITH caching_sha2_password AS '$caching_sha2_password$somehash';" in s for s in grants)
+
+
+def test_audit_grants_parity_orchestration():
+    from migkit import grants
+
+    class FakeEngine:
+        CANON_ENGINE = "postgres"
+
+        def _psql(self, side, db, sql):
+            if "pg_roles" in sql and "pg_auth_members" not in sql:
+                return "admin|t|t|secret\napp_user|f|t|\n"
+            if "pg_auth_members" in sql:
+                return "admin|app_user\n"
+            if "role_table_grants" in sql:
+                return "app_user|public|orders|SELECT|NO\n"
+            if "role_usage_grants" in sql:
+                return "app_user|public|orders_id_seq|USAGE|NO\n"
+            if "pg_depend" in sql:
+                return "public|orders_id_seq|public|orders|id\n"
+            return ""
+
+    src = FakeEngine()
+    dst = FakeEngine()
+    rep = grants.audit_grants_parity(src, dst, db="testdb")
+    assert rep.summary["missing_roles"] == 0
+    assert rep.summary["missing_table_grants"] == 0
+
+
+PROVES_RUNGS = [
+    ("grants", "grants_parity_rungs", "role_and_membership_parity", "holds"),
+    ("grants", "grants_parity_rungs", "role_and_membership_parity", "refuses"),
+    ("grants", "grants_parity_rungs", "object_crud_permission_parity", "holds"),
+    ("grants", "grants_parity_rungs", "object_crud_permission_parity", "refuses"),
+    ("grants", "grants_parity_rungs", "sequence_usage_update_parity", "holds"),
+    ("grants", "grants_parity_rungs", "sequence_usage_update_parity", "refuses"),
+    ("grants", "grants_parity_rungs", "password_hash_equivalence_armor", "holds"),
+    ("grants", "grants_parity_rungs", "password_hash_equivalence_armor", "refuses"),
+    ("grants", "grants_parity_rungs", "refuse_unverified_grants_cutover", "holds"),
+    ("grants", "grants_parity_rungs", "refuse_unverified_grants_cutover", "refuses"),
+]
+
+from tests.rung_branches import branch, watched, HOLDS, REFUSES
+
+
+def test_grants_parity_decide_ladder_all_branches():
+    from migkit import grants
+
+    with watched() as seen:
+        c = grants.decide_grants_parity({"roles_matched": True})
+    assert branch(seen, "role_and_membership_parity") == [HOLDS]
+    assert c.rung.name == "role_and_membership_parity"
+
+    with watched() as seen:
+        c = grants.decide_grants_parity({
+            "roles_divergent": True,
+            "object_grants_matched": True,
+        })
+    assert branch(seen, "role_and_membership_parity") == [REFUSES]
+    assert branch(seen, "object_crud_permission_parity") == [HOLDS]
+    assert c.rung.name == "object_crud_permission_parity"
+
+    with watched() as seen:
+        c = grants.decide_grants_parity({
+            "roles_divergent": True,
+            "object_grants_divergent": True,
+            "sequence_grants_matched": True,
+        })
+    assert branch(seen, "object_crud_permission_parity") == [REFUSES]
+    assert branch(seen, "sequence_usage_update_parity") == [HOLDS]
+    assert c.rung.name == "sequence_usage_update_parity"
+
+    with watched() as seen:
+        c = grants.decide_grants_parity({
+            "roles_divergent": True,
+            "object_grants_divergent": True,
+            "sequence_grants_divergent": True,
+            "password_equivalent": True,
+            "passwordless_locked": True,
+        })
+    assert branch(seen, "sequence_usage_update_parity") == [REFUSES]
+    assert branch(seen, "password_hash_equivalence_armor") == [HOLDS]
+    assert c.rung.name == "password_hash_equivalence_armor"
+
+    with watched() as seen:
+        c = grants.decide_grants_parity({
+            "roles_divergent": True,
+            "object_grants_divergent": True,
+            "sequence_grants_divergent": True,
+            "password_hash_divergent": True,
+            "explicit_unverified_bypass": True,
+        })
+    assert branch(seen, "password_hash_equivalence_armor") == [REFUSES]
+    assert branch(seen, "refuse_unverified_grants_cutover") == [HOLDS]
+    assert c.rung.name == "refuse_unverified_grants_cutover"
+
+    with watched() as seen:
+        try:
+            grants.decide_grants_parity({
+                "roles_divergent": True,
+                "object_grants_divergent": True,
+                "sequence_grants_divergent": True,
+                "password_hash_divergent": True,
+                "grants_refused": True,
+            })
+        except Exception:
+            pass
+    assert branch(seen, "refuse_unverified_grants_cutover") == [REFUSES]

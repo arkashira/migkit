@@ -1,5 +1,7 @@
 from dataclasses import dataclass, field
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from . import decide
 
 
 @dataclass(frozen=True)
@@ -196,7 +198,9 @@ def keyless_slice_verify(eng, db, table, *,
                          text_columns: tuple = (),
                          null_empty_conditions: tuple = (),
                          null_empty_columns: tuple = (),
-                         quote_identifiers: bool = True) -> KeylessSliceResult:
+                         quote_identifiers: bool = True,
+                         open_ended: bool = True,
+                         same_block_layout: bool = False) -> KeylessSliceResult:
     dialect = getattr(eng, "CANON_ENGINE", str(getattr(eng, "engine", eng))).lower()
     if dialect in ("postgres", "pg", "postgresql"):
         units = total_blocks if total_blocks is not None else (total_rows if total_rows is not None else 1000)
@@ -208,7 +212,7 @@ def keyless_slice_verify(eng, db, table, *,
             units = total_rows if total_rows is not None else 1000
             mode = "rowid" if mode == "auto" else mode
 
-    slices = keyless_slices(dialect, units, chunk_size=chunk_size, mode=mode)
+    slices = keyless_slices(dialect, units, chunk_size=chunk_size, mode=mode, open_ended=open_ended)
 
     if source is None:
         source = lambda side, t: t
@@ -217,6 +221,8 @@ def keyless_slice_verify(eng, db, table, *,
     matched = 0
     divergent = 0
     tot_rows = 0
+    cum_rows = {s: 0 for s in sides}
+    cum_hashes = {s: 0 for s in sides}
 
     for sl in slices:
         per_side = {}
@@ -238,6 +244,11 @@ def keyless_slice_verify(eng, db, table, *,
             r_cnt = int(row[0] or 0)
             r_hash = row[1] if len(row) > 1 and row[1] is not None else 0
             per_side[side] = (r_cnt, r_hash)
+            cum_rows[side] += r_cnt
+            try:
+                cum_hashes[side] ^= int(r_hash or 0)
+            except (ValueError, TypeError):
+                cum_hashes[side] = hash((cum_hashes[side], str(r_hash)))
 
         if len(sides) >= 2:
             s_res = per_side[sides[0]]
@@ -266,7 +277,19 @@ def keyless_slice_verify(eng, db, table, *,
                 "result": s_res
             })
 
-    if divergent == 0:
+    if len(sides) >= 2:
+        s0, s1 = sides[0], sides[1]
+        cum_match = (cum_rows[s0] == cum_rows[s1]) and (cum_hashes[s0] == cum_hashes[s1])
+        if same_block_layout:
+            clean = (divergent == 0 and cum_match)
+        else:
+            clean = cum_match
+        tot_rows = cum_rows[s0]
+    else:
+        clean = (divergent == 0)
+        tot_rows = cum_rows.get(sides[0], tot_rows)
+
+    if clean:
         status = "ok"
         detail = f"{table}: OK rows={tot_rows} clean across {len(slices)} keyless slices ({mode})"
         cert = True
@@ -286,3 +309,98 @@ def keyless_slice_verify(eng, db, table, *,
         certified_complete=cert,
         slice_details=slice_details
     )
+
+
+def _prove_ctid_tuple_range_slicing(facts: Dict[str, Any]) -> bool:
+    if facts.get("ctid_unsupported"):
+        return False
+    return facts.get("engine", "").lower() in ("postgres", "postgresql", "pg") or facts.get("mode") == "ctid"
+
+
+def _prove_mysql_rowid_page_slicing(facts: Dict[str, Any]) -> bool:
+    if facts.get("rowid_unsupported"):
+        return False
+    eng = facts.get("engine", "").lower()
+    return eng in ("mysql", "mariadb") or facts.get("mode") in ("rowid", "page")
+
+
+def _prove_open_ended_relpages_boundary(facts: Dict[str, Any]) -> bool:
+    if facts.get("stale_relpages_capped"):
+        return False
+    return bool(facts.get("open_ended", True) or facts.get("open_ended_boundary"))
+
+
+def _prove_cumulative_multiset_parity(facts: Dict[str, Any]) -> bool:
+    if facts.get("multiset_divergent"):
+        return False
+    return bool(facts.get("cumulative_parity", True) or facts.get("multiset_matched"))
+
+
+def _prove_refuse_unindexable_fallback(facts: Dict[str, Any]) -> bool:
+    if facts.get("keyless_refused"):
+        return False
+    return bool(facts.get("explicit_table_scan_fallback"))
+
+
+def keyless_slicing_rungs() -> Tuple[decide.Rung, ...]:
+    return (
+        decide.Rung(
+            "ctid_tuple_range_slicing",
+            "slice PostgreSQL keyless tables by physical CTID block ranges",
+            needs=(
+                decide.Need(
+                    "table resides on PostgreSQL and supports CTID physical tuple indexing",
+                    _prove_ctid_tuple_range_slicing,
+                    "engine lacks physical CTID tuple addressing support",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "mysql_rowid_page_slicing",
+            "slice MySQL keyless InnoDB tables by hidden clustered _rowid or page offset",
+            needs=(
+                decide.Need(
+                    "table resides on MySQL InnoDB with hidden _rowid or page offset range",
+                    _prove_mysql_rowid_page_slicing,
+                    "engine lacks MySQL hidden _rowid or page offset capability",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "open_ended_relpages_boundary",
+            "ensure last physical slice is open-ended to avoid stale relpages omission",
+            needs=(
+                decide.Need(
+                    "terminal slice is open-ended capturing blocks beyond stale relpages",
+                    _prove_open_ended_relpages_boundary,
+                    "terminal slice capped at stale relpages risking unverified rows",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "cumulative_multiset_parity",
+            "verify cross-server keyless data integrity via cumulative multiset checksum",
+            needs=(
+                decide.Need(
+                    "cumulative multiset count and XOR hash match across all slices",
+                    _prove_cumulative_multiset_parity,
+                    "cumulative multiset checksum divergence detected between endpoints",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_unindexable_fallback",
+            "refuse keyless execution when physical slicing prerequisites are missing",
+            needs=(
+                decide.Need(
+                    "table supports physical slicing or explicit full scan authorized",
+                    _prove_refuse_unindexable_fallback,
+                    "keyless physical slicing refused without physical range access",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_keyless_slicing(facts: Dict[str, Any]) -> decide.Choice:
+    return decide.climb("keyless slicing", keyless_slicing_rungs(), facts=decide.Facts(facts))

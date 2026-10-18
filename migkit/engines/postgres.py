@@ -7290,6 +7290,16 @@ select json_build_object(
                 except Exception:
                     pass
             r = self._drilldown_native(db, table)
+            if not r or self.hop.options.get("keyless", False):
+                try:
+                    kres = self.keyless_slice_verification(db, table)
+                    if kres.status in ("ok", "diff"):
+                        return [Result("data", f"{db} {table}", kres.status, kres.detail,
+                                       str(self._report(db)),
+                                       f"migkit sync {self.hop.name} --db {db} --kind rows",
+                                       table=str(table))]
+                except Exception:
+                    pass
             status = "ok" if r and not any(r) else "diff" if r else "error"
             detail = (f"missing={r[0]} extra={r[1]} changed={r[2]}"
                       if r else "no primary key for row-level compare")

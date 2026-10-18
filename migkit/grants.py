@@ -4,6 +4,8 @@ import enum
 import re
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
+from . import decide
+
 
 class PasswordEquivalenceStatus(str, enum.Enum):
     MATCH = "MATCH"
@@ -468,7 +470,16 @@ class UsersGrantsParityOrchestrator:
         elif eng == "mysql":
             for r in parity.roles_diff.missing_roles:
                 user_spec = _format_user_my(r.name)
-                stmts.append(f"CREATE USER IF NOT EXISTS {user_spec};")
+                if r.password_hash:
+                    algo = _detect_hash_algo(r.password_hash)
+                    if algo == "mysql_native_password":
+                        stmts.append(f"CREATE USER IF NOT EXISTS {user_spec} IDENTIFIED WITH mysql_native_password AS '{r.password_hash}';")
+                    elif algo == "caching_sha2_password":
+                        stmts.append(f"CREATE USER IF NOT EXISTS {user_spec} IDENTIFIED WITH caching_sha2_password AS '{r.password_hash}';")
+                    else:
+                        stmts.append(f"CREATE USER IF NOT EXISTS {user_spec} IDENTIFIED BY PASSWORD '{r.password_hash}';")
+                else:
+                    stmts.append(f"CREATE USER IF NOT EXISTS {user_spec} ACCOUNT LOCK;")
 
             for d in parity.roles_diff.membership_drifts:
                 grantee = _format_user_my(d["role"])
@@ -610,3 +621,273 @@ class UsersGrantsParityOrchestrator:
         report.grant_scripts = self.generate_grant_ddl(report)
         report.revoke_scripts = self.generate_revoke_ddl(report)
         return report
+
+
+def extract_postgres_catalog_grants(
+    eng: Any,
+    db: Optional[str] = None,
+) -> Tuple[Dict[str, Role], List[ObjectGrant], List[SequenceGrant], List[SequenceDependency]]:
+    roles: Dict[str, Role] = {}
+    obj_grants: List[ObjectGrant] = []
+    seq_grants: List[SequenceGrant] = []
+    seq_deps: List[SequenceDependency] = []
+
+    def _query(sql: str) -> List[List[str]]:
+        try:
+            if hasattr(eng, "_psql"):
+                out = eng._psql("src" if getattr(eng, "sides", None) else None, db or "postgres", sql)
+                if isinstance(out, list):
+                    return out
+                return [line.split("|") for line in str(out).splitlines() if line.strip()]
+            if hasattr(eng, "_q"):
+                res = eng._q("src", sql)
+                return res if isinstance(res, list) else []
+            if callable(eng):
+                res = eng(sql)
+                return res if isinstance(res, list) else []
+        except Exception:
+            pass
+        return []
+
+    roles_rows = _query("SELECT rolname, rolsuper, rolcanlogin, rolpassword FROM pg_roles;")
+    for r in roles_rows:
+        if len(r) >= 3:
+            name = str(r[0]).strip()
+            superu = str(r[1]).strip().lower() in ("t", "true", "1")
+            login = str(r[2]).strip().lower() in ("t", "true", "1")
+            pwd = str(r[3]).strip() if len(r) > 3 and str(r[3]).strip() else None
+            roles[name] = Role(name=name, superuser=superu, login=login, password_hash=pwd)
+
+    mem_rows = _query(
+        "SELECT r.rolname, m.rolname FROM pg_auth_members am "
+        "JOIN pg_roles r ON r.oid = am.roleid "
+        "JOIN pg_roles m ON m.oid = am.member;"
+    )
+    for r in mem_rows:
+        if len(r) >= 2:
+            parent = str(r[0]).strip()
+            member = str(r[1]).strip()
+            if member in roles:
+                roles[member].member_of.append(parent)
+
+    obj_rows = _query(
+        "SELECT grantee, table_schema, table_name, privilege_type, is_grantable "
+        "FROM information_schema.role_table_grants "
+        "WHERE table_schema NOT IN ('pg_catalog', 'information_schema');"
+    )
+    for r in obj_rows:
+        if len(r) >= 4:
+            grantee = str(r[0]).strip()
+            sch = str(r[1]).strip()
+            tbl = str(r[2]).strip()
+            priv = str(r[3]).strip()
+            grantable = str(r[4]).strip().upper() == "YES" if len(r) > 4 else False
+            obj_grants.append(ObjectGrant(grantee, sch, tbl, priv, grantable=grantable))
+
+    seq_rows = _query(
+        "SELECT grantee, sequence_schema, sequence_name, privilege_type, is_grantable "
+        "FROM information_schema.role_usage_grants "
+        "WHERE sequence_schema NOT IN ('pg_catalog', 'information_schema');"
+    )
+    for r in seq_rows:
+        if len(r) >= 4:
+            grantee = str(r[0]).strip()
+            sch = str(r[1]).strip()
+            seq = str(r[2]).strip()
+            priv = str(r[3]).strip()
+            grantable = str(r[4]).strip().upper() == "YES" if len(r) > 4 else False
+            seq_grants.append(SequenceGrant(grantee, sch, seq, priv, grantable=grantable))
+
+    dep_rows = _query(
+        "SELECT s.relnamespace::regnamespace::text, s.relname, "
+        "t.relnamespace::regnamespace::text, t.relname, a.attname "
+        "FROM pg_depend d "
+        "JOIN pg_class s ON s.oid = d.objid "
+        "JOIN pg_class t ON t.oid = d.refobjid "
+        "JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid "
+        "WHERE d.classid = 'pg_class'::regclass AND d.refclassid = 'pg_class'::regclass AND s.relkind = 'S';"
+    )
+    for r in dep_rows:
+        if len(r) >= 5:
+            seq_deps.append(SequenceDependency(
+                schema=str(r[0]).strip(),
+                sequence_name=str(r[1]).strip(),
+                table_schema=str(r[2]).strip(),
+                table_name=str(r[3]).strip(),
+                column_name=str(r[4]).strip(),
+            ))
+
+    return roles, obj_grants, seq_grants, seq_deps
+
+
+def extract_mysql_catalog_grants(
+    eng: Any,
+    db: Optional[str] = None,
+) -> Tuple[Dict[str, Role], List[ObjectGrant], List[SequenceGrant], List[SequenceDependency]]:
+    roles: Dict[str, Role] = {}
+    obj_grants: List[ObjectGrant] = []
+    seq_grants: List[SequenceGrant] = []
+    seq_deps: List[SequenceDependency] = []
+
+    def _query(sql: str) -> List[List[str]]:
+        try:
+            if hasattr(eng, "_q"):
+                res = eng._q("src", sql)
+                return res if isinstance(res, list) else []
+            if callable(eng):
+                res = eng(sql)
+                return res if isinstance(res, list) else []
+        except Exception:
+            pass
+        return []
+
+    user_rows = _query("SELECT user, host, authentication_string, account_locked FROM mysql.user;")
+    for r in user_rows:
+        if len(r) >= 2:
+            u = str(r[0]).strip()
+            h = str(r[1]).strip()
+            full_name = f"{u}@{h}"
+            pwd = str(r[2]).strip() if len(r) > 2 and r[2] else None
+            roles[full_name] = Role(name=full_name, login=True, password_hash=pwd)
+
+    tbl_rows = _query("SELECT user, host, db, table_name, table_priv FROM mysql.tables_priv;")
+    for r in tbl_rows:
+        if len(r) >= 5:
+            u = str(r[0]).strip()
+            h = str(r[1]).strip()
+            full_name = f"{u}@{h}"
+            schema = str(r[2]).strip()
+            tbl = str(r[3]).strip()
+            privs = [p.strip() for p in str(r[4]).split(",") if p.strip()]
+            for p in privs:
+                obj_grants.append(ObjectGrant(full_name, schema, tbl, p))
+
+    return roles, obj_grants, seq_grants, seq_deps
+
+
+def audit_grants_parity(
+    src_engine: Any,
+    dst_engine: Any,
+    db: Optional[str] = None,
+    engine_type: Optional[str] = None,
+    **kwargs: Any,
+) -> ParityReport:
+    dialect = (
+        engine_type
+        or getattr(src_engine, "CANON_ENGINE", None)
+        or getattr(src_engine, "engine", None)
+        or ("postgres" if hasattr(src_engine, "_psql") else "mysql")
+    )
+    dialect_str = str(dialect).lower()
+    orchestrator = UsersGrantsParityOrchestrator(engine=dialect_str)
+
+    if dialect_str in ("postgres", "pg", "postgresql"):
+        src_roles, src_obj, src_seq, src_deps = extract_postgres_catalog_grants(src_engine, db)
+        dst_roles, dst_obj, dst_seq, dst_deps = extract_postgres_catalog_grants(dst_engine, db)
+    else:
+        src_roles, src_obj, src_seq, src_deps = extract_mysql_catalog_grants(src_engine, db)
+        dst_roles, dst_obj, dst_seq, dst_deps = extract_mysql_catalog_grants(dst_engine, db)
+
+    return orchestrator.run_parity_audit(
+        src_roles=src_roles,
+        dst_roles=dst_roles,
+        src_object_grants=src_obj,
+        dst_object_grants=dst_obj,
+        src_sequence_grants=src_seq,
+        dst_sequence_grants=dst_seq,
+        sequence_dependencies=src_deps or dst_deps,
+    )
+
+
+def _prove_role_and_membership_parity(facts: Dict[str, Any]) -> bool:
+    if facts.get("roles_divergent"):
+        return False
+    return bool(facts.get("roles_matched", True) and not facts.get("missing_roles"))
+
+
+def _prove_object_crud_permission_parity(facts: Dict[str, Any]) -> bool:
+    if facts.get("object_grants_divergent"):
+        return False
+    return bool(facts.get("object_grants_matched", True) and not facts.get("missing_object_grants"))
+
+
+def _prove_sequence_usage_update_parity(facts: Dict[str, Any]) -> bool:
+    if facts.get("sequence_grants_divergent"):
+        return False
+    return bool(facts.get("sequence_grants_matched", True) and not facts.get("missing_sequence_grants"))
+
+
+def _prove_password_hash_equivalence_armor(facts: Dict[str, Any]) -> bool:
+    if facts.get("password_hash_divergent") or facts.get("passwordless_unlocked"):
+        return False
+    return bool(facts.get("password_equivalent", True) and facts.get("passwordless_locked", True))
+
+
+def _prove_refuse_unverified_grants_cutover(facts: Dict[str, Any]) -> bool:
+    if facts.get("grants_refused"):
+        return False
+    return bool(facts.get("explicit_unverified_bypass"))
+
+
+def grants_parity_rungs() -> Tuple[decide.Rung, ...]:
+    return (
+        decide.Rung(
+            "role_and_membership_parity",
+            "verify role definitions and hierarchy memberships match across endpoints",
+            needs=(
+                decide.Need(
+                    "role definitions and hierarchy memberships match across endpoints",
+                    _prove_role_and_membership_parity,
+                    "role definitions or memberships divergent between endpoints",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "object_crud_permission_parity",
+            "verify table CRUD permissions match without privilege regressions",
+            needs=(
+                decide.Need(
+                    "table CRUD permissions match across endpoints",
+                    _prove_object_crud_permission_parity,
+                    "table CRUD permission divergence detected between endpoints",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "sequence_usage_update_parity",
+            "verify sequence USAGE and UPDATE permissions match for bound tables",
+            needs=(
+                decide.Need(
+                    "sequence USAGE and UPDATE permissions match for bound tables",
+                    _prove_sequence_usage_update_parity,
+                    "sequence permissions missing on target risking permission denied on insert",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "password_hash_equivalence_armor",
+            "ensure password hash algorithm equivalence and lock passwordless accounts",
+            needs=(
+                decide.Need(
+                    "password hash algorithms match and passwordless user accounts are locked",
+                    _prove_password_hash_equivalence_armor,
+                    "password hash algorithm drift or unlocked passwordless user detected",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_unverified_grants_cutover",
+            "refuse grants cutover when parity verification is incomplete",
+            needs=(
+                decide.Need(
+                    "grants parity fully verified or explicit bypass authorized",
+                    _prove_refuse_unverified_grants_cutover,
+                    "grants cutover refused without verified catalog equivalence",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_grants_parity(facts: Dict[str, Any]) -> decide.Choice:
+    return decide.climb("grants parity", grants_parity_rungs(), facts=decide.Facts(facts))

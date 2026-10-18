@@ -4843,6 +4843,20 @@ class MySQLEngine(Engine):
         expr = self._row_expr(db, t)
         pks = self._pk_cols(db, t)
 
+        if not pks or self.hop.options.get("keyless", False):
+            try:
+                from .. import keyless
+                kres = keyless.keyless_slice_verify(
+                    self, db, t,
+                    query=lambda side, sql: self._q(side, sql),
+                    source=lambda side, tbl: self._scope(side, db, tbl),
+                    mode="rowid",
+                )
+                if kres.status in ("ok", "diff"):
+                    return Result("data", scope, kres.status, kres.detail), 0, 0
+            except Exception:
+                pass
+
         # builtin checksum is the fast default; options.reladiff:true swaps in
         if pks and which("reladiff") and self.hop.options.get("reladiff",
                                                               False):

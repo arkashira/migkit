@@ -289,3 +289,81 @@ def test_scanplan_module_reexports():
     assert res.status == "ok"
     assert res.slices_count == 2
 
+
+PROVES_RUNGS = [
+    ("keyless", "keyless_slicing_rungs", "ctid_tuple_range_slicing", "holds"),
+    ("keyless", "keyless_slicing_rungs", "ctid_tuple_range_slicing", "refuses"),
+    ("keyless", "keyless_slicing_rungs", "mysql_rowid_page_slicing", "holds"),
+    ("keyless", "keyless_slicing_rungs", "mysql_rowid_page_slicing", "refuses"),
+    ("keyless", "keyless_slicing_rungs", "open_ended_relpages_boundary", "holds"),
+    ("keyless", "keyless_slicing_rungs", "open_ended_relpages_boundary", "refuses"),
+    ("keyless", "keyless_slicing_rungs", "cumulative_multiset_parity", "holds"),
+    ("keyless", "keyless_slicing_rungs", "cumulative_multiset_parity", "refuses"),
+    ("keyless", "keyless_slicing_rungs", "refuse_unindexable_fallback", "holds"),
+    ("keyless", "keyless_slicing_rungs", "refuse_unindexable_fallback", "refuses"),
+]
+
+from tests.rung_branches import branch, watched, HOLDS, REFUSES
+
+
+def test_keyless_slicing_decide_ladder_all_branches():
+    with watched() as seen:
+        c = keyless.decide_keyless_slicing({"engine": "postgres"})
+    assert branch(seen, "ctid_tuple_range_slicing") == [HOLDS]
+    assert c.rung.name == "ctid_tuple_range_slicing"
+
+    with watched() as seen:
+        c = keyless.decide_keyless_slicing({
+            "ctid_unsupported": True,
+            "engine": "mysql",
+        })
+    assert branch(seen, "ctid_tuple_range_slicing") == [REFUSES]
+    assert branch(seen, "mysql_rowid_page_slicing") == [HOLDS]
+    assert c.rung.name == "mysql_rowid_page_slicing"
+
+    with watched() as seen:
+        c = keyless.decide_keyless_slicing({
+            "ctid_unsupported": True,
+            "rowid_unsupported": True,
+            "open_ended": True,
+        })
+    assert branch(seen, "mysql_rowid_page_slicing") == [REFUSES]
+    assert branch(seen, "open_ended_relpages_boundary") == [HOLDS]
+    assert c.rung.name == "open_ended_relpages_boundary"
+
+    with watched() as seen:
+        c = keyless.decide_keyless_slicing({
+            "ctid_unsupported": True,
+            "rowid_unsupported": True,
+            "stale_relpages_capped": True,
+            "cumulative_parity": True,
+        })
+    assert branch(seen, "open_ended_relpages_boundary") == [REFUSES]
+    assert branch(seen, "cumulative_multiset_parity") == [HOLDS]
+    assert c.rung.name == "cumulative_multiset_parity"
+
+    with watched() as seen:
+        c = keyless.decide_keyless_slicing({
+            "ctid_unsupported": True,
+            "rowid_unsupported": True,
+            "stale_relpages_capped": True,
+            "multiset_divergent": True,
+            "explicit_table_scan_fallback": True,
+        })
+    assert branch(seen, "cumulative_multiset_parity") == [REFUSES]
+    assert branch(seen, "refuse_unindexable_fallback") == [HOLDS]
+    assert c.rung.name == "refuse_unindexable_fallback"
+
+    with watched() as seen:
+        try:
+            keyless.decide_keyless_slicing({
+                "ctid_unsupported": True,
+                "rowid_unsupported": True,
+                "stale_relpages_capped": True,
+                "multiset_divergent": True,
+                "keyless_refused": True,
+            })
+        except Exception:
+            pass
+    assert branch(seen, "refuse_unindexable_fallback") == [REFUSES]
+
