@@ -12,7 +12,22 @@ from migkit.identity_semantics import (
     encode_lossless_key,
     decode_lossless_key,
     verify_bulk_and_row_parity,
+    decide_identity_strategy,
 )
+import tests.rung_branches
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("identity_semantics", "identity_strategy_rungs", "direct_identity_representation", "holds"),
+    ("identity_semantics", "identity_strategy_rungs", "direct_identity_representation", "refuses"),
+    ("identity_semantics", "identity_strategy_rungs", "binary_collation_adaptation", "holds"),
+    ("identity_semantics", "identity_strategy_rungs", "binary_collation_adaptation", "refuses"),
+    ("identity_semantics", "identity_strategy_rungs", "lossless_encoded_key", "holds"),
+    ("identity_semantics", "identity_strategy_rungs", "lossless_encoded_key", "refuses"),
+    ("identity_semantics", "identity_strategy_rungs", "surrogate_key_assignment", "holds"),
+    ("identity_semantics", "identity_strategy_rungs", "surrogate_key_assignment", "refuses"),
+    ("identity_semantics", "identity_strategy_rungs", "refuse_colliding_identity", "holds"),
+]
 
 
 def test_parse_collation_semantics():
@@ -433,3 +448,76 @@ def test_mixed_replayed_batch_updates_and_unchanged():
     assert state[("a1",)]["count"] == 25
     assert state[("B1",)]["count"] == 30
     assert state[("C1",)]["count"] == 40
+
+
+def test_identity_semantics_rungs_under_watched():
+    with watched() as seen:
+        # 1. direct_identity_representation holds
+        f1 = {
+            "injective_collation": True,
+            "no_normalization_drift": True,
+            "no_padding_collision": True,
+            "target_supports_binary_collation": True,
+            "can_alter_or_specify_collation": True,
+            "schema_permits_encoded_key": True,
+            "lossless_encoding_enabled": True,
+            "surrogate_enabled": True,
+        }
+        c1 = decide_identity_strategy(f1)
+        assert c1.rung.name == "direct_identity_representation"
+
+        # 2. direct_identity_representation refuses (non-injective collation), binary_collation_adaptation holds
+        f2 = {
+            "injective_collation": False,
+            "no_normalization_drift": True,
+            "no_padding_collision": True,
+            "target_supports_binary_collation": True,
+            "can_alter_or_specify_collation": True,
+            "schema_permits_encoded_key": True,
+            "lossless_encoding_enabled": True,
+            "surrogate_enabled": True,
+        }
+        c2 = decide_identity_strategy(f2)
+        assert c2.rung.name == "binary_collation_adaptation"
+
+        # 3. binary_collation_adaptation refuses, lossless_encoded_key holds
+        f3 = {
+            "injective_collation": False,
+            "no_normalization_drift": True,
+            "no_padding_collision": True,
+            "target_supports_binary_collation": False,
+            "can_alter_or_specify_collation": False,
+            "schema_permits_encoded_key": True,
+            "lossless_encoding_enabled": True,
+            "surrogate_enabled": True,
+        }
+        c3 = decide_identity_strategy(f3)
+        assert c3.rung.name == "lossless_encoded_key"
+
+        # 4. lossless_encoded_key refuses, surrogate_key_assignment holds
+        f4 = {
+            "injective_collation": False,
+            "no_normalization_drift": True,
+            "no_padding_collision": True,
+            "target_supports_binary_collation": False,
+            "can_alter_or_specify_collation": False,
+            "schema_permits_encoded_key": False,
+            "lossless_encoding_enabled": False,
+            "surrogate_enabled": True,
+        }
+        c4 = decide_identity_strategy(f4)
+        assert c4.rung.name == "surrogate_key_assignment"
+
+        # 5. surrogate_key_assignment refuses, refuse_colliding_identity holds
+        f5 = {
+            "injective_collation": False,
+            "no_normalization_drift": True,
+            "no_padding_collision": True,
+            "target_supports_binary_collation": False,
+            "can_alter_or_specify_collation": False,
+            "schema_permits_encoded_key": False,
+            "lossless_encoding_enabled": False,
+            "surrogate_enabled": False,
+        }
+        c5 = decide_identity_strategy(f5)
+        assert c5.rung.name == "refuse_colliding_identity"

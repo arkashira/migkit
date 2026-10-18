@@ -7,6 +7,107 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from migkit.verifiers import gtid_is_subset, lsn_compare
+from migkit import decide, identity_semantics
+
+
+def handoff_overlap_rungs() -> Tuple[decide.Rung, ...]:
+    """Decision ladder for snapshot and CDC handoff overlap composition (Row 655: NEED07)."""
+    return (
+        decide.Rung(
+            "certify_gap_free_handoff",
+            "certify snapshot and stream handoff as gap-free with identical event multiplicities",
+            needs=(
+                decide.Need(
+                    "snapshot lifetime is valid and unexpired",
+                    lambda f: bool(f.get("snapshot_valid", True)),
+                    "snapshot lifetime is expired or invalid",
+                ),
+                decide.Need(
+                    "fences are valid and monotonic",
+                    lambda f: bool(f.get("fences_valid", True)),
+                    "fences are inverted or discontinuous",
+                ),
+                decide.Need(
+                    "no dropped intervals or missing commits",
+                    lambda f: bool(f.get("no_dropped_intervals", True)),
+                    "commit gap or dropped intervals detected",
+                ),
+                decide.Need(
+                    "target multiplicities match source events",
+                    lambda f: bool(f.get("multiplicities_match", True)),
+                    "event multiplicity divergence detected",
+                ),
+            ),
+            footprint=0,
+            leaves="certified gap-free snapshot and stream handoff",
+        ),
+        decide.Rung(
+            "reconcile_and_dedup_overlap",
+            "reconcile and deduplicate overlapping events within fence window",
+            needs=(
+                decide.Need(
+                    "snapshot lifetime is valid and unexpired",
+                    lambda f: bool(f.get("snapshot_valid", True)),
+                    "snapshot lifetime is expired or invalid",
+                ),
+                decide.Need(
+                    "fences are valid and monotonic",
+                    lambda f: bool(f.get("fences_valid", True)),
+                    "fences are inverted or discontinuous",
+                ),
+                decide.Need(
+                    "overlap is resolvable via commit deduplication",
+                    lambda f: bool(f.get("overlap_resolvable", True)),
+                    "overlap cannot be cleanly deduplicated",
+                ),
+            ),
+            footprint=1,
+            leaves="reconciled and deduplicated stream overlap",
+        ),
+        decide.Rung(
+            "restore_checkpoint_and_reapply",
+            "restore manager state from checkpoint journal and reapply CDC events",
+            needs=(
+                decide.Need(
+                    "checkpoint position and state exist",
+                    lambda f: bool(f.get("checkpoint_available", True)),
+                    "checkpoint position is missing",
+                ),
+                decide.Need(
+                    "state file can be restored cleanly",
+                    lambda f: bool(f.get("can_restore_cleanly", True)),
+                    "state file is missing or corrupted",
+                ),
+            ),
+            footprint=2,
+            leaves="restored manager state from checkpoint journal",
+        ),
+        decide.Rung(
+            "extend_or_refresh_snapshot",
+            "extend snapshot validity or refresh capture fence before handoff expires",
+            needs=(
+                decide.Need(
+                    "snapshot is refreshable or extendable",
+                    lambda f: bool(f.get("snapshot_refreshable", False)),
+                    "snapshot cannot be refreshed or extended",
+                ),
+            ),
+            footprint=3,
+            leaves="refreshed snapshot lifetime and updated capture fence",
+        ),
+        decide.Rung(
+            "refuse_handoff_gap",
+            "refuse cutover handoff due to unrecoverable stream gap or multiplicity divergence",
+            footprint=4,
+            leaves="refused handoff due to unrecoverable gap or divergence",
+        ),
+    )
+
+
+def decide_handoff_overlap(facts: Dict[str, Any]) -> decide.Choice:
+    """Climb the handoff_overlap_rungs ladder."""
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("snapshot stream handoff overlap", handoff_overlap_rungs(), fact_obj)
 
 
 class HandoffError(RuntimeError):
@@ -361,7 +462,19 @@ class HandoffManager:
             self.save_checkpoint()
 
     def verify_stream_handoff(self, stream_start: Any) -> None:
-        if self.contract.fences.has_gap(stream_start):
+        has_gap = self.contract.fences.has_gap(stream_start)
+        facts = {
+            "snapshot_valid": self.contract.snapshot_lifetime.is_valid(),
+            "fences_valid": not has_gap,
+            "no_dropped_intervals": not has_gap,
+            "multiplicities_match": True,
+            "overlap_resolvable": True,
+            "checkpoint_available": self.contract.checkpoint_position is not None,
+            "can_restore_cleanly": bool(self.state_path and os.path.exists(self.state_path)),
+            "snapshot_refreshable": False,
+        }
+        choice = decide_handoff_overlap(facts)
+        if choice.rung.name == "refuse_handoff_gap":
             raise HandoffGapError(
                 f"copy-to-follow gap detected: stream_start {stream_start} > lower_fence {self.contract.fences.lower_fence}"
             )
@@ -446,7 +559,10 @@ class HandoffManager:
         return mgr
 
     def simulate_crash(self) -> None:
-        pass
+        self.target_rows.clear()
+        self.target_multiplicities.clear()
+        self.observed_intervals.clear()
+        self.contract.applied_commits.clear()
 
 
 @dataclass
@@ -494,7 +610,19 @@ def compare_source_and_target_history(
         if exp != act:
             divergences[k] = (exp, act)
 
-    if missing or dropped_intervals:
+    facts = {
+        "snapshot_valid": manager.contract.snapshot_lifetime.is_valid(),
+        "fences_valid": True,
+        "no_dropped_intervals": not missing and not dropped_intervals,
+        "multiplicities_match": not divergences,
+        "overlap_resolvable": not missing and not dropped_intervals,
+        "checkpoint_available": manager.contract.checkpoint_position is not None,
+        "can_restore_cleanly": bool(manager.state_path and os.path.exists(manager.state_path)),
+        "snapshot_refreshable": False,
+    }
+    choice = decide_handoff_overlap(facts)
+
+    if missing or dropped_intervals or choice.rung.name == "refuse_handoff_gap":
         status = "defect"
         certified = False
         defect_class = "copy_to_follow_gap" if dropped_intervals else "missing_commits"
@@ -516,4 +644,5 @@ def compare_source_and_target_history(
         dropped_intervals=dropped_intervals,
         multiplicity_divergences=divergences,
         defect_class=defect_class,
+        details={"decision": choice.rung.name, "leaves": choice.rung.leaves},
     )

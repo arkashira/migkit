@@ -85,6 +85,8 @@ re-dispatches it with the finding and the row comes back here when it passes.
 | 652 | 2026-10-18 | PASS | critic (agy, session fda5f478) | cadf12f7 | ack_lattice_rungs decide ladder across 5 branches; PositionLattice.authorize_cutover wired into cutover.py preflight and _seam; stage monotonicity (read < retained < applied < proved); PROVES_RUNGS verified under watched(); 15/15 tests green |
 | 653 | 2026-10-18 | PASS | critic (agy, session fda5f478) | a2accb91 | quiet_source_rungs decide ladder across 5 branches; wired into cutover.py and postgres.py slot advance; slot advance authorized through engine authority without self-declared bypass; PROVES_RUNGS verified under watched(); 15/15 tests green |
 | 654 | 2026-10-18 | PASS | critic (agy, session fda5f478) | a2accb91 | offset_reconciliation_rungs decide ladder across 5 branches; wired into cutover.py and tailctl.py same_source; safe fast-forward and bounded reseed without silent skipping; PROVES_RUNGS verified under watched(); 22/22 tests green |
+| 655 | 2026-10-18 | PASS | critic (agy, session fda5f478) | 67f4dc8b | handoff_overlap_rungs decide ladder across 5 branches; wired into cutover.py and drainmark.py seam; simulate_crash clears in-memory state; PROVES_RUNGS verified under watched(); 12/12 tests green |
+| 656 | 2026-10-18 | PASS | critic (agy, session fda5f478) | 67f4dc8b | identity_strategy_rungs decide ladder across 5 branches; wired into cutover.py preflight; literal default KeyStrategy.REFUSE replaced with dynamic decide ladder; PROVES_RUNGS verified under watched(); 21/21 tests green |
 
 
 

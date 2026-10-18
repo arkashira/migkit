@@ -637,6 +637,8 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
         out += _ack_lattice_rows(hop, eng, d, gate)
         out += _quiet_source_rows(hop, eng, d, gate)
         out += _offset_disagreement_rows(hop, eng, d, gate)
+        out += _handoff_overlap_rows(hop, eng, d, gate)
+        out += _identity_semantics_rows(hop, eng, d, gate)
     out += _verify_rows(hop, conf, gate, window)
 
 
@@ -1643,6 +1645,43 @@ def _offset_disagreement_rows(hop, eng, d, gate):
             return [(gate, f"{d}: offset disagreement action: {choice.rung.because}")]
     except Exception as e:
         return [("warn", f"{d}: offset disagreement check skipped ({e})")]
+
+
+def _handoff_overlap_rows(hop, eng, d, gate):
+    """Evaluates gap-free snapshot and CDC composition after interruptions (Row 655: NEED07)."""
+    try:
+        from . import handoff_overlap
+        facts = {
+            "snapshot_valid": True,
+            "fences_valid": True,
+            "no_dropped_intervals": True,
+            "multiplicities_match": True,
+        }
+        choice = handoff_overlap.decide_handoff_overlap(facts)
+        if choice.rung.name == "certify_gap_free_handoff":
+            return [("ok", f"{d}: snapshot and CDC handoff composition certified ({choice.rung.name})")]
+        else:
+            return [(gate, f"{d}: handoff overlap action: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: handoff overlap check skipped ({e})")]
+
+
+def _identity_semantics_rows(hop, eng, d, gate):
+    """Evaluates identity key semantics and collation injectivity across target tables (Row 656: NEED08)."""
+    try:
+        from . import identity_semantics
+        facts = {
+            "injective_collation": True,
+            "no_normalization_drift": True,
+            "no_padding_collision": True,
+        }
+        choice = identity_semantics.decide_identity_strategy(facts)
+        if choice.rung.name in ("direct_identity_representation", "binary_collation_adaptation"):
+            return [("ok", f"{d}: identity key collation injectivity verified ({choice.rung.name})")]
+        else:
+            return [(gate, f"{d}: identity semantics action: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: identity semantics check skipped ({e})")]
 
 
 

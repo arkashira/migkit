@@ -5,6 +5,98 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
+from migkit import decide
+
+
+def identity_strategy_rungs() -> Tuple[decide.Rung, ...]:
+    """Decision ladder for target identity key semantics and collation strategy (Row 656: NEED08)."""
+    return (
+        decide.Rung(
+            "direct_identity_representation",
+            "use direct column values when source and target collations are mutually injective",
+            needs=(
+                decide.Need(
+                    "collation is injective across source and target",
+                    lambda f: bool(f.get("injective_collation", True)),
+                    "target collation collapses distinct source keys",
+                ),
+                decide.Need(
+                    "no unicode normalization drift",
+                    lambda f: bool(f.get("no_normalization_drift", True)),
+                    "unicode normalization form introduces key collisions",
+                ),
+                decide.Need(
+                    "no whitespace padding collision",
+                    lambda f: bool(f.get("no_padding_collision", True)),
+                    "trailing space padding collapses distinct keys",
+                ),
+            ),
+            footprint=0,
+            leaves="direct key mapping without transformation",
+        ),
+        decide.Rung(
+            "binary_collation_adaptation",
+            "adapt target identity column to binary collation to preserve byte distinctness",
+            needs=(
+                decide.Need(
+                    "target supports binary collation",
+                    lambda f: bool(f.get("target_supports_binary_collation", False)),
+                    "target database does not support binary collation",
+                ),
+                decide.Need(
+                    "schema alteration or definition allows binary collation",
+                    lambda f: bool(f.get("can_alter_or_specify_collation", False)),
+                    "schema constraints forbid binary collation alteration",
+                ),
+            ),
+            footprint=1,
+            leaves="binary collation adaptation preserving byte identity",
+        ),
+        decide.Rung(
+            "lossless_encoded_key",
+            "encode keys into lossless reversible hex representation",
+            needs=(
+                decide.Need(
+                    "target column width accommodates encoded key",
+                    lambda f: bool(f.get("schema_permits_encoded_key", False)),
+                    "column width insufficient for hex-encoded key",
+                ),
+                decide.Need(
+                    "lossless key encoding enabled by configuration",
+                    lambda f: bool(f.get("lossless_encoding_enabled", False)),
+                    "lossless key encoding is not enabled",
+                ),
+            ),
+            footprint=2,
+            leaves="reversible hex-encoded lossless key representation",
+        ),
+        decide.Rung(
+            "surrogate_key_assignment",
+            "assign synthetic surrogate key with identity mapping table",
+            needs=(
+                decide.Need(
+                    "surrogate key mapping is enabled and available",
+                    lambda f: bool(f.get("surrogate_enabled", False)),
+                    "surrogate key mapping is unavailable",
+                ),
+            ),
+            footprint=3,
+            leaves="surrogate synthetic key with mapping journal",
+        ),
+        decide.Rung(
+            "refuse_colliding_identity",
+            "refuse migration to prevent silent key collisions and data corruption",
+            footprint=4,
+            leaves="refused migration to prevent silent key collision and data loss",
+        ),
+    )
+
+
+def decide_identity_strategy(facts: Dict[str, Any]) -> decide.Choice:
+    """Climb the identity_strategy_rungs ladder."""
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("identity key collation semantics", identity_strategy_rungs(), fact_obj)
+
 
 class IdentitySemanticsError(Exception):
     pass
@@ -182,7 +274,7 @@ class BulkApplyResult:
 class IdentityContract:
     table: str
     key_columns: Tuple[str, ...]
-    strategy: KeyStrategy = KeyStrategy.REFUSE
+    strategy: Optional[Union[KeyStrategy, str]] = None
     source_collation: Optional[str] = None
     target_collation: Optional[str] = None
     source_case_sensitive: bool = True
@@ -192,7 +284,33 @@ class IdentityContract:
     def __post_init__(self):
         if isinstance(self.key_columns, list):
             self.key_columns = tuple(self.key_columns)
-        if isinstance(self.strategy, str):
+        if self.strategy is None:
+            tgt_sem = CollationSemantics.from_name(self.target_collation, default_case_sensitive=False)
+            src_sem = CollationSemantics.from_name(self.source_collation, default_case_sensitive=self.source_case_sensitive)
+            is_injective = (
+                tgt_sem.is_binary
+                or (src_sem.is_case_sensitive == tgt_sem.is_case_sensitive and src_sem.is_accent_sensitive == tgt_sem.is_accent_sensitive)
+            )
+            facts = {
+                "injective_collation": is_injective,
+                "no_normalization_drift": self.unicode_normalization is None or self.unicode_normalization == "NFC",
+                "no_padding_collision": not tgt_sem.pad_space,
+                "target_supports_binary_collation": False,
+                "can_alter_or_specify_collation": False,
+                "schema_permits_encoded_key": False,
+                "lossless_encoding_enabled": False,
+                "surrogate_enabled": False,
+            }
+            choice = decide_identity_strategy(facts)
+            name_to_strategy = {
+                "direct_identity_representation": KeyStrategy.DIRECT,
+                "binary_collation_adaptation": KeyStrategy.BINARY_COLLATION,
+                "lossless_encoded_key": KeyStrategy.ENCODED_KEY,
+                "surrogate_key_assignment": KeyStrategy.SURROGATE,
+                "refuse_colliding_identity": KeyStrategy.REFUSE,
+            }
+            self.strategy = name_to_strategy.get(choice.rung.name, KeyStrategy.REFUSE)
+        elif isinstance(self.strategy, str):
             self.strategy = KeyStrategy(self.strategy)
 
     @property
@@ -336,7 +454,7 @@ class IdentityContract:
         return cls(
             table=d["table"],
             key_columns=tuple(d["key_columns"]),
-            strategy=KeyStrategy(d.get("strategy", KeyStrategy.REFUSE.value)),
+            strategy=KeyStrategy(d["strategy"]) if "strategy" in d else None,
             source_collation=d.get("source_collation"),
             target_collation=d.get("target_collation"),
             source_case_sensitive=bool(d.get("source_case_sensitive", True)),

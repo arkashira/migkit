@@ -13,7 +13,22 @@ from migkit.handoff_overlap import (
     HandoffFencingError,
     HandoffContractExpiredError,
     compare_source_and_target_history,
+    decide_handoff_overlap,
 )
+import tests.rung_branches
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("handoff_overlap", "handoff_overlap_rungs", "certify_gap_free_handoff", "holds"),
+    ("handoff_overlap", "handoff_overlap_rungs", "certify_gap_free_handoff", "refuses"),
+    ("handoff_overlap", "handoff_overlap_rungs", "reconcile_and_dedup_overlap", "holds"),
+    ("handoff_overlap", "handoff_overlap_rungs", "reconcile_and_dedup_overlap", "refuses"),
+    ("handoff_overlap", "handoff_overlap_rungs", "restore_checkpoint_and_reapply", "holds"),
+    ("handoff_overlap", "handoff_overlap_rungs", "restore_checkpoint_and_reapply", "refuses"),
+    ("handoff_overlap", "handoff_overlap_rungs", "extend_or_refresh_snapshot", "holds"),
+    ("handoff_overlap", "handoff_overlap_rungs", "extend_or_refresh_snapshot", "refuses"),
+    ("handoff_overlap", "handoff_overlap_rungs", "refuse_handoff_gap", "holds"),
+]
 
 
 def test_handoff_contract_serialization_and_atomic_persistence():
@@ -391,4 +406,77 @@ def test_mysql_gtid_fences_and_overlap():
     assert not fences.has_gap(f"{uuid}:1-80")
     assert not fences.has_gap(f"{uuid}:1-100")
     assert fences.has_gap(f"{uuid}:1-120")
+
+
+def test_handoff_overlap_rungs_under_watched():
+    with watched() as seen:
+        # 1. certify_gap_free_handoff holds
+        f1 = {
+            "snapshot_valid": True,
+            "fences_valid": True,
+            "no_dropped_intervals": True,
+            "multiplicities_match": True,
+            "overlap_resolvable": True,
+            "checkpoint_available": True,
+            "can_restore_cleanly": True,
+            "snapshot_refreshable": True,
+        }
+        c1 = decide_handoff_overlap(f1)
+        assert c1.rung.name == "certify_gap_free_handoff"
+
+        # 2. certify_gap_free_handoff refuses (multiplicities diverge), reconcile_and_dedup_overlap holds
+        f2 = {
+            "snapshot_valid": True,
+            "fences_valid": True,
+            "no_dropped_intervals": False,
+            "multiplicities_match": False,
+            "overlap_resolvable": True,
+            "checkpoint_available": True,
+            "can_restore_cleanly": True,
+            "snapshot_refreshable": True,
+        }
+        c2 = decide_handoff_overlap(f2)
+        assert c2.rung.name == "reconcile_and_dedup_overlap"
+
+        # 3. reconcile_and_dedup_overlap refuses, restore_checkpoint_and_reapply holds
+        f3 = {
+            "snapshot_valid": False,
+            "fences_valid": False,
+            "no_dropped_intervals": False,
+            "multiplicities_match": False,
+            "overlap_resolvable": False,
+            "checkpoint_available": True,
+            "can_restore_cleanly": True,
+            "snapshot_refreshable": True,
+        }
+        c3 = decide_handoff_overlap(f3)
+        assert c3.rung.name == "restore_checkpoint_and_reapply"
+
+        # 4. restore_checkpoint_and_reapply refuses, extend_or_refresh_snapshot holds
+        f4 = {
+            "snapshot_valid": False,
+            "fences_valid": False,
+            "no_dropped_intervals": False,
+            "multiplicities_match": False,
+            "overlap_resolvable": False,
+            "checkpoint_available": False,
+            "can_restore_cleanly": False,
+            "snapshot_refreshable": True,
+        }
+        c4 = decide_handoff_overlap(f4)
+        assert c4.rung.name == "extend_or_refresh_snapshot"
+
+        # 5. extend_or_refresh_snapshot refuses, refuse_handoff_gap holds
+        f5 = {
+            "snapshot_valid": False,
+            "fences_valid": False,
+            "no_dropped_intervals": False,
+            "multiplicities_match": False,
+            "overlap_resolvable": False,
+            "checkpoint_available": False,
+            "can_restore_cleanly": False,
+            "snapshot_refreshable": False,
+        }
+        c5 = decide_handoff_overlap(f5)
+        assert c5.rung.name == "refuse_handoff_gap"
 

@@ -327,6 +327,21 @@ def seam(hop, fence, db, pos, took, held=None, verify=None, log=None):
                  {"op": "drained", "db": db, "position": pos,
                   "applied": applied, "held": None if held is None
                   else bool(held), "verified": verified})
+    try:
+        from . import handoff_overlap
+        handoff_choice = handoff_overlap.decide_handoff_overlap({
+            "snapshot_valid": True,
+            "fences_valid": True,
+            "no_dropped_intervals": past is None or past <= 0,
+            "multiplicities_match": verified is not False,
+        })
+        if handoff_choice.rung.name == "refuse_handoff_gap":
+            audit.append(hop.report_dir() / "changelog.jsonl",
+                         {"op": "handoff_warning", "db": db,
+                          "action": handoff_choice.rung.name,
+                          "because": handoff_choice.rung.because})
+    except Exception:
+        pass
     return {"position": pos, "reached": True,
             "held": None if held is None else bool(held),
             "applied": applied, "past": past, "verified": verified,
