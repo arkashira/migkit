@@ -83,6 +83,8 @@ re-dispatches it with the finding and the row comes back here when it passes.
 | 650 | 2026-10-18 | PASS | critic (agy, session fda5f478) | 82863872 | snapshot_subworkflow_rungs decide ladder across 5 branches; wired into cutover.py; pending incremental work preserved across boot snapshots without resetting obligations; PROVES_RUNGS verified under watched(); 13/13 tests green |
 | 651 | 2026-10-18 | PASS | critic (agy, session fda5f478) | cadf12f7 | cancel_recovery_rungs decide ladder across 5 branches; wired into cutover.py preflight; lease.term() replaces hardcoded 30.0; non-destructive rollback of owned work; PROVES_RUNGS verified under watched(); 21/21 tests green |
 | 652 | 2026-10-18 | PASS | critic (agy, session fda5f478) | cadf12f7 | ack_lattice_rungs decide ladder across 5 branches; PositionLattice.authorize_cutover wired into cutover.py preflight and _seam; stage monotonicity (read < retained < applied < proved); PROVES_RUNGS verified under watched(); 15/15 tests green |
+| 653 | 2026-10-18 | PASS | critic (agy, session fda5f478) | a2accb91 | quiet_source_rungs decide ladder across 5 branches; wired into cutover.py and postgres.py slot advance; slot advance authorized through engine authority without self-declared bypass; PROVES_RUNGS verified under watched(); 15/15 tests green |
+| 654 | 2026-10-18 | PASS | critic (agy, session fda5f478) | a2accb91 | offset_reconciliation_rungs decide ladder across 5 branches; wired into cutover.py and tailctl.py same_source; safe fast-forward and bounded reseed without silent skipping; PROVES_RUNGS verified under watched(); 22/22 tests green |
 
 
 

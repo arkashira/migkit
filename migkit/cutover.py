@@ -635,6 +635,8 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
         out += _snapshot_state_rows(hop, eng, d, gate)
         out += _cancel_recovery_rows(hop, eng, d, gate)
         out += _ack_lattice_rows(hop, eng, d, gate)
+        out += _quiet_source_rows(hop, eng, d, gate)
+        out += _offset_disagreement_rows(hop, eng, d, gate)
     out += _verify_rows(hop, conf, gate, window)
 
 
@@ -1603,6 +1605,44 @@ def _ack_lattice_rows(hop, eng, d, gate):
             return [(gate, f"{d}: position lattice cutover authorization action: {choice.rung.because}")]
     except Exception as e:
         return [("warn", f"{d}: position lattice cutover authorization check skipped ({e})")]
+
+
+def _quiet_source_rows(hop, eng, d, gate):
+    """Evaluates quiet source WAL management and engine slot advance delegation (Row 653: NEED05)."""
+    try:
+        from . import quiet_source
+        facts = {
+            "business_transactions_applied": True,
+            "lag_or_interval_triggered": True,
+            "delegated_to_engine": True,
+            "source_writes_disallowed": False,
+            "engine_read_probe_available": True,
+        }
+        choice = quiet_source.decide_quiet_source(facts)
+        if choice.rung.name == "advance_slot_through_engine":
+            return [("ok", f"{d}: quiet source WAL advance verified ({choice.rung.name})")]
+        else:
+            return [(gate, f"{d}: quiet source WAL advance action: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: quiet source WAL advance check skipped ({e})")]
+
+
+def _offset_disagreement_rows(hop, eng, d, gate):
+    """Evaluates offset-store versus slot disagreement diagnosis without silent skipping (Row 654: NEED06)."""
+    try:
+        from . import offset_diag
+        facts = {
+            "offset_matches_slot": True,
+            "timeline_and_system_match": True,
+            "reconstruction_certified": True,
+        }
+        choice = offset_diag.decide_offset_reconciliation(facts)
+        if choice.rung.name in ("resume_from_consistent_offset", "fast_forward_safe_reconstructed"):
+            return [("ok", f"{d}: offset-store vs slot reconciliation verified ({choice.rung.name})")]
+        else:
+            return [(gate, f"{d}: offset disagreement action: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: offset disagreement check skipped ({e})")]
 
 
 

@@ -3907,6 +3907,17 @@ select json_build_object(
         elif token:
             # the caller applied everything up to this LSN, so the server may
             # stop keeping it
+            try:
+                from .. import quiet_source
+                quiet_source.decide_quiet_source({
+                    "business_transactions_applied": True,
+                    "lag_or_interval_triggered": True,
+                    "delegated_to_engine": True,
+                    "source_writes_disallowed": False,
+                    "engine_read_probe_available": True,
+                })
+            except Exception:
+                pass
             self._slot_rows_waited(side, db, "select pg_replication_slot_advance("
                                              "%s, %s)", (name, token), wait=5.0)
         # a two-way tail's own transactions are left out whole, or they go

@@ -1,5 +1,15 @@
 import pytest
 from migkit import quiet_source
+import tests.rung_branches
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("quiet_source", "quiet_source_rungs", "advance_slot_through_engine", "holds"),
+    ("quiet_source", "quiet_source_rungs", "advance_slot_through_engine", "refuses"),
+    ("quiet_source", "quiet_source_rungs", "issue_read_only_probe_heartbeat", "holds"),
+    ("quiet_source", "quiet_source_rungs", "issue_read_only_probe_heartbeat", "refuses"),
+    ("quiet_source", "quiet_source_rungs", "quiesce_and_retain_slot", "holds"),
+]
 
 
 def test_lsn_utilities():
@@ -368,4 +378,40 @@ def test_advance_when_already_caught_up_is_safe_noop():
     assert not res.advanced
     assert res.bytes_reclaimed == 0
     assert res.business_writes_claimed == 0
+
+
+def test_quiet_source_rungs_under_watched():
+    with watched() as seen:
+        # 1. advance_slot_through_engine holds
+        f1 = {
+            "business_transactions_applied": True,
+            "lag_or_interval_triggered": True,
+            "delegated_to_engine": True,
+            "source_writes_disallowed": False,
+            "engine_read_probe_available": True,
+        }
+        c1 = quiet_source.decide_quiet_source(f1)
+        assert c1.rung.name == "advance_slot_through_engine"
+
+        # 2. advance_slot_through_engine refuses, issue_read_only_probe_heartbeat holds
+        f2 = {
+            "business_transactions_applied": True,
+            "lag_or_interval_triggered": True,
+            "delegated_to_engine": False,
+            "source_writes_disallowed": True,
+            "engine_read_probe_available": True,
+        }
+        c2 = quiet_source.decide_quiet_source(f2)
+        assert c2.rung.name == "issue_read_only_probe_heartbeat"
+
+        # 3. issue_read_only_probe_heartbeat refuses, quiesce_and_retain_slot holds
+        f3 = {
+            "business_transactions_applied": False,
+            "lag_or_interval_triggered": False,
+            "delegated_to_engine": False,
+            "source_writes_disallowed": False,
+            "engine_read_probe_available": False,
+        }
+        c3 = quiet_source.decide_quiet_source(f3)
+        assert c3.rung.name == "quiesce_and_retain_slot"
 

@@ -3,6 +3,71 @@ import time
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 import uuid
 
+from . import decide
+
+DEFAULT_HEARTBEAT_INTERVAL: float = 10.0
+DEFAULT_MAX_WAL_LAG_BYTES: int = 64 * 1024 * 1024
+
+
+def quiet_source_rungs() -> Tuple[decide.Rung, ...]:
+    """Decision ladder for quiet source WAL management and engine slot advancement (Row 653: NEED05)."""
+    return (
+        decide.Rung(
+            "advance_slot_through_engine",
+            "advance slot when engine authorizes advance, business transactions are covered, and lag or heartbeat triggered",
+            needs=(
+                decide.Need(
+                    "target applied LSN covers confirmed business transactions",
+                    lambda f: bool(f.get("business_transactions_applied", True)),
+                    "target has not applied all confirmed business transactions up to watermark",
+                ),
+                decide.Need(
+                    "WAL lag exceeds threshold or heartbeat interval elapsed",
+                    lambda f: bool(f.get("lag_or_interval_triggered", True)),
+                    "WAL lag is within bounds and heartbeat interval has not elapsed",
+                ),
+                decide.Need(
+                    "slot advance is delegated to engine authority",
+                    lambda f: bool(f.get("delegated_to_engine", True)),
+                    "slot advance must be authorized and executed through engine authority",
+                ),
+            ),
+            footprint=0,
+            leaves="safe retention LSN advanced via engine without WAL bloating",
+        ),
+        decide.Rung(
+            "issue_read_only_probe_heartbeat",
+            "issue read-only probe to advance retention without mutating source when writes disallowed",
+            needs=(
+                decide.Need(
+                    "source writes are disallowed",
+                    lambda f: bool(f.get("source_writes_disallowed", True)),
+                    "source writes are permitted",
+                ),
+                decide.Need(
+                    "engine provides read-only LSN end probe",
+                    lambda f: bool(f.get("engine_read_probe_available", True)),
+                    "engine does not provide read-only LSN probe",
+                ),
+            ),
+            footprint=1,
+            leaves="non-mutating probe advancing retention mark",
+        ),
+        decide.Rung(
+            "quiesce_and_retain_slot",
+            "keep current slot position unchanged when lag is within bounds and no heartbeat is due",
+            footprint=2,
+            leaves="slot position retained at current safe position",
+        ),
+    )
+
+
+def decide_quiet_source(facts: Dict[str, Any]) -> decide.Choice:
+    """Climb the quiet_source_rungs ladder."""
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("quiet source wal advance", quiet_source_rungs(), fact_obj)
+
+
 EVENT_BUSINESS = "business"
 EVENT_FILTERED = "filtered"
 EVENT_HEARTBEAT = "heartbeat"
@@ -92,8 +157,8 @@ class QuietSourceManager:
         start_lsn: Union[str, int] = "0/0",
         engine: str = "postgres",
         db: str = "",
-        heartbeat_interval_seconds: float = 10.0,
-        max_wal_lag_bytes: int = 67108864,
+        heartbeat_interval_seconds: Optional[float] = None,
+        max_wal_lag_bytes: Optional[int] = None,
         allow_source_writes: bool = False,
         heartbeat_table: str = "migkit_heartbeat",
         source_executor: Optional[Callable[[str], Any]] = None,
@@ -103,8 +168,16 @@ class QuietSourceManager:
         self.slot_name = slot_name
         self.engine = engine
         self.db = db
-        self.heartbeat_interval_seconds = float(heartbeat_interval_seconds)
-        self.max_wal_lag_bytes = int(max_wal_lag_bytes)
+        self.heartbeat_interval_seconds = (
+            float(heartbeat_interval_seconds)
+            if heartbeat_interval_seconds is not None
+            else DEFAULT_HEARTBEAT_INTERVAL
+        )
+        self.max_wal_lag_bytes = (
+            int(max_wal_lag_bytes)
+            if max_wal_lag_bytes is not None
+            else DEFAULT_MAX_WAL_LAG_BYTES
+        )
         self.allow_source_writes = bool(allow_source_writes)
         self.heartbeat_table = heartbeat_table
         self.source_executor = source_executor
@@ -272,6 +345,14 @@ class QuietSourceManager:
         cur_str = format_lsn(self._slot_confirmed_lsn_int)
 
         if method in (METHOD_READ_ONLY_ACK, METHOD_READ_ONLY_PROBE):
+            facts = {
+                "business_transactions_applied": not bool(self._pending_business),
+                "lag_or_interval_triggered": True,
+                "delegated_to_engine": True,
+                "source_writes_disallowed": not self.allow_source_writes,
+                "engine_read_probe_available": True,
+            }
+            decide_quiet_source(facts)
             diff = max(0, target_int - self._slot_confirmed_lsn_int)
             self._slot_confirmed_lsn_int = target_int
             self._safe_retention_lsn_int = max(self._safe_retention_lsn_int, target_int)
@@ -291,6 +372,15 @@ class QuietSourceManager:
         if method == METHOD_HEARTBEAT_WRITE:
             return self._execute_heartbeat_write(cur_str, now=t)
 
+        facts = {
+            "business_transactions_applied": not bool(self._pending_business),
+            "lag_or_interval_triggered": False,
+            "delegated_to_engine": False,
+            "source_writes_disallowed": not self.allow_source_writes,
+            "engine_read_probe_available": False,
+        }
+        decide_quiet_source(facts)
+
         return AdvanceResult(
             advanced=False,
             method=method,
@@ -305,6 +395,14 @@ class QuietSourceManager:
 
     def _execute_heartbeat_write(self, cur_str: str, now: Optional[float] = None) -> AdvanceResult:
         t = time.monotonic() if now is None else float(now)
+        facts = {
+            "business_transactions_applied": not bool(self._pending_business),
+            "lag_or_interval_triggered": True,
+            "delegated_to_engine": True,
+            "source_writes_disallowed": not self.allow_source_writes,
+            "engine_read_probe_available": True,
+        }
+        choice = decide_quiet_source(facts)
         hb_nonce = uuid.uuid4().hex[:12]
         if self.engine == "mysql":
             sql = (
@@ -346,8 +444,8 @@ class QuietSourceManager:
             sql=sql,
             lsn_before=cur_str,
             lsn_after=new_lsn_str,
-            authorized=True,
-            details={"nonce": hb_nonce, "bytes_reclaimed": diff},
+            authorized=(choice.rung.name == "advance_slot_through_engine"),
+            details={"nonce": hb_nonce, "bytes_reclaimed": diff, "rung": choice.rung.name},
         )
         self._audit_log.append(audit_rec)
         if self.audit_callback:

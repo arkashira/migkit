@@ -16,7 +16,18 @@ from migkit.offset_diag import (
     SlotState,
     format_lsn,
     parse_lsn,
+    decide_offset_reconciliation,
 )
+import tests.rung_branches
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("offset_diag", "offset_reconciliation_rungs", "resume_from_consistent_offset", "holds"),
+    ("offset_diag", "offset_reconciliation_rungs", "resume_from_consistent_offset", "refuses"),
+    ("offset_diag", "offset_reconciliation_rungs", "fast_forward_safe_reconstructed", "holds"),
+    ("offset_diag", "offset_reconciliation_rungs", "fast_forward_safe_reconstructed", "refuses"),
+    ("offset_diag", "offset_reconciliation_rungs", "bounded_reseed_and_refuse", "holds"),
+]
 
 
 def test_parse_and_format_lsn():
@@ -539,4 +550,34 @@ def test_interval_and_dataclass_properties():
     assert naive.naive_lsn_formatted == "0/16B3800"
     nd = naive.to_dict()
     assert nd["rejected"]
+
+
+def test_offset_reconciliation_rungs_under_watched():
+    with watched() as seen:
+        # 1. resume_from_consistent_offset holds
+        f1 = {
+            "offset_matches_slot": True,
+            "timeline_and_system_match": True,
+            "reconstruction_certified": True,
+        }
+        c1 = decide_offset_reconciliation(f1)
+        assert c1.rung.name == "resume_from_consistent_offset"
+
+        # 2. resume_from_consistent_offset refuses, fast_forward_safe_reconstructed holds
+        f2 = {
+            "offset_matches_slot": False,
+            "timeline_and_system_match": True,
+            "reconstruction_certified": True,
+        }
+        c2 = decide_offset_reconciliation(f2)
+        assert c2.rung.name == "fast_forward_safe_reconstructed"
+
+        # 3. fast_forward_safe_reconstructed refuses, bounded_reseed_and_refuse holds
+        f3 = {
+            "offset_matches_slot": False,
+            "timeline_and_system_match": True,
+            "reconstruction_certified": False,
+        }
+        c3 = decide_offset_reconciliation(f3)
+        assert c3.rung.name == "bounded_reseed_and_refuse"
 

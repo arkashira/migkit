@@ -529,6 +529,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: the saved change position belongs to another source (<...>); the source is now <...>. A failover or a rebuilt server gives the same address a log of its own, and resuming in it skips what the old one held. Nothing was applied. Move again with --mode full+cdc, or remove <...> once the target is known to be level with the new source.
 
+* <...>: offset disagreement detected: <...>
+
 * <...>: <...> is not one of <...> - stop the tail, park the table the DDL touched, or apply what can be carried
 
 * ddl.skip: <...> is not one of <...> - an ALTER or a rename left out would have every change after it written where the target has no column or table for it

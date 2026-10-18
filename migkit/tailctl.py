@@ -233,6 +233,20 @@ def same_source(eng, db, token_path, token):
     if lost:
         raise SystemExit(f"{db}: {lost}. Nothing was applied. Move again"
                          " with --mode full+cdc.")
+    try:
+        from . import offset_diag
+        slot_info = getattr(eng, "slot_status", None)
+        if slot_info and token:
+            res = offset_diag.OffsetReconciliation.diagnose(
+                offset={"offset_lsn": token},
+                slot=slot_info("src", db),
+            )
+            if res.reseed_requirement and res.reseed_requirement.required:
+                raise SystemExit(f"{db}: offset disagreement detected: {res.summary}")
+    except SystemExit:
+        raise
+    except Exception:
+        pass
 
 
 def _who(identity):

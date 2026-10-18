@@ -1,6 +1,63 @@
 import dataclasses
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from . import decide
+
+
+def offset_reconciliation_rungs() -> Tuple[decide.Rung, ...]:
+    """Decision ladder for diagnosing offset-store vs slot disagreement (Row 654: NEED06)."""
+    return (
+        decide.Rung(
+            "resume_from_consistent_offset",
+            "resume directly when offset store and slot LSN are in exact consistent agreement",
+            needs=(
+                decide.Need(
+                    "offset and slot confirmed LSN are identical",
+                    lambda f: bool(f.get("offset_matches_slot", True)),
+                    "offset store position differs from replication slot position",
+                ),
+                decide.Need(
+                    "timeline and system identity match source",
+                    lambda f: bool(f.get("timeline_and_system_match", True)),
+                    "timeline or system identity has diverged from source",
+                ),
+            ),
+            footprint=0,
+            leaves="direct resume from verified consistent offset",
+        ),
+        decide.Rung(
+            "fast_forward_safe_reconstructed",
+            "fast-forward safely when reconstruction certificate proves all intermediate writes applied",
+            needs=(
+                decide.Need(
+                    "timeline and system identity match source",
+                    lambda f: bool(f.get("timeline_and_system_match", True)),
+                    "timeline or system identity has diverged from source",
+                ),
+                decide.Need(
+                    "reconstruction certificate proves safe fast-forward without missing writes",
+                    lambda f: bool(f.get("reconstruction_certified", True)),
+                    "reconstruction certificate missing or failed to prove gap safety",
+                ),
+            ),
+            footprint=1,
+            leaves="safe fast-forward resume with verified reconstruction certificate",
+        ),
+        decide.Rung(
+            "bounded_reseed_and_refuse",
+            "refuse silent skipping and demand bounded reseed when offset disagreement cannot be reconstructed",
+            footprint=2,
+            leaves="blocked resume with explicit bounded reseed requirement",
+        ),
+    )
+
+
+def decide_offset_reconciliation(facts: Dict[str, Any]) -> decide.Choice:
+    """Climb the offset_reconciliation_rungs ladder."""
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("offset disagreement reconciliation", offset_reconciliation_rungs(), fact_obj)
+
+
 INTERVAL_MISSING_LOG = "missing-log"
 INTERVAL_ALREADY_RETAINED = "already-retained"
 INTERVAL_ALREADY_APPLIED = "already-applied"
@@ -370,7 +427,23 @@ class OffsetReconciliation:
 
         return intervals, sources_used
 
+    def _finish_result(self, res: ReconciliationResult) -> ReconciliationResult:
+        facts = {
+            "offset_matches_slot": bool(res.offset_lsn == res.slot_confirmed_flush_lsn or res.offset_lsn == res.slot_restart_lsn),
+            "timeline_and_system_match": bool(
+                self.offset.timeline_id == self.slot.timeline_id
+                and (not self.offset.system_id or not self.slot.system_id or self.offset.system_id == self.slot.system_id)
+            ),
+            "reconstruction_certified": bool(res.certificate and res.certificate.certified),
+        }
+        decide_offset_reconciliation(facts)
+        return res
+
     def reconcile(self) -> ReconciliationResult:
+        res = self._do_reconcile()
+        return self._finish_result(res)
+
+    def _do_reconcile(self) -> ReconciliationResult:
         offset_lsn = parse_lsn(self.offset.offset_lsn)
         slot_restart = parse_lsn(self.slot.restart_lsn)
         slot_flush = parse_lsn(self.slot.confirmed_flush_lsn)
