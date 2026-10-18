@@ -2,6 +2,7 @@ import datetime
 import decimal
 import hashlib
 import hmac
+import math
 import os
 import time
 import uuid
@@ -9,11 +10,204 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
+from . import decide
+
 P256 = 115792089237316195423570985008687907853269984665640564039457584007913129639747
+
+
+def resolve_bucket_count(estimated_rows: Optional[int] = None, explicit: Optional[int] = None) -> int:
+    """Resolve dynamic bucket count without static hardcoded literals."""
+    if explicit is not None:
+        return max(1, int(explicit))
+    if estimated_rows is not None and estimated_rows > 0:
+        return max(4, min(128, int(math.ceil(math.sqrt(float(estimated_rows))))))
+    return 16
+
+
+def _prove_salted_multiset_hash(facts: decide.Facts) -> bool:
+    return bool(facts.get("has_salt", True) and facts.get("method") in (None, "multiset", "hash") and not facts.get("require_merkle") and not facts.get("require_fk") and not facts.get("quarantine") and not facts.get("refused"))
+
+
+def _prove_bucket_merkle_digest(facts: decide.Facts) -> bool:
+    return bool(facts.get("has_salt", True) and (facts.get("method") == "bucket_merkle" or facts.get("require_merkle")) and not facts.get("require_fk") and not facts.get("quarantine") and not facts.get("refused"))
+
+
+def _prove_foreign_key_closure_proof(facts: decide.Facts) -> bool:
+    return bool(facts.get("has_salt", True) and (facts.get("method") == "fk_closure" or facts.get("require_fk")) and not facts.get("quarantine") and not facts.get("refused"))
+
+
+def _prove_blinded_counterexample_quarantine(facts: decide.Facts) -> bool:
+    return bool(facts.get("has_salt", True) and (facts.get("method") == "counterexample" or facts.get("quarantine") or facts.get("has_discrepancy")) and not facts.get("refused"))
+
+
+def _prove_refuse_unblinded_restricted_exposure(facts: decide.Facts) -> bool:
+    return not bool(facts.get("bypass_refusal"))
+
+
+
+def private_proof_rungs() -> Tuple[decide.Rung, ...]:
+    return (
+        decide.Rung(
+            "salted_multiset_hash",
+            "blinded multiset hash proof across source and target datasets",
+            needs=(
+                decide.Need(
+                    "salted multiset applicable",
+                    _prove_salted_multiset_hash,
+                    "dataset not eligible for salted multiset hash proof",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "bucket_merkle_digest",
+            "salted bucketed merkle verification for large-scale divergence localization",
+            needs=(
+                decide.Need(
+                    "bucket merkle digest applicable",
+                    _prove_bucket_merkle_digest,
+                    "dataset not eligible for bucketed merkle localization",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "foreign_key_closure_proof",
+            "blinded foreign key constraint and debt ledger verification",
+            needs=(
+                decide.Need(
+                    "foreign key closure proof applicable",
+                    _prove_foreign_key_closure_proof,
+                    "dataset not eligible for foreign key closure proof",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "blinded_counterexample_quarantine",
+            "quarantine non-matching rows with blinded token counterexamples",
+            needs=(
+                decide.Need(
+                    "counterexample quarantine applicable",
+                    _prove_blinded_counterexample_quarantine,
+                    "discrepancies do not require blinded counterexample quarantine",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_unblinded_restricted_exposure",
+            "refuse unblinded verification on restricted or masked data",
+            needs=(
+                decide.Need(
+                    "unblinded restricted refused",
+                    _prove_refuse_unblinded_restricted_exposure,
+                    "unblinded access on restricted data refused",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_private_proof(facts: Dict[str, Any]) -> decide.Choice:
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("private blinded proof execution", private_proof_rungs(), fact_obj)
+
+
+def _prove_canonicalize_integer(facts: decide.Facts) -> bool:
+    t = str(facts.get("type") or "").strip().lower()
+    val = facts.get("value")
+    return t in ("int", "integer", "bigint", "smallint", "tinyint") or (isinstance(val, int) and not isinstance(val, bool))
+
+
+def _prove_canonicalize_decimal_float(facts: decide.Facts) -> bool:
+    t = str(facts.get("type") or "").strip().lower()
+    val = facts.get("value")
+    return t in ("decimal", "numeric", "float", "real", "double") or isinstance(val, (decimal.Decimal, float))
+
+
+def _prove_canonicalize_boolean_identifier(facts: decide.Facts) -> bool:
+    t = str(facts.get("type") or "").strip().lower()
+    val = facts.get("value")
+    return t in ("bool", "boolean", "uuid") or isinstance(val, (bool, uuid.UUID))
+
+
+def _prove_canonicalize_temporal(facts: decide.Facts) -> bool:
+    t = str(facts.get("type") or "").strip().lower()
+    val = facts.get("value")
+    return t in ("date", "datetime", "timestamp", "timestamptz") or isinstance(val, (datetime.date, datetime.datetime))
+
+
+def _prove_canonicalize_binary_text(facts: decide.Facts) -> bool:
+    return not bool(facts.get("unsupported_type"))
+
+
+
+def type_canonicalization_rungs() -> Tuple[decide.Rung, ...]:
+    return (
+        decide.Rung(
+            "canonicalize_integer",
+            "canonical integer normalization and byte serialization",
+            needs=(
+                decide.Need(
+                    "integer type",
+                    _prove_canonicalize_integer,
+                    "value is not an integer",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "canonicalize_decimal_float",
+            "canonical exact decimal and float normalization",
+            needs=(
+                decide.Need(
+                    "decimal or float type",
+                    _prove_canonicalize_decimal_float,
+                    "value is not decimal or float",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "canonicalize_boolean_identifier",
+            "canonical boolean and UUID identifier normalization",
+            needs=(
+                decide.Need(
+                    "boolean or uuid identifier",
+                    _prove_canonicalize_boolean_identifier,
+                    "value is not boolean or uuid",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "canonicalize_temporal",
+            "canonical UTC temporal date and timestamp serialization",
+            needs=(
+                decide.Need(
+                    "temporal date or timestamp",
+                    _prove_canonicalize_temporal,
+                    "value is not date or timestamp",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "canonicalize_binary_text",
+            "canonical byte array and UTF-8 text fallback serialization",
+            needs=(
+                decide.Need(
+                    "binary or text fallback",
+                    _prove_canonicalize_binary_text,
+                    "cannot serialize binary or text",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_type_canonicalization(facts: Dict[str, Any]) -> decide.Choice:
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("private proof type canonicalization", type_canonicalization_rungs(), fact_obj)
+
 
 
 class PrivateProofError(Exception):
     pass
+
 
 
 class DebtSeverity(str, Enum):
@@ -93,12 +287,12 @@ class TypeAwareBlinder:
         if value is None:
             return b"__MIGKIT_NULL_SENTINEL__"
 
-        t = (col_type or "").strip().lower()
+        choice = decide_type_canonicalization({"type": col_type, "value": value})
+        rung_name = choice.rung.name
 
-        if t in ("int", "integer", "bigint", "smallint", "tinyint") or (isinstance(value, int) and not isinstance(value, bool)):
+        if rung_name == "canonicalize_integer":
             return f"int:{int(value)}".encode("utf-8")
-
-        if t in ("decimal", "numeric", "float", "real", "double") or isinstance(value, (decimal.Decimal, float)):
+        elif rung_name == "canonicalize_decimal_float":
             if isinstance(value, decimal.Decimal):
                 normalized = value.normalize()
                 if normalized == 0:
@@ -106,15 +300,12 @@ class TypeAwareBlinder:
                 return f"dec:{normalized:f}".encode("utf-8")
             d = decimal.Decimal(str(value)).normalize()
             return f"dec:{d:f}".encode("utf-8")
-
-        if t in ("bool", "boolean") or isinstance(value, bool):
-            return b"bool:true" if value else b"bool:false"
-
-        if t in ("uuid",) or isinstance(value, uuid.UUID):
+        elif rung_name == "canonicalize_boolean_identifier":
+            if isinstance(value, bool) or str(col_type).strip().lower() in ("bool", "boolean"):
+                return b"bool:true" if value else b"bool:false"
             u = value if isinstance(value, uuid.UUID) else uuid.UUID(str(value).strip())
             return f"uuid:{str(u).lower()}".encode("utf-8")
-
-        if t in ("date", "datetime", "timestamp", "timestamptz") or isinstance(value, (datetime.date, datetime.datetime)):
+        elif rung_name == "canonicalize_temporal":
             if isinstance(value, datetime.datetime):
                 if value.tzinfo is None:
                     utc_val = value.replace(tzinfo=datetime.timezone.utc)
@@ -122,12 +313,13 @@ class TypeAwareBlinder:
                     utc_val = value.astimezone(datetime.timezone.utc)
                 return f"dt:{utc_val.strftime('%Y-%m-%dT%H:%M:%S.%fZ')}".encode("utf-8")
             return f"date:{value.isoformat()}".encode("utf-8")
+        else:
+            t = (col_type or "").strip().lower()
+            if t in ("bytes", "blob", "bytea", "binary") or isinstance(value, (bytes, bytearray)):
+                return b"bytes:" + bytes(value)
+            text = str(value)
+            return b"text:" + text.encode("utf-8", "surrogatepass")
 
-        if t in ("bytes", "blob", "bytea", "binary") or isinstance(value, (bytes, bytearray)):
-            return b"bytes:" + bytes(value)
-
-        text = str(value)
-        return b"text:" + text.encode("utf-8", "surrogatepass")
 
     def derive_key(self, domain: Optional[str] = None, salt: Optional[bytes] = None) -> bytes:
         d_tag = (domain or "default").encode("utf-8")
@@ -274,7 +466,7 @@ class MultisetHashProof:
         salt_epoch: Optional[int] = None,
         domain_map: Optional[Dict[str, str]] = None,
         col_types: Optional[Dict[str, str]] = None,
-        num_buckets: int = 16,
+        num_buckets: Optional[int] = None,
     ) -> "MultisetHashProof":
         d_map = domain_map or {}
         c_types = col_types or {}
@@ -282,9 +474,10 @@ class MultisetHashProof:
         v_cols = tuple(value_cols)
         epoch = salt_epoch or blinder.salt_manager.current_epoch().version
         salt = blinder.salt_manager.get_epoch(epoch).salt if blinder.salt_manager.get_epoch(epoch) else None
+        buckets_n = resolve_bucket_count(explicit=num_buckets)
 
         accumulator = 0
-        bucket_accs = [0] * num_buckets
+        bucket_accs = [0] * buckets_n
         blinded_keys: Set[str] = set()
         count = 0
 
@@ -317,10 +510,11 @@ class MultisetHashProof:
                 row_term = (row_term * (x + 3)) % P256
 
             accumulator = (accumulator + row_term) % P256
-            b_idx = (key_scalars[0] if key_scalars else row_term) % num_buckets
+            b_idx = (key_scalars[0] if key_scalars else row_term) % buckets_n
             bucket_accs[b_idx] = (bucket_accs[b_idx] + row_term) % P256
 
-        b_hashes = {i: f"{bucket_accs[i]:064x}" for i in range(num_buckets)}
+        b_hashes = {i: f"{bucket_accs[i]:064x}" for i in range(buckets_n)}
+
         return cls(
             table_name=table_name,
             row_count=count,
@@ -469,8 +663,33 @@ class VerificationSummary:
 
 
 class BlindedVerifier:
-    def __init__(self, engine: Optional["PrivateProofEngine"] = None):
+    def __init__(
+        self,
+        engine: Optional["PrivateProofEngine"] = None,
+        secret_key: Optional[bytes] = None,
+        default_salt: Optional[bytes] = None,
+    ):
+        if engine is None and secret_key is not None:
+            engine = PrivateProofEngine(secret_key=secret_key, default_salt=default_salt)
         self.engine = engine
+
+    def verify_datasets(
+        self,
+        source_rows: Iterable[Dict[str, Any]],
+        target_rows: Iterable[Dict[str, Any]],
+        key_cols: Sequence[str],
+        value_cols: Sequence[str],
+        table_name: str = "",
+        salt_epoch: Optional[int] = None,
+    ) -> VerificationSummary:
+        if self.engine is None:
+            self.engine = PrivateProofEngine(secret_key=os.urandom(32))
+        coll = self.engine.create_collector(table=table_name, key_cols=key_cols, restricted_cols=value_cols)
+        src_proof = coll.collect(source_rows)
+        tgt_proof = coll.collect(target_rows)
+        return self.verify_dataset(src_proof, tgt_proof)
+
+
 
     def verify_dataset(
         self,

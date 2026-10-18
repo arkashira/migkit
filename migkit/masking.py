@@ -316,3 +316,23 @@ def verify(hop, shown, value, under=None):
     if shown == token(hop, value):
         return True, ""
     return False, "a different value than the one shown"
+
+
+def create_blinded_verifier(secret_key=None, default_salt=None):
+    """Instantiate a BlindedVerifier backed by the masking secret."""
+    from .private_proof import BlindedVerifier
+    sec = secret_key or _secret()
+    return BlindedVerifier(secret_key=sec, default_salt=default_salt)
+
+
+def verify_dataset_proof(source_rows, target_rows, key_cols, value_cols, table_name="", secret_key=None):
+    """Verify source and target rows using private blinded proof."""
+    verifier = create_blinded_verifier(secret_key=secret_key)
+    return verifier.verify_datasets(
+        source_rows=source_rows,
+        target_rows=target_rows,
+        key_cols=key_cols,
+        value_cols=value_cols,
+        table_name=table_name,
+    )
+

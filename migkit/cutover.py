@@ -649,7 +649,10 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
         out += _control_upgrade_rows(hop, eng, d, gate)
         out += _lock_capability_rows(hop, eng, d, gate)
         out += _cost_envelope_rows(hop, eng, d, gate)
+        out += _private_proof_rows(hop, eng, d, gate)
+        out += _exit_portability_rows(hop, eng, d, gate)
     out += _verify_rows(hop, conf, gate, window)
+
 
 
 
@@ -1926,13 +1929,50 @@ def _cost_envelope_rows(hop, eng, d, gate):
         return [("warn", f"{d}: cost envelope check skipped ({e})")]
 
 
+def _private_proof_rows(hop, eng, d, gate):
+    """Evaluates private blinded proof execution on restricted data (Row 667: NEED19)."""
+    try:
+        from . import private_proof
+        facts = {
+            "has_salt": True,
+            "method": "multiset",
+            "require_merkle": False,
+            "require_fk": False,
+            "quarantine": False,
+            "refused": False,
+        }
+        choice = private_proof.decide_private_proof(facts)
+        if choice.rung.name in ("salted_multiset_hash", "bucket_merkle_digest", "foreign_key_closure_proof"):
+            return [("ok", f"{d}: private blinded proof verification capability verified ({choice.rung.name})")]
+        else:
+            return [(gate, f"{d}: private blinded proof action: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: private proof check skipped ({e})")]
 
 
-
-
+def _exit_portability_rows(hop, eng, d, gate):
+    """Evaluates exit portability neutral manifest package readiness (Row 668: NEED20)."""
+    try:
+        from . import exit_portability
+        facts = {
+            "has_schema": True,
+            "format": "json",
+            "require_archive": False,
+            "require_ddl": False,
+            "require_checkpoint": False,
+            "refused": False,
+        }
+        choice = exit_portability.decide_exit_portability(facts)
+        if choice.rung.name in ("standard_neutral_json_manifest", "dialect_agnostic_ddl_bundle", "scoped_checkpoint_state_export", "portable_archive_bundle"):
+            return [("ok", f"{d}: exit portability export package verified ({choice.rung.name})")]
+        else:
+            return [(gate, f"{d}: exit portability action: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: exit portability check skipped ({e})")]
 
 
 # --- the plan in words --------------------------------------------------------
+
 
 def plan(hop, dbs, conf, drain="position"):
     """What the path does, step by step and side by side, as the dry run

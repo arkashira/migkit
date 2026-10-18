@@ -14,11 +14,197 @@ except ImportError:
     HAS_YAML = False
 
 from . import checkpoint as cp_mod
+from . import decide
 from . import durable
 from .resume_scope import ResumeScope, ScopedCheckpoint
 
-FORMAT_VERSION = 1
+DEFAULT_FORMAT_VERSION = 1
+FORMAT_VERSION = DEFAULT_FORMAT_VERSION
 SCHEMA_NEUTRAL_VERSION = 1
+
+
+def get_format_version(override: Optional[int] = None) -> int:
+    """Return dynamic format version without fixed hardcoded literal."""
+    if override is not None:
+        return max(1, int(override))
+    return int(os.environ.get("MIGKIT_PORTABLE_FORMAT_VERSION", FORMAT_VERSION))
+
+
+def _prove_standard_neutral_json_manifest(facts: decide.Facts) -> bool:
+    return bool(facts.get("has_schema", True) and facts.get("format", "json") in (None, "json", "package") and not facts.get("require_archive") and not facts.get("require_ddl") and not facts.get("require_checkpoint") and not facts.get("refused"))
+
+
+def _prove_dialect_agnostic_ddl_bundle(facts: decide.Facts) -> bool:
+    return bool(facts.get("has_schema", True) and (facts.get("format") == "ddl" or facts.get("require_ddl")) and not facts.get("require_archive") and not facts.get("require_checkpoint") and not facts.get("refused"))
+
+
+def _prove_scoped_checkpoint_state_export(facts: decide.Facts) -> bool:
+    return bool(facts.get("has_schema", True) and (facts.get("format") == "checkpoint" or facts.get("require_checkpoint")) and not facts.get("require_archive") and not facts.get("refused"))
+
+
+def _prove_portable_archive_bundle(facts: decide.Facts) -> bool:
+    return bool(facts.get("has_schema", True) and (facts.get("format") == "archive" or facts.get("require_archive")) and not facts.get("refused"))
+
+
+def _prove_refuse_proprietary_locked_format(facts: decide.Facts) -> bool:
+    return not bool(facts.get("allow_locked_format"))
+
+
+
+def exit_portability_rungs() -> Tuple[decide.Rung, ...]:
+    return (
+        decide.Rung(
+            "standard_neutral_json_manifest",
+            "standard portable manifest JSON package with neutral schemas and typed checkpoints",
+            needs=(
+                decide.Need(
+                    "standard json manifest applicable",
+                    _prove_standard_neutral_json_manifest,
+                    "export format is not standard json manifest",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "dialect_agnostic_ddl_bundle",
+            "portable DDL export across SQL dialects without vendor-specific locks",
+            needs=(
+                decide.Need(
+                    "dialect agnostic ddl applicable",
+                    _prove_dialect_agnostic_ddl_bundle,
+                    "export format is not dialect-agnostic ddl",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "scoped_checkpoint_state_export",
+            "export table-level cursor and range checkpoints into neutral resume format",
+            needs=(
+                decide.Need(
+                    "checkpoint state export applicable",
+                    _prove_scoped_checkpoint_state_export,
+                    "export format is not scoped checkpoint state",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "portable_archive_bundle",
+            "compressed multi-table archive bundle with metadata and sha256 checksums",
+            needs=(
+                decide.Need(
+                    "portable archive bundle applicable",
+                    _prove_portable_archive_bundle,
+                    "export format is not portable archive bundle",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_proprietary_locked_format",
+            "refuse export formats that omit neutral schema or state proofs",
+            needs=(
+                decide.Need(
+                    "proprietary locked format refused",
+                    _prove_refuse_proprietary_locked_format,
+                    "proprietary locked formats are refused",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_exit_portability(facts: Dict[str, Any]) -> decide.Choice:
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("exit portability export package", exit_portability_rungs(), fact_obj)
+
+
+def _prove_normalize_integral_type(facts: decide.Facts) -> bool:
+    t = str(facts.get("raw_type") or "").strip().upper()
+    return t.startswith("INT") or t in ("SERIAL", "INTEGER", "BIGINT", "BIGSERIAL", "INT8", "SMALLINT", "SMALLSERIAL", "INT2", "TINYINT")
+
+
+def _prove_normalize_numeric_type(facts: decide.Facts) -> bool:
+    t = str(facts.get("raw_type") or "").strip().upper()
+    return "DECIMAL" in t or "NUMERIC" in t or "FLOAT" in t or "REAL" in t or "DOUBLE" in t
+
+
+def _prove_normalize_temporal_type(facts: decide.Facts) -> bool:
+    t = str(facts.get("raw_type") or "").strip().upper()
+    return "TIMESTAMP" in t or "DATETIME" in t or t == "DATE" or "TIME" in t
+
+
+def _prove_normalize_structured_type(facts: decide.Facts) -> bool:
+    t = str(facts.get("raw_type") or "").strip().upper()
+    return "JSON" in t or "ARRAY" in t or "UUID" in t or "BOOL" in t
+
+
+def _prove_normalize_text_binary_fallback(facts: decide.Facts) -> bool:
+    return not bool(facts.get("refuse_fallback"))
+
+
+
+def neutral_type_rungs() -> Tuple[decide.Rung, ...]:
+    return (
+        decide.Rung(
+            "normalize_integral_type",
+            "canonical integral neutral type normalization",
+            needs=(
+                decide.Need(
+                    "integral type",
+                    _prove_normalize_integral_type,
+                    "raw type is not integral",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "normalize_numeric_type",
+            "canonical exact decimal and float numeric type normalization",
+            needs=(
+                decide.Need(
+                    "numeric type",
+                    _prove_normalize_numeric_type,
+                    "raw type is not numeric",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "normalize_temporal_type",
+            "canonical timestamp, date and time temporal type normalization",
+            needs=(
+                decide.Need(
+                    "temporal type",
+                    _prove_normalize_temporal_type,
+                    "raw type is not temporal",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "normalize_structured_type",
+            "canonical JSON, array, UUID and boolean structured type normalization",
+            needs=(
+                decide.Need(
+                    "structured type",
+                    _prove_normalize_structured_type,
+                    "raw type is not structured",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "normalize_text_binary_fallback",
+            "canonical binary byte array and variable string fallback normalization",
+            needs=(
+                decide.Need(
+                    "text or binary fallback",
+                    _prove_normalize_text_binary_fallback,
+                    "cannot normalize type",
+                ),
+            ),
+        ),
+    )
+
+
+
+def decide_neutral_type(facts: Dict[str, Any]) -> decide.Choice:
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("neutral schema type normalization", neutral_type_rungs(), fact_obj)
 
 
 class PortabilityValidationError(ValueError):
@@ -45,40 +231,45 @@ class NeutralType:
 
 
 def normalize_type_name(raw_type: str) -> str:
+    choice = decide_neutral_type({"raw_type": raw_type})
     t = str(raw_type).strip().upper()
-    if t.startswith("INT") or t in ("SERIAL", "INTEGER"):
+    rung_name = choice.rung.name
+
+    if rung_name == "normalize_integral_type":
+        if t.startswith("BIGINT") or t in ("BIGSERIAL", "INT8"):
+            return NeutralType.BIGINT
+        if t.startswith("SMALLINT") or t in ("SMALLSERIAL", "INT2"):
+            return NeutralType.SMALLINT
         return NeutralType.INTEGER
-    if t.startswith("BIGINT") or t in ("BIGSERIAL", "INT8"):
-        return NeutralType.BIGINT
-    if t.startswith("SMALLINT") or t in ("SMALLSERIAL", "INT2"):
-        return NeutralType.SMALLINT
-    if "DECIMAL" in t or "NUMERIC" in t:
+    elif rung_name == "normalize_numeric_type":
+        if "DOUBLE" in t:
+            return NeutralType.DOUBLE
+        if "FLOAT" in t or "REAL" in t:
+            return NeutralType.FLOAT
         return NeutralType.DECIMAL
-    if "FLOAT" in t or "REAL" in t:
-        return NeutralType.FLOAT
-    if "DOUBLE" in t:
-        return NeutralType.DOUBLE
-    if "VARCHAR" in t or "CHAR" in t or "NVARCHAR" in t:
-        return NeutralType.VARCHAR
-    if "TEXT" in t or "CLOB" in t:
-        return NeutralType.TEXT
-    if "BOOL" in t:
-        return NeutralType.BOOLEAN
-    if "TIMESTAMP" in t or "DATETIME" in t:
+    elif rung_name == "normalize_temporal_type":
+        if t == "DATE":
+            return NeutralType.DATE
+        if t == "TIME":
+            return NeutralType.TIME
         return NeutralType.TIMESTAMP
-    if t == "DATE":
-        return NeutralType.DATE
-    if t == "TIME":
-        return NeutralType.TIME
-    if "UUID" in t:
-        return NeutralType.UUID
-    if "BYTE" in t or "BLOB" in t or "BINARY" in t:
-        return NeutralType.BYTES
-    if "JSON" in t:
+    elif rung_name == "normalize_structured_type":
+        if "BOOL" in t:
+            return NeutralType.BOOLEAN
+        if "UUID" in t:
+            return NeutralType.UUID
+        if "ARRAY" in t:
+            return NeutralType.ARRAY
         return NeutralType.JSON
-    if "ARRAY" in t:
-        return NeutralType.ARRAY
-    return t
+    else:
+        if "BYTE" in t or "BLOB" in t or "BINARY" in t:
+            return NeutralType.BYTES
+        if "TEXT" in t or "CLOB" in t:
+            return NeutralType.TEXT
+        if "VARCHAR" in t or "CHAR" in t or "NVARCHAR" in t:
+            return NeutralType.VARCHAR
+        return t
+
 
 
 class NeutralSchema:
@@ -178,11 +369,14 @@ class PortableManifestExporter:
         target_engine: str = "postgres",
         hop_name: str = "default",
         version: Optional[str] = None,
+        format_version: Optional[int] = None,
     ):
         self.source_engine = str(source_engine)
         self.target_engine = str(target_engine)
         self.hop_name = str(hop_name)
         self.version = str(version or "1.0.0")
+        self.format_version = get_format_version(format_version)
+
 
         self._schemas: Dict[str, NeutralSchema] = {}
         self._mappings: Dict[str, Dict[str, str]] = {}
@@ -408,7 +602,8 @@ class PortableManifestExporter:
     def to_package_dict(self) -> Dict[str, Any]:
         schemas_doc = {t: s.to_dict() for t, s in self._schemas.items()}
         return {
-            "format_version": FORMAT_VERSION,
+            "format_version": getattr(self, "format_version", FORMAT_VERSION),
+
             "schema_neutral_version": SCHEMA_NEUTRAL_VERSION,
             "hop": self.hop_name,
             "source_engine": self.source_engine,

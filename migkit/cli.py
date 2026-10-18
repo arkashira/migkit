@@ -7763,7 +7763,25 @@ def secrets_export_mask(as_json):
                " (the value is not shown)")
 
 
+@main.command("export-manifest")
+@click.argument("hop_name", default="")
+@click.option("--out", "out_file", default=None, help="output path for manifest JSON")
+def export_manifest_cmd(hop_name, out_file=None):
+    """Export neutral portable manifest package for exit portability (Row 668: NEED20)."""
+    from . import exit_portability
+    exporter = exit_portability.PortableManifestExporter(hop_name=hop_name or "default")
+    pkg = exporter.to_package_dict()
+    rendered = json.dumps(pkg, indent=2, sort_keys=True)
+    if out_file:
+        from pathlib import Path
+        Path(out_file).write_text(rendered, encoding="utf-8")
+        click.echo(f"exported portable manifest to {out_file}")
+    else:
+        click.echo(rendered)
+
+
 from . import estate  # noqa: E402,F401 - `migkit estate` on main
+
 
 
 if __name__ == "__main__":

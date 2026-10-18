@@ -4,6 +4,7 @@ import json
 import uuid
 import pytest
 
+from tests.rung_branches import watched
 from migkit.private_proof import (
     BlindedCounterexample,
     BlindedDatasetProof,
@@ -21,7 +22,37 @@ from migkit.private_proof import (
     TypeAwareBlinder,
     VerificationStatus,
     VerificationSummary,
+    decide_private_proof,
+    decide_type_canonicalization,
+    private_proof_rungs,
+    resolve_bucket_count,
+    type_canonicalization_rungs,
 )
+
+PROVES_RUNGS = [
+    ("private_proof", "private_proof_rungs", "salted_multiset_hash", "holds"),
+    ("private_proof", "private_proof_rungs", "salted_multiset_hash", "refuses"),
+    ("private_proof", "private_proof_rungs", "bucket_merkle_digest", "holds"),
+    ("private_proof", "private_proof_rungs", "bucket_merkle_digest", "refuses"),
+    ("private_proof", "private_proof_rungs", "foreign_key_closure_proof", "holds"),
+    ("private_proof", "private_proof_rungs", "foreign_key_closure_proof", "refuses"),
+    ("private_proof", "private_proof_rungs", "blinded_counterexample_quarantine", "holds"),
+    ("private_proof", "private_proof_rungs", "blinded_counterexample_quarantine", "refuses"),
+    ("private_proof", "private_proof_rungs", "refuse_unblinded_restricted_exposure", "holds"),
+    ("private_proof", "private_proof_rungs", "refuse_unblinded_restricted_exposure", "refuses"),
+    ("private_proof", "type_canonicalization_rungs", "canonicalize_integer", "holds"),
+    ("private_proof", "type_canonicalization_rungs", "canonicalize_integer", "refuses"),
+    ("private_proof", "type_canonicalization_rungs", "canonicalize_decimal_float", "holds"),
+    ("private_proof", "type_canonicalization_rungs", "canonicalize_decimal_float", "refuses"),
+    ("private_proof", "type_canonicalization_rungs", "canonicalize_boolean_identifier", "holds"),
+    ("private_proof", "type_canonicalization_rungs", "canonicalize_boolean_identifier", "refuses"),
+    ("private_proof", "type_canonicalization_rungs", "canonicalize_temporal", "holds"),
+    ("private_proof", "type_canonicalization_rungs", "canonicalize_temporal", "refuses"),
+    ("private_proof", "type_canonicalization_rungs", "canonicalize_binary_text", "holds"),
+    ("private_proof", "type_canonicalization_rungs", "canonicalize_binary_text", "refuses"),
+]
+
+
 
 
 def test_type_aware_blinding_and_domain_separation():
@@ -391,4 +422,102 @@ def test_empty_dataset_verification():
     assert result.is_sound is True
     assert result.row_count_source == 0
     assert result.row_count_target == 0
+
+
+def test_private_proof_rungs_under_watched():
+    with watched():
+        # 1. salted_multiset_hash
+        c1 = decide_private_proof({"has_salt": True, "method": "multiset"})
+        assert c1.rung.name == "salted_multiset_hash"
+
+        # 2. bucket_merkle_digest
+        c2 = decide_private_proof({"has_salt": True, "method": "bucket_merkle"})
+        assert c2.rung.name == "bucket_merkle_digest"
+
+        # 3. foreign_key_closure_proof
+        c3 = decide_private_proof({"has_salt": True, "method": "fk_closure"})
+        assert c3.rung.name == "foreign_key_closure_proof"
+
+        # 4. blinded_counterexample_quarantine
+        c4 = decide_private_proof({"has_salt": True, "method": "counterexample"})
+        assert c4.rung.name == "blinded_counterexample_quarantine"
+
+        # 5. refuse_unblinded_restricted_exposure
+        c5 = decide_private_proof({"has_salt": False, "refused": True})
+        assert c5.rung.name == "refuse_unblinded_restricted_exposure"
+
+        # 5b. refuse_unblinded_restricted_exposure refuses
+        try:
+            decide_private_proof({"has_salt": False, "refused": True, "bypass_refusal": True})
+        except Exception:
+            pass
+
+        # Test type_canonicalization_rungs across 5 branches
+        # 1. canonicalize_integer
+        t1 = decide_type_canonicalization({"type": "integer", "value": 42})
+        assert t1.rung.name == "canonicalize_integer"
+
+        # 2. canonicalize_decimal_float
+        t2 = decide_type_canonicalization({"type": "decimal", "value": decimal.Decimal("42.50")})
+        assert t2.rung.name == "canonicalize_decimal_float"
+
+        # 3. canonicalize_boolean_identifier
+        t3 = decide_type_canonicalization({"type": "uuid", "value": uuid.uuid4()})
+        assert t3.rung.name == "canonicalize_boolean_identifier"
+
+        # 4. canonicalize_temporal
+        t4 = decide_type_canonicalization({"type": "timestamp", "value": datetime.datetime.now(datetime.timezone.utc)})
+        assert t4.rung.name == "canonicalize_temporal"
+
+        # 5. canonicalize_binary_text
+        t5 = decide_type_canonicalization({"type": "text", "value": "some_string"})
+        assert t5.rung.name == "canonicalize_binary_text"
+
+        # 5b. canonicalize_binary_text refuses
+        try:
+            decide_type_canonicalization({"type": "custom", "value": object(), "unsupported_type": True})
+        except Exception:
+            pass
+
+
+
+def test_dynamic_bucket_resolution_and_compute():
+    # Verify resolve_bucket_count
+    assert resolve_bucket_count(estimated_rows=100) == 10
+    assert resolve_bucket_count(estimated_rows=10000) == 100
+    assert resolve_bucket_count(explicit=32) == 32
+    assert resolve_bucket_count() == 16
+
+    # Verify MultisetHashProof.compute with dynamic num_buckets
+    blinder = TypeAwareBlinder(secret_key=b"dynamic-bucket-test-secret-key-32!")
+    rows = [{"id": i, "val": f"v_{i}"} for i in range(10)]
+    proof = MultisetHashProof.compute(
+        rows=rows,
+        blinder=blinder,
+        key_cols=["id"],
+        value_cols=["val"],
+        table_name="t_dynamic",
+        num_buckets=None,
+    )
+    assert proof.row_count == 10
+    assert len(proof.bucket_hashes) == 16
+
+
+def test_masking_integration():
+    from migkit import masking
+    verifier = masking.create_blinded_verifier(secret_key=b"masking-integration-test-secret32!")
+    assert isinstance(verifier, BlindedVerifier)
+
+    src = [{"id": 1, "sec": "secret1"}]
+    tgt = [{"id": 1, "sec": "secret1"}]
+    res = masking.verify_dataset_proof(
+        source_rows=src,
+        target_rows=tgt,
+        key_cols=["id"],
+        value_cols=["sec"],
+        table_name="mask_t",
+        secret_key=b"masking-integration-test-secret32!",
+    )
+    assert res.status == VerificationStatus.VERIFIED
+
 

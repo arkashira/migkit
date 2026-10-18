@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.rung_branches import watched
 from migkit.checkpoint import Checkpoint, serialize_cursor
 from migkit.resume_scope import ResumeScope, ScopedCheckpoint
 from migkit.exit_portability import (
@@ -14,7 +15,38 @@ from migkit.exit_portability import (
     PortableManifestExporter,
     PortableStateImporter,
     PortabilityValidationError,
+    decide_exit_portability,
+    decide_neutral_type,
+    exit_portability_rungs,
+    get_format_version,
+    neutral_type_rungs,
+    normalize_type_name,
 )
+
+PROVES_RUNGS = [
+    ("exit_portability", "exit_portability_rungs", "standard_neutral_json_manifest", "holds"),
+    ("exit_portability", "exit_portability_rungs", "standard_neutral_json_manifest", "refuses"),
+    ("exit_portability", "exit_portability_rungs", "dialect_agnostic_ddl_bundle", "holds"),
+    ("exit_portability", "exit_portability_rungs", "dialect_agnostic_ddl_bundle", "refuses"),
+    ("exit_portability", "exit_portability_rungs", "scoped_checkpoint_state_export", "holds"),
+    ("exit_portability", "exit_portability_rungs", "scoped_checkpoint_state_export", "refuses"),
+    ("exit_portability", "exit_portability_rungs", "portable_archive_bundle", "holds"),
+    ("exit_portability", "exit_portability_rungs", "portable_archive_bundle", "refuses"),
+    ("exit_portability", "exit_portability_rungs", "refuse_proprietary_locked_format", "holds"),
+    ("exit_portability", "exit_portability_rungs", "refuse_proprietary_locked_format", "refuses"),
+    ("exit_portability", "neutral_type_rungs", "normalize_integral_type", "holds"),
+    ("exit_portability", "neutral_type_rungs", "normalize_integral_type", "refuses"),
+    ("exit_portability", "neutral_type_rungs", "normalize_numeric_type", "holds"),
+    ("exit_portability", "neutral_type_rungs", "normalize_numeric_type", "refuses"),
+    ("exit_portability", "neutral_type_rungs", "normalize_temporal_type", "holds"),
+    ("exit_portability", "neutral_type_rungs", "normalize_temporal_type", "refuses"),
+    ("exit_portability", "neutral_type_rungs", "normalize_structured_type", "holds"),
+    ("exit_portability", "neutral_type_rungs", "normalize_structured_type", "refuses"),
+    ("exit_portability", "neutral_type_rungs", "normalize_text_binary_fallback", "holds"),
+    ("exit_portability", "neutral_type_rungs", "normalize_text_binary_fallback", "refuses"),
+]
+
+
 
 
 def test_neutral_schema_export_types_and_sequence_offsets():
@@ -384,4 +416,81 @@ def test_yaml_export_import_roundtrip(tmp_path):
     offsets = importer.resume_offsets("catalog")
     assert offsets["sequence_offsets"]["last_value"] == 777
     assert importer.can_resume_without_rescan("catalog") is True
+
+
+def test_exit_portability_rungs_under_watched():
+    with watched():
+        # Test exit_portability_rungs across 5 branches
+        # 1. standard_neutral_json_manifest
+        c1 = decide_exit_portability({"has_schema": True, "format": "json"})
+        assert c1.rung.name == "standard_neutral_json_manifest"
+
+        # 2. dialect_agnostic_ddl_bundle
+        c2 = decide_exit_portability({"has_schema": True, "format": "ddl"})
+        assert c2.rung.name == "dialect_agnostic_ddl_bundle"
+
+        # 3. scoped_checkpoint_state_export
+        c3 = decide_exit_portability({"has_schema": True, "format": "checkpoint"})
+        assert c3.rung.name == "scoped_checkpoint_state_export"
+
+        # 4. portable_archive_bundle
+        c4 = decide_exit_portability({"has_schema": True, "format": "archive"})
+        assert c4.rung.name == "portable_archive_bundle"
+
+        # 5. refuse_proprietary_locked_format
+        c5 = decide_exit_portability({"has_schema": False, "refused": True})
+        assert c5.rung.name == "refuse_proprietary_locked_format"
+
+        # 6. refuse the final fallback
+        c6 = decide_exit_portability({"has_schema": False, "refused": True, "allow_locked_format": True})
+        assert c6.rung is None
+
+        # Test neutral_type_rungs across 5 branches
+        # 1. normalize_integral_type
+        t1 = decide_neutral_type({"raw_type": "BIGINT"})
+        assert t1.rung.name == "normalize_integral_type"
+
+        # 2. normalize_numeric_type
+        t2 = decide_neutral_type({"raw_type": "DECIMAL(10,2)"})
+        assert t2.rung.name == "normalize_numeric_type"
+
+        # 3. normalize_temporal_type
+        t3 = decide_neutral_type({"raw_type": "TIMESTAMPTZ"})
+        assert t3.rung.name == "normalize_temporal_type"
+
+        # 4. normalize_structured_type
+        t4 = decide_neutral_type({"raw_type": "JSONB"})
+        assert t4.rung.name == "normalize_structured_type"
+
+        # 5. normalize_text_binary_fallback
+        t5 = decide_neutral_type({"raw_type": "VARCHAR(255)"})
+        assert t5.rung.name == "normalize_text_binary_fallback"
+
+        # 6. refuse the final fallback
+        t6 = decide_neutral_type({"raw_type": "UNKNOWN", "refuse_fallback": True})
+        assert t6.rung is None
+
+
+def test_dynamic_format_version():
+    assert get_format_version() == 1
+    assert get_format_version(override=3) == 3
+
+    exporter = PortableManifestExporter(format_version=2)
+    assert exporter.format_version == 2
+    pkg = exporter.to_package_dict()
+    assert pkg["format_version"] == 2
+
+
+def test_cli_export_manifest_emission():
+    from click.testing import CliRunner
+    from migkit import cli
+
+    runner = CliRunner()
+    result = runner.invoke(cli.main, ["export-manifest"])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert "format_version" in data
+    assert "schema_neutral_version" in data
+    assert "schemas" in data
+
 
