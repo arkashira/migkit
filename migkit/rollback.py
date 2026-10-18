@@ -6,7 +6,10 @@ import time
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+from migkit import decide
+from migkit import appversions
 
 
 class ExpandContractPhase(str, Enum):
@@ -84,6 +87,57 @@ class CurrentWriteState:
         if self.table_writes.get(table, 0) > 0:
             return True
         return self.has_new_version_writes
+
+    @classmethod
+    def from_engine(cls, engine: Any, tables: Sequence[str] = ()) -> "CurrentWriteState":
+        return observe_live_writes(engine, tables)
+
+
+def observe_live_writes(engine: Any, tables: Sequence[str] = ()) -> CurrentWriteState:
+    """Observe live write activity across specified tables using real engine authority."""
+    table_writes: Dict[str, int] = {}
+    column_writes: Dict[str, Dict[str, int]] = {}
+    has_writes = False
+
+    if hasattr(engine, "read_table_stats"):
+        try:
+            stats = engine.read_table_stats(tables)
+            for t, count in stats.items():
+                table_writes[t] = count
+                if count > 0:
+                    has_writes = True
+        except Exception:
+            pass
+    elif hasattr(engine, "query") or hasattr(engine, "execute"):
+        for t in tables:
+            try:
+                rows = engine.query(f"SELECT COUNT(*) FROM {t}")
+                if rows:
+                    cnt = rows[0][0] if isinstance(rows[0], (tuple, list)) else rows[0].get("count", 0)
+                    table_writes[t] = int(cnt)
+                    if cnt > 0:
+                        has_writes = True
+            except Exception:
+                table_writes[t] = 0
+
+    marker = ""
+    if hasattr(engine, "current_lsn"):
+        try:
+            marker = str(engine.current_lsn() or "")
+        except Exception:
+            pass
+    elif hasattr(engine, "current_gtid"):
+        try:
+            marker = str(engine.current_gtid() or "")
+        except Exception:
+            pass
+
+    return CurrentWriteState(
+        table_writes=table_writes,
+        column_writes=column_writes,
+        has_new_version_writes=has_writes,
+        highest_lsn_or_marker=marker,
+    )
 
 
 @dataclass
@@ -225,6 +279,34 @@ class AppRollbackCoordinator:
     def register_evolution_step(self, step: SchemaEvolutionStep) -> None:
         self._steps[step.step_id] = step
         self.artifact_store.record_evolution_step(step)
+
+    @classmethod
+    def from_migration_history(
+        cls,
+        src_history: Dict[str, Any],
+        dst_history: Dict[str, Any],
+    ) -> "AppRollbackCoordinator":
+        coord = cls()
+        aparts = appversions.apart(src_history, dst_history)
+        for ap in aparts:
+            supported = set(src_history.keys()) | set(dst_history.keys())
+            coord.register_app_version(
+                AppVersionSpec(
+                    version_id=ap.tool,
+                    supported_schema_versions=supported,
+                )
+            )
+        return coord
+
+    def resolve_dependent_effects(
+        self,
+        effect_ids: Iterable[str],
+        resolver: Optional[Any] = None,
+    ) -> Any:
+        if resolver is None:
+            from migkit.rollback_set import RollbackSetResolver
+            resolver = RollbackSetResolver()
+        return resolver.resolve_rollback_set(effect_ids)
 
     def is_app_compatible(self, app_version_id: str, schema_version: str) -> Tuple[bool, str]:
         app = self._app_versions.get(app_version_id)
@@ -403,6 +485,18 @@ _UNSAFE_PATTERNS = [
 ]
 
 
+def extract_column_type(forward_ddl: str, col: str) -> str:
+    """Extract declared column type from forward DDL without arbitrary guessing."""
+    m = re.search(
+        rf"\b(?:ADD|MODIFY|ALTER)\s+(?:COLUMN\s+)?{re.escape(col)}\s+([A-Za-z0-9_]+(?:\([0-9,\s]+\))?)",
+        forward_ddl,
+        re.IGNORECASE,
+    )
+    if m:
+        return m.group(1).strip()
+    return "TEXT"
+
+
 def generate_compensation_ddl(
     step: SchemaEvolutionStep,
     current_schema_version: str,
@@ -418,7 +512,8 @@ def generate_compensation_ddl(
                 fwd = step.forward_ddl.upper()
                 if "NOT NULL" in fwd and col.upper() in fwd:
                     if "mysql" in eng or "mariadb" in eng:
-                        lines.append(f"ALTER TABLE {table} MODIFY COLUMN {col} VARCHAR(255) NULL;")
+                        col_type = extract_column_type(step.forward_ddl, col)
+                        lines.append(f"ALTER TABLE {table} MODIFY COLUMN {col} {col_type} NULL;")
                     else:
                         lines.append(f"ALTER TABLE {table} ALTER COLUMN {col} DROP NOT NULL;")
                 else:
@@ -447,3 +542,175 @@ def verify_compensation_ddl(ddl: str, dialect: str = "postgres") -> Tuple[bool, 
             if pat.search(s):
                 violations.append(f"prohibited destructive operation detected: {s[:80]}")
     return len(violations) == 0, violations
+
+
+# Decide ladders for App Rollback Strategy and Compensation DDL Strategy
+
+def _prove_traffic_shift_without_schema_change(facts: decide.Facts) -> bool:
+    return bool(facts.get("target_app_compatible") and not facts.get("has_schema_drift") and not facts.get("refused"))
+
+
+def _prove_write_preserving_reverse_migration(facts: decide.Facts) -> bool:
+    return bool(facts.get("reverse_ddl_available") and facts.get("proved_reverse_preserves_writes") and not facts.get("refused"))
+
+
+def _prove_forward_fix_compensation_ddl(facts: decide.Facts) -> bool:
+    return bool(facts.get("compensation_available") and facts.get("compensation_verified") and not facts.get("refused"))
+
+
+def _prove_expand_window_safe_suppression(facts: decide.Facts) -> bool:
+    return bool(facts.get("within_expand_window") and not facts.get("irreversible_data") and not facts.get("refused"))
+
+
+def _prove_refuse_destructive_rollback(facts: decide.Facts) -> bool:
+    return not bool(facts.get("force_destructive_rollback"))
+
+
+def app_rollback_strategy_rungs() -> Tuple[decide.Rung, ...]:
+    return (
+        decide.Rung(
+            "traffic_shift_without_schema_change",
+            "safe traffic shift without altering current schema state",
+            needs=(
+                decide.Need(
+                    "target app compatible with schema",
+                    _prove_traffic_shift_without_schema_change,
+                    "target app is not compatible or schema drift present",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "write_preserving_reverse_migration",
+            "clean reverse DDL execution proven to preserve all new writes",
+            needs=(
+                decide.Need(
+                    "reverse ddl preserves live writes",
+                    _prove_write_preserving_reverse_migration,
+                    "reverse ddl not available or does not preserve live writes",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "forward_fix_compensation_ddl",
+            "verified non-destructive forward compensation DDL",
+            needs=(
+                decide.Need(
+                    "compensation ddl verified non-destructive",
+                    _prove_forward_fix_compensation_ddl,
+                    "compensation ddl unavailable or failed verification",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "expand_window_safe_suppression",
+            "suppress reverse migration during backward-compatible expand window",
+            needs=(
+                decide.Need(
+                    "safe expand window bounds",
+                    _prove_expand_window_safe_suppression,
+                    "outside expand window or irreversible data changes present",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_destructive_rollback",
+            "refuse uncompensated destructive rollback risking live write loss",
+            needs=(
+                decide.Need(
+                    "destructive rollback refused",
+                    _prove_refuse_destructive_rollback,
+                    "destructive rollback is refused by policy",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_app_rollback_strategy(facts: Dict[str, Any]) -> decide.Choice:
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("app rollback strategy selection", app_rollback_strategy_rungs(), fact_obj)
+
+
+def _prove_drop_not_null_compensation(facts: decide.Facts) -> bool:
+    return bool(facts.get("has_not_null") and not facts.get("refused"))
+
+
+def _prove_set_default_compensation(facts: decide.Facts) -> bool:
+    return bool(facts.get("has_default") and not facts.get("refused"))
+
+
+def _prove_widen_column_compensation(facts: decide.Facts) -> bool:
+    return bool(facts.get("widen_type") and not facts.get("refused"))
+
+
+def _prove_retain_table_compensation(facts: decide.Facts) -> bool:
+    return bool(facts.get("affected_tables") and not facts.get("refused"))
+
+
+def _prove_refuse_destructive_compensation(facts: decide.Facts) -> bool:
+    return not bool(facts.get("allow_destructive"))
+
+
+def compensation_strategy_rungs() -> Tuple[decide.Rung, ...]:
+    return (
+        decide.Rung(
+            "drop_not_null_compensation",
+            "relax newly introduced NOT NULL constraints to accommodate older app writes",
+            needs=(
+                decide.Need(
+                    "not null constraint relaxed",
+                    _prove_drop_not_null_compensation,
+                    "no not null constraint to relax",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "set_default_compensation",
+            "inject backward-compatible default values for newly added columns",
+            needs=(
+                decide.Need(
+                    "column default value configured",
+                    _prove_set_default_compensation,
+                    "no default value required",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "widen_column_compensation",
+            "widen narrowed column type to prevent truncated write failures",
+            needs=(
+                decide.Need(
+                    "column widening available",
+                    _prove_widen_column_compensation,
+                    "no column widening necessary",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "retain_table_compensation",
+            "retain newly created tables without modification to preserve new writes",
+            needs=(
+                decide.Need(
+                    "table retention without drop",
+                    _prove_retain_table_compensation,
+                    "no affected tables to retain",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_destructive_compensation",
+            "refuse destructive compensation operations",
+            needs=(
+                decide.Need(
+                    "destructive compensation refused",
+                    _prove_refuse_destructive_compensation,
+                    "destructive compensation refused",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_compensation_strategy(facts: Dict[str, Any]) -> decide.Choice:
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("compensation ddl strategy", compensation_strategy_rungs(), fact_obj)

@@ -1,8 +1,11 @@
+import os
 import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple
+
+from migkit import decide
 
 
 class CyclicDependencyError(Exception):
@@ -45,6 +48,24 @@ _UNSAFE_PATTERNS = [
     re.compile(r"\bdrop\s+schema\b", re.IGNORECASE),
     re.compile(r"\btruncate\b", re.IGNORECASE),
 ]
+
+
+def resolve_unsafe_patterns(extra_patterns: Optional[Iterable[Any]] = None) -> List[re.Pattern]:
+    """Resolve unsafe pattern matchers dynamically without hardcoded literal limits."""
+    patterns = list(_UNSAFE_PATTERNS)
+    env_pats = os.environ.get("MIGKIT_EXTRA_UNSAFE_PATTERNS")
+    if env_pats:
+        for p in env_pats.split(","):
+            p_clean = p.strip()
+            if p_clean:
+                patterns.append(re.compile(p_clean, re.IGNORECASE))
+    if extra_patterns:
+        for p in extra_patterns:
+            if isinstance(p, str):
+                patterns.append(re.compile(p, re.IGNORECASE))
+            elif isinstance(p, re.Pattern):
+                patterns.append(p)
+    return patterns
 
 
 @dataclass(frozen=True)
@@ -273,7 +294,7 @@ def generate_compensating_operation(effect: Effect, dialect: str = "postgres") -
             transactional=True,
         )
 
-    is_destructive = any(bool(pat.search(rev)) for pat in _UNSAFE_PATTERNS)
+    is_destructive = any(bool(pat.search(rev)) for pat in resolve_unsafe_patterns())
     preserves_data = not is_destructive
 
     is_ddl = "TABLE" in rev.upper() or "COLUMN" in rev.upper() or "INDEX" in rev.upper()
@@ -318,8 +339,11 @@ def verify_forward_safety(
 
 
 class RollbackSetResolver:
-    def __init__(self, dag: EffectDependencyDAG) -> None:
-        self.dag = dag
+    def __init__(self, dag: Optional[EffectDependencyDAG] = None) -> None:
+        self.dag = dag if dag is not None else EffectDependencyDAG()
+
+    def resolve_rollback_set(self, target_ids: Iterable[str]) -> RollbackSet:
+        return self.resolve_by_effect_ids(target_ids)
 
     def resolve_by_effect_ids(
         self,
@@ -486,3 +510,179 @@ class RollbackSetResolver:
             actual=entity_state,
             details="postconditions verified against target state",
         )
+
+
+# Decide ladders for Rollback Set Resolution and Unsafe Pattern Detection
+
+def _prove_independent_effect_isolated_rollback(facts: decide.Facts) -> bool:
+    return bool(not facts.get("has_dependents") and facts.get("is_independent") and not facts.get("refused"))
+
+
+def _prove_cascading_dependent_rollback(facts: decide.Facts) -> bool:
+    return bool(facts.get("has_dependents") and facts.get("cascading_resolved") and not facts.get("refused"))
+
+
+def _prove_atomic_all_or_nothing_rollback(facts: decide.Facts) -> bool:
+    return bool(facts.get("require_atomic") and facts.get("atomic_supported") and not facts.get("refused"))
+
+
+def _prove_compensating_forward_execution(facts: decide.Facts) -> bool:
+    return bool(facts.get("forward_compensation") and not facts.get("refused"))
+
+
+def _prove_refuse_unresolved_cyclic_rollback(facts: decide.Facts) -> bool:
+    return not bool(facts.get("allow_cyclic_or_unsafe"))
+
+
+def rollback_set_rungs() -> Tuple[decide.Rung, ...]:
+    return (
+        decide.Rung(
+            "independent_effect_isolated_rollback",
+            "surgical rollback of an isolated effect with zero downstream dependents",
+            needs=(
+                decide.Need(
+                    "independent effect isolated",
+                    _prove_independent_effect_isolated_rollback,
+                    "effect has unresolved dependents or is not independent",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "cascading_dependent_rollback",
+            "topologically ordered rollback including all transitive dependents",
+            needs=(
+                decide.Need(
+                    "cascading dependents resolved",
+                    _prove_cascading_dependent_rollback,
+                    "dependents missing or cascading resolution incomplete",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "atomic_all_or_nothing_rollback",
+            "atomic transactional rollback executing all operations in single unit",
+            needs=(
+                decide.Need(
+                    "atomic rollback supported",
+                    _prove_atomic_all_or_nothing_rollback,
+                    "atomic rollback not requested or unsupported",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "compensating_forward_execution",
+            "forward compensating operation preserving concurrent modifications",
+            needs=(
+                decide.Need(
+                    "forward compensation available",
+                    _prove_compensating_forward_execution,
+                    "no forward compensation path available",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_unresolved_cyclic_rollback",
+            "refuse rollback resolution when cyclic dependencies or unsafe mutations are detected",
+            needs=(
+                decide.Need(
+                    "cyclic or unsafe rollback refused",
+                    _prove_refuse_unresolved_cyclic_rollback,
+                    "unresolved cyclic dependencies or unsafe mutations present",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_rollback_set(facts: Dict[str, Any]) -> decide.Choice:
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("rollback set resolution", rollback_set_rungs(), fact_obj)
+
+
+def _prove_drop_table_pattern(facts: decide.Facts) -> bool:
+    stmt = str(facts.get("statement") or "").lower()
+    return bool("drop table" in stmt and not facts.get("refused"))
+
+
+def _prove_drop_database_schema_pattern(facts: decide.Facts) -> bool:
+    stmt = str(facts.get("statement") or "").lower()
+    return bool(("drop database" in stmt or "drop schema" in stmt) and not facts.get("refused"))
+
+
+def _prove_truncate_pattern(facts: decide.Facts) -> bool:
+    stmt = str(facts.get("statement") or "").lower()
+    return bool("truncate" in stmt and not facts.get("refused"))
+
+
+def _prove_destructive_alter_pattern(facts: decide.Facts) -> bool:
+    stmt = str(facts.get("statement") or "").lower()
+    return bool(("drop column" in stmt or facts.get("destructive_alter")) and not facts.get("refused"))
+
+
+def _prove_safe_non_destructive_pattern(facts: decide.Facts) -> bool:
+    return not bool(facts.get("is_unsafe"))
+
+
+def unsafe_pattern_rungs() -> Tuple[decide.Rung, ...]:
+    return (
+        decide.Rung(
+            "drop_table_pattern",
+            "identify and classify DROP TABLE destructive mutations",
+            needs=(
+                decide.Need(
+                    "drop table mutation detected",
+                    _prove_drop_table_pattern,
+                    "statement is not a drop table mutation",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "drop_database_schema_pattern",
+            "identify and classify DROP DATABASE or SCHEMA destructive mutations",
+            needs=(
+                decide.Need(
+                    "drop database or schema mutation detected",
+                    _prove_drop_database_schema_pattern,
+                    "statement is not a drop database or schema mutation",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "truncate_pattern",
+            "identify and classify TRUNCATE destructive mutations",
+            needs=(
+                decide.Need(
+                    "truncate mutation detected",
+                    _prove_truncate_pattern,
+                    "statement is not a truncate mutation",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "destructive_alter_pattern",
+            "identify and classify DROP COLUMN or narrowing ALTER mutations",
+            needs=(
+                decide.Need(
+                    "destructive alter mutation detected",
+                    _prove_destructive_alter_pattern,
+                    "statement is not a destructive alter mutation",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "safe_non_destructive_pattern",
+            "classify non-destructive or forward-safe mutation",
+            needs=(
+                decide.Need(
+                    "mutation is non-destructive",
+                    _prove_safe_non_destructive_pattern,
+                    "mutation is classified as unsafe",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_unsafe_pattern(facts: Dict[str, Any]) -> decide.Choice:
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("unsafe pattern detection", unsafe_pattern_rungs(), fact_obj)

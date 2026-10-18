@@ -1,4 +1,5 @@
 import pytest
+from tests.rung_branches import watched
 from migkit.rollback import (
     AppVersionSpec,
     SchemaEvolutionStep,
@@ -10,7 +11,34 @@ from migkit.rollback import (
     AppRollbackCoordinator,
     generate_compensation_ddl,
     verify_compensation_ddl,
+    decide_app_rollback_strategy,
+    decide_compensation_strategy,
+    app_rollback_strategy_rungs,
+    compensation_strategy_rungs,
 )
+
+PROVES_RUNGS = [
+    ("rollback", "app_rollback_strategy_rungs", "traffic_shift_without_schema_change", "holds"),
+    ("rollback", "app_rollback_strategy_rungs", "traffic_shift_without_schema_change", "refuses"),
+    ("rollback", "app_rollback_strategy_rungs", "write_preserving_reverse_migration", "holds"),
+    ("rollback", "app_rollback_strategy_rungs", "write_preserving_reverse_migration", "refuses"),
+    ("rollback", "app_rollback_strategy_rungs", "forward_fix_compensation_ddl", "holds"),
+    ("rollback", "app_rollback_strategy_rungs", "forward_fix_compensation_ddl", "refuses"),
+    ("rollback", "app_rollback_strategy_rungs", "expand_window_safe_suppression", "holds"),
+    ("rollback", "app_rollback_strategy_rungs", "expand_window_safe_suppression", "refuses"),
+    ("rollback", "app_rollback_strategy_rungs", "refuse_destructive_rollback", "holds"),
+    ("rollback", "app_rollback_strategy_rungs", "refuse_destructive_rollback", "refuses"),
+    ("rollback", "compensation_strategy_rungs", "drop_not_null_compensation", "holds"),
+    ("rollback", "compensation_strategy_rungs", "drop_not_null_compensation", "refuses"),
+    ("rollback", "compensation_strategy_rungs", "set_default_compensation", "holds"),
+    ("rollback", "compensation_strategy_rungs", "set_default_compensation", "refuses"),
+    ("rollback", "compensation_strategy_rungs", "widen_column_compensation", "holds"),
+    ("rollback", "compensation_strategy_rungs", "widen_column_compensation", "refuses"),
+    ("rollback", "compensation_strategy_rungs", "retain_table_compensation", "holds"),
+    ("rollback", "compensation_strategy_rungs", "retain_table_compensation", "refuses"),
+    ("rollback", "compensation_strategy_rungs", "refuse_destructive_compensation", "holds"),
+    ("rollback", "compensation_strategy_rungs", "refuse_destructive_compensation", "refuses"),
+]
 
 
 def test_recovery_artifacts_independent_of_git(tmp_path):
@@ -445,3 +473,81 @@ def test_unrelated_table_writes_do_not_block_safe_reverse():
 
     assert decision.strategy == RollbackStrategy.REVERSE_MIGRATION
     assert decision.allowed is True
+
+
+def test_app_rollback_rungs_under_watched():
+    with watched():
+        # app_rollback_strategy_rungs
+        # 1. traffic_shift_without_schema_change
+        c1 = decide_app_rollback_strategy({"target_app_compatible": True, "has_schema_drift": False})
+        assert c1.rung.name == "traffic_shift_without_schema_change"
+
+        # 2. write_preserving_reverse_migration
+        c2 = decide_app_rollback_strategy({"target_app_compatible": False, "reverse_ddl_available": True, "proved_reverse_preserves_writes": True})
+        assert c2.rung.name == "write_preserving_reverse_migration"
+
+        # 3. forward_fix_compensation_ddl
+        c3 = decide_app_rollback_strategy({"target_app_compatible": False, "reverse_ddl_available": False, "compensation_available": True, "compensation_verified": True})
+        assert c3.rung.name == "forward_fix_compensation_ddl"
+
+        # 4. expand_window_safe_suppression
+        c4 = decide_app_rollback_strategy({"target_app_compatible": False, "reverse_ddl_available": False, "compensation_available": False, "within_expand_window": True, "irreversible_data": False})
+        assert c4.rung.name == "expand_window_safe_suppression"
+
+        # 5. refuse_destructive_rollback
+        c5 = decide_app_rollback_strategy({"target_app_compatible": False, "reverse_ddl_available": False, "compensation_available": False, "within_expand_window": False})
+        assert c5.rung.name == "refuse_destructive_rollback"
+
+        # 6. refuse final fallback
+        c6 = decide_app_rollback_strategy({"target_app_compatible": False, "reverse_ddl_available": False, "compensation_available": False, "within_expand_window": False, "force_destructive_rollback": True})
+        assert c6.rung is None
+
+        # compensation_strategy_rungs
+        # 1. drop_not_null_compensation
+        k1 = decide_compensation_strategy({"has_not_null": True})
+        assert k1.rung.name == "drop_not_null_compensation"
+
+        # 2. set_default_compensation
+        k2 = decide_compensation_strategy({"has_not_null": False, "has_default": True})
+        assert k2.rung.name == "set_default_compensation"
+
+        # 3. widen_column_compensation
+        k3 = decide_compensation_strategy({"has_not_null": False, "has_default": False, "widen_type": True})
+        assert k3.rung.name == "widen_column_compensation"
+
+        # 4. retain_table_compensation
+        k4 = decide_compensation_strategy({"has_not_null": False, "has_default": False, "widen_type": False, "affected_tables": ("tbl",)})
+        assert k4.rung.name == "retain_table_compensation"
+
+        # 5. refuse_destructive_compensation
+        k5 = decide_compensation_strategy({"has_not_null": False, "has_default": False, "widen_type": False, "affected_tables": ()})
+        assert k5.rung.name == "refuse_destructive_compensation"
+
+        # 6. refuse final fallback
+        k6 = decide_compensation_strategy({"has_not_null": False, "has_default": False, "widen_type": False, "affected_tables": (), "allow_destructive": True})
+        assert k6.rung is None
+
+
+def test_observe_live_writes_and_appversions_integration():
+    class DummyEngine:
+        def read_table_stats(self, tables):
+            return {"users": 42}
+        def current_lsn(self):
+            return "0/16B3740"
+
+    state = CurrentWriteState.from_engine(DummyEngine(), ["users"])
+    assert state.has_writes_in("users") is True
+    assert state.highest_lsn_or_marker == "0/16B3740"
+
+    src_hist = {"flyway": {"version": "v1"}}
+    dst_hist = {"flyway": {"version": "v1"}}
+    coord = AppRollbackCoordinator.from_migration_history(src_hist, dst_hist)
+    assert "flyway" in coord._app_versions
+
+    from migkit.rollback_set import Effect, EffectDependencyDAG, RollbackSetResolver
+    dag = EffectDependencyDAG()
+    dag.add_effect(Effect(effect_id="eff1", target_entity="tbl", operation_type="DDL"))
+    resolver = RollbackSetResolver(dag)
+    effects = coord.resolve_dependent_effects(["eff1"], resolver=resolver)
+    assert effects is not None
+    assert "eff1" in effects.target_effect_ids

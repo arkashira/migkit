@@ -121,3 +121,31 @@ def summary(forward_sql, reverse_sql):
     return (f"a {n}-statement undo was written alongside it, but {lost}"
             f" of the forward statements destroy data and no undo restores"
             f" that - take a backup first")
+
+
+def resolve_revert_rollback_set(
+    forward_sql: str,
+    target_state: dict = None,
+):
+    """Resolve rollback set and dependency DAG for forward SQL mutations."""
+    from migkit.rollback_set import Effect, EffectDependencyDAG, RollbackSetResolver
+
+    dag = EffectDependencyDAG()
+    stmts = split(forward_sql)
+    for idx, stmt in enumerate(stmts):
+        eff_id = f"stmt_{idx}"
+        prev_id = f"stmt_{idx - 1}" if idx > 0 else None
+        deps = (prev_id,) if prev_id else ()
+        dag.add_effect(
+            Effect(
+                effect_id=eff_id,
+                target_entity="target_db",
+                operation_type="DDL",
+                forward_payload=stmt,
+                reverse_payload="",
+                depends_on=deps,
+            )
+        )
+    resolver = RollbackSetResolver(dag)
+    target_ids = [f"stmt_{idx}" for idx in range(len(stmts))]
+    return resolver.resolve_by_effect_ids(target_ids, target_state=target_state)

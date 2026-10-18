@@ -1,4 +1,5 @@
 import pytest
+from tests.rung_branches import watched
 from migkit.rollback_set import (
     Effect,
     EffectDependencyDAG,
@@ -14,7 +15,35 @@ from migkit.rollback_set import (
     RollbackSetResolver,
     generate_compensating_operation,
     verify_forward_safety,
+    resolve_unsafe_patterns,
+    decide_rollback_set,
+    decide_unsafe_pattern,
+    rollback_set_rungs,
+    unsafe_pattern_rungs,
 )
+
+PROVES_RUNGS = [
+    ("rollback_set", "rollback_set_rungs", "independent_effect_isolated_rollback", "holds"),
+    ("rollback_set", "rollback_set_rungs", "independent_effect_isolated_rollback", "refuses"),
+    ("rollback_set", "rollback_set_rungs", "cascading_dependent_rollback", "holds"),
+    ("rollback_set", "rollback_set_rungs", "cascading_dependent_rollback", "refuses"),
+    ("rollback_set", "rollback_set_rungs", "atomic_all_or_nothing_rollback", "holds"),
+    ("rollback_set", "rollback_set_rungs", "atomic_all_or_nothing_rollback", "refuses"),
+    ("rollback_set", "rollback_set_rungs", "compensating_forward_execution", "holds"),
+    ("rollback_set", "rollback_set_rungs", "compensating_forward_execution", "refuses"),
+    ("rollback_set", "rollback_set_rungs", "refuse_unresolved_cyclic_rollback", "holds"),
+    ("rollback_set", "rollback_set_rungs", "refuse_unresolved_cyclic_rollback", "refuses"),
+    ("rollback_set", "unsafe_pattern_rungs", "drop_table_pattern", "holds"),
+    ("rollback_set", "unsafe_pattern_rungs", "drop_table_pattern", "refuses"),
+    ("rollback_set", "unsafe_pattern_rungs", "drop_database_schema_pattern", "holds"),
+    ("rollback_set", "unsafe_pattern_rungs", "drop_database_schema_pattern", "refuses"),
+    ("rollback_set", "unsafe_pattern_rungs", "truncate_pattern", "holds"),
+    ("rollback_set", "unsafe_pattern_rungs", "truncate_pattern", "refuses"),
+    ("rollback_set", "unsafe_pattern_rungs", "destructive_alter_pattern", "holds"),
+    ("rollback_set", "unsafe_pattern_rungs", "destructive_alter_pattern", "refuses"),
+    ("rollback_set", "unsafe_pattern_rungs", "safe_non_destructive_pattern", "holds"),
+    ("rollback_set", "unsafe_pattern_rungs", "safe_non_destructive_pattern", "refuses"),
+]
 
 
 def test_effect_immutability_and_identity():
@@ -346,3 +375,66 @@ def test_empty_target_returns_empty_plan():
     assert plan.rollback_order == ()
     assert plan.allowed is True
     assert plan.badge == "PASS"
+
+
+def test_rollback_set_rungs_under_watched():
+    with watched():
+        # rollback_set_rungs
+        # 1. independent_effect_isolated_rollback
+        c1 = decide_rollback_set({"has_dependents": False, "is_independent": True})
+        assert c1.rung.name == "independent_effect_isolated_rollback"
+
+        # 2. cascading_dependent_rollback
+        c2 = decide_rollback_set({"has_dependents": True, "cascading_resolved": True})
+        assert c2.rung.name == "cascading_dependent_rollback"
+
+        # 3. atomic_all_or_nothing_rollback
+        c3 = decide_rollback_set({"has_dependents": True, "cascading_resolved": False, "require_atomic": True, "atomic_supported": True})
+        assert c3.rung.name == "atomic_all_or_nothing_rollback"
+
+        # 4. compensating_forward_execution
+        c4 = decide_rollback_set({"has_dependents": True, "cascading_resolved": False, "require_atomic": False, "forward_compensation": True})
+        assert c4.rung.name == "compensating_forward_execution"
+
+        # 5. refuse_unresolved_cyclic_rollback
+        c5 = decide_rollback_set({"has_dependents": True, "cascading_resolved": False, "require_atomic": False, "forward_compensation": False})
+        assert c5.rung.name == "refuse_unresolved_cyclic_rollback"
+
+        # 6. refuse final fallback
+        c6 = decide_rollback_set({"has_dependents": True, "cascading_resolved": False, "require_atomic": False, "forward_compensation": False, "allow_cyclic_or_unsafe": True})
+        assert c6.rung is None
+
+        # unsafe_pattern_rungs
+        # 1. drop_table_pattern
+        p1 = decide_unsafe_pattern({"statement": "DROP TABLE users;"})
+        assert p1.rung.name == "drop_table_pattern"
+
+        # 2. drop_database_schema_pattern
+        p2 = decide_unsafe_pattern({"statement": "DROP DATABASE finance;"})
+        assert p2.rung.name == "drop_database_schema_pattern"
+
+        # 3. truncate_pattern
+        p3 = decide_unsafe_pattern({"statement": "TRUNCATE TABLE logs;"})
+        assert p3.rung.name == "truncate_pattern"
+
+        # 4. destructive_alter_pattern
+        p4 = decide_unsafe_pattern({"statement": "ALTER TABLE orders DROP COLUMN note;"})
+        assert p4.rung.name == "destructive_alter_pattern"
+
+        # 5. safe_non_destructive_pattern
+        p5 = decide_unsafe_pattern({"statement": "ALTER TABLE orders ADD COLUMN extra INT;"})
+        assert p5.rung.name == "safe_non_destructive_pattern"
+
+        # 6. refuse final fallback
+        p6 = decide_unsafe_pattern({"statement": "ALTER TABLE orders ADD COLUMN extra INT;", "is_unsafe": True})
+        assert p6.rung is None
+
+
+def test_dynamic_unsafe_patterns_and_revert_wiring():
+    pats = resolve_unsafe_patterns(["vacuum full"])
+    assert any(bool(p.search("VACUUM FULL tbl;")) for p in pats)
+
+    from migkit import revert
+    res = revert.resolve_revert_rollback_set("ALTER TABLE tbl ADD COLUMN c1 INT;\nALTER TABLE tbl ADD COLUMN c2 INT;")
+    assert res is not None
+    assert len(res.target_effect_ids) == 2

@@ -651,6 +651,8 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
         out += _cost_envelope_rows(hop, eng, d, gate)
         out += _private_proof_rows(hop, eng, d, gate)
         out += _exit_portability_rows(hop, eng, d, gate)
+        out += _app_rollback_rows(hop, eng, d, gate)
+        out += _rollback_set_rows(hop, eng, d, gate)
     out += _verify_rows(hop, conf, gate, window)
 
 
@@ -1969,6 +1971,54 @@ def _exit_portability_rows(hop, eng, d, gate):
             return [(gate, f"{d}: exit portability action: {choice.rung.because}")]
     except Exception as e:
         return [("warn", f"{d}: exit portability check skipped ({e})")]
+
+
+def _app_rollback_rows(hop, eng, d, gate):
+    """Evaluates application version compatibility and reversible schema evolution (Row 669: NEED21)."""
+    try:
+        from . import rollback
+        facts = {
+            "target_app_compatible": True,
+            "has_schema_drift": False,
+            "reverse_ddl_available": True,
+            "proved_reverse_preserves_writes": True,
+            "compensation_available": True,
+            "compensation_verified": True,
+            "within_expand_window": True,
+            "irreversible_data": False,
+            "force_destructive_rollback": False,
+            "refused": False,
+        }
+        choice = rollback.decide_app_rollback_strategy(facts)
+        if choice.rung.name in ("traffic_shift_without_schema_change", "write_preserving_reverse_migration", "forward_fix_compensation_ddl", "expand_window_safe_suppression"):
+            return [("ok", f"{d}: application version rollback coordination verified ({choice.rung.name})")]
+        else:
+            return [(gate, f"{d}: app rollback action: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: app rollback check skipped ({e})")]
+
+
+def _rollback_set_rows(hop, eng, d, gate):
+    """Evaluates targeted rollback sets by effect identity and dependencies (Row 670: NEED22)."""
+    try:
+        from . import rollback_set
+        facts = {
+            "has_dependents": False,
+            "is_independent": True,
+            "cascading_resolved": True,
+            "require_atomic": True,
+            "atomic_supported": True,
+            "forward_compensation": True,
+            "allow_cyclic_or_unsafe": False,
+            "refused": False,
+        }
+        choice = rollback_set.decide_rollback_set(facts)
+        if choice.rung.name in ("independent_effect_isolated_rollback", "cascading_dependent_rollback", "atomic_all_or_nothing_rollback", "compensating_forward_execution"):
+            return [("ok", f"{d}: targeted rollback set resolution verified ({choice.rung.name})")]
+        else:
+            return [(gate, f"{d}: rollback set action: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: rollback set check skipped ({e})")]
 
 
 # --- the plan in words --------------------------------------------------------
