@@ -16,7 +16,22 @@ from migkit.backfill_race import (
     choose_coverage_strategy,
     compare_watermarks,
     normalize_watermark,
+    decide_backfill_coverage,
 )
+import tests.rung_branches
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("backfill_race", "backfill_coverage_rungs", "selective_key_range_backfill", "holds"),
+    ("backfill_race", "backfill_coverage_rungs", "selective_key_range_backfill", "refuses"),
+    ("backfill_race", "backfill_coverage_rungs", "shadow_table_resnapshot", "holds"),
+    ("backfill_race", "backfill_coverage_rungs", "shadow_table_resnapshot", "refuses"),
+    ("backfill_race", "backfill_coverage_rungs", "dual_read_reconciliation", "holds"),
+    ("backfill_race", "backfill_coverage_rungs", "dual_read_reconciliation", "refuses"),
+    ("backfill_race", "backfill_coverage_rungs", "drain_and_reprobe_schema", "holds"),
+    ("backfill_race", "backfill_coverage_rungs", "drain_and_reprobe_schema", "refuses"),
+    ("backfill_race", "backfill_coverage_rungs", "refuse_backfill_race", "holds"),
+]
 
 
 def test_schema_epoch_tracker_registration_and_gap_detection():
@@ -433,4 +448,72 @@ def test_watermark_comparison_and_normalization():
     assert compare_watermarks(200, 100) == 1
     assert compare_watermarks(100, 100) == 0
     assert compare_watermarks("0/100", "0/200") == -1
+
+
+def test_backfill_coverage_rungs_under_watched():
+    with watched() as seen:
+        # 1. selective_key_range_backfill holds
+        f1 = {
+            "narrow_gap": True,
+            "keys_available": True,
+            "low_lock_pressure": True,
+            "broad_or_dense_backfill": True,
+            "shadow_storage_available": True,
+            "epoch_discrepancy_resolvable": True,
+            "schema_reprobe_allowed": True,
+        }
+        c1 = decide_backfill_coverage(f1)
+        assert c1.rung.name == "selective_key_range_backfill"
+
+        # 2. selective_key_range_backfill refuses, shadow_table_resnapshot holds
+        f2 = {
+            "narrow_gap": False,
+            "keys_available": True,
+            "low_lock_pressure": True,
+            "broad_or_dense_backfill": True,
+            "shadow_storage_available": True,
+            "epoch_discrepancy_resolvable": True,
+            "schema_reprobe_allowed": True,
+        }
+        c2 = decide_backfill_coverage(f2)
+        assert c2.rung.name == "shadow_table_resnapshot"
+
+        # 3. shadow_table_resnapshot refuses, dual_read_reconciliation holds
+        f3 = {
+            "narrow_gap": False,
+            "keys_available": False,
+            "low_lock_pressure": False,
+            "broad_or_dense_backfill": False,
+            "shadow_storage_available": False,
+            "epoch_discrepancy_resolvable": True,
+            "schema_reprobe_allowed": True,
+        }
+        c3 = decide_backfill_coverage(f3)
+        assert c3.rung.name == "dual_read_reconciliation"
+
+        # 4. dual_read_reconciliation refuses, drain_and_reprobe_schema holds
+        f4 = {
+            "narrow_gap": False,
+            "keys_available": False,
+            "low_lock_pressure": False,
+            "broad_or_dense_backfill": False,
+            "shadow_storage_available": False,
+            "epoch_discrepancy_resolvable": False,
+            "schema_reprobe_allowed": True,
+        }
+        c4 = decide_backfill_coverage(f4)
+        assert c4.rung.name == "drain_and_reprobe_schema"
+
+        # 5. drain_and_reprobe_schema refuses, refuse_backfill_race holds
+        f5 = {
+            "narrow_gap": False,
+            "keys_available": False,
+            "low_lock_pressure": False,
+            "broad_or_dense_backfill": False,
+            "shadow_storage_available": False,
+            "epoch_discrepancy_resolvable": False,
+            "schema_reprobe_allowed": False,
+        }
+        c5 = decide_backfill_coverage(f5)
+        assert c5.rung.name == "refuse_backfill_race"
 

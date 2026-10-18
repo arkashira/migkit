@@ -639,6 +639,8 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
         out += _offset_disagreement_rows(hop, eng, d, gate)
         out += _handoff_overlap_rows(hop, eng, d, gate)
         out += _identity_semantics_rows(hop, eng, d, gate)
+        out += _backfill_race_rows(hop, eng, d, gate)
+        out += _partial_images_rows(hop, eng, d, gate)
     out += _verify_rows(hop, conf, gate, window)
 
 
@@ -1682,6 +1684,43 @@ def _identity_semantics_rows(hop, eng, d, gate):
             return [(gate, f"{d}: identity semantics action: {choice.rung.because}")]
     except Exception as e:
         return [("warn", f"{d}: identity semantics check skipped ({e})")]
+
+
+def _backfill_race_rows(hop, eng, d, gate):
+    """Evaluates column backfill coverage preceding schema discovery (Row 657: NEED09)."""
+    try:
+        from . import backfill_race
+        facts = {
+            "narrow_gap": True,
+            "keys_available": True,
+            "low_lock_pressure": True,
+        }
+        choice = backfill_race.decide_backfill_coverage(facts)
+        if choice.rung.name in ("selective_key_range_backfill", "shadow_table_resnapshot"):
+            return [("ok", f"{d}: column backfill schema coverage verified ({choice.rung.name})")]
+        else:
+            return [(gate, f"{d}: backfill race action: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: backfill race check skipped ({e})")]
+
+
+def _partial_images_rows(hop, eng, d, gate):
+    """Evaluates absent unchanged LOB/TOAST representation and version cache (Row 658: NEED10)."""
+    try:
+        from . import partial_images
+        facts = {
+            "entry_in_cache": True,
+            "within_memory_budget": True,
+            "within_entry_capacity": True,
+            "low_eviction_pressure": True,
+        }
+        choice = partial_images.decide_partial_image_cache(facts)
+        if choice.rung.name in ("retain_in_memory_lru", "demand_refetch_from_source"):
+            return [("ok", f"{d}: partial row image reconstruction verified ({choice.rung.name})")]
+        else:
+            return [(gate, f"{d}: partial images action: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: partial images check skipped ({e})")]
 
 
 

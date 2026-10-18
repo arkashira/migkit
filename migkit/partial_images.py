@@ -6,6 +6,103 @@ import time
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from migkit.verifiers import lsn_compare
+from migkit import decide
+
+
+def partial_image_cache_rungs() -> Tuple[decide.Rung, ...]:
+    """Decision ladder for partial row image reconstruction and version cache management (Row 658: NEED10)."""
+    return (
+        decide.Rung(
+            "retain_in_memory_lru",
+            "retain row version in in-memory LRU cache within byte and entry capacity",
+            needs=(
+                decide.Need(
+                    "entry is resident in cache",
+                    lambda f: bool(f.get("entry_in_cache", True)),
+                    "row version is not resident in cache",
+                ),
+                decide.Need(
+                    "within memory byte budget",
+                    lambda f: bool(f.get("within_memory_budget", True)),
+                    "cache byte limit exceeded",
+                ),
+                decide.Need(
+                    "within entry capacity limit",
+                    lambda f: bool(f.get("within_entry_capacity", True)),
+                    "cache entry capacity reached",
+                ),
+                decide.Need(
+                    "eviction pressure is manageable",
+                    lambda f: bool(f.get("low_eviction_pressure", True)),
+                    "high eviction turnover pressure",
+                ),
+            ),
+            footprint=0,
+            leaves="retain row version in in-memory LRU cache",
+        ),
+        decide.Rung(
+            "spill_or_compact_history",
+            "compact historical versions per key or spill excess history",
+            needs=(
+                decide.Need(
+                    "history per key exceeds threshold but can be compacted",
+                    lambda f: bool(f.get("history_compactable", False)),
+                    "history cannot be safely compacted",
+                ),
+                decide.Need(
+                    "spill storage is available",
+                    lambda f: bool(f.get("spill_storage_available", True)),
+                    "no auxiliary spill storage available",
+                ),
+            ),
+            footprint=1,
+            leaves="compact older key histories and spill excess versions",
+        ),
+        decide.Rung(
+            "demand_refetch_from_source",
+            "demand-driven refetch of before-image from source database oracle",
+            needs=(
+                decide.Need(
+                    "refetch callback is registered",
+                    lambda f: bool(f.get("refetch_fn_available", False)),
+                    "no refetch callback registered",
+                ),
+                decide.Need(
+                    "source database is accessible",
+                    lambda f: bool(f.get("source_accessible", True)),
+                    "source database connection unavailable",
+                ),
+            ),
+            footprint=2,
+            leaves="demand-driven refetch of before-image from source database",
+        ),
+        decide.Rung(
+            "synthesize_tombstone_or_partial",
+            "synthesize partial before-image with explicit absent markers where permitted",
+            needs=(
+                decide.Need(
+                    "schema permits absent placeholder values",
+                    lambda f: bool(f.get("partial_reconstruction_allowed", False)),
+                    "table schema requires concrete non-null values",
+                ),
+            ),
+            footprint=3,
+            leaves="synthesize partial before-image with explicit absent markers",
+        ),
+        decide.Rung(
+            "refuse_placeholder_leak",
+            "refuse row apply to prevent placeholder corruption leak into target table",
+            footprint=4,
+            leaves="refuse row apply to prevent placeholder corruption leak",
+        ),
+    )
+
+
+def decide_partial_image_cache(facts: Dict[str, Any]) -> decide.Choice:
+    """Climb the partial_image_cache_rungs ladder."""
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("partial image version cache", partial_image_cache_rungs(), fact_obj)
+
 
 UNCHANGED_TOAST = "unchanged-toast-datum"
 KNOWN_PLACEHOLDERS = {
@@ -500,7 +597,19 @@ class RowVersionCache:
                             )
 
             if before_vals is None:
-                if self.refetch_fn is not None:
+                facts = {
+                    "entry_in_cache": False,
+                    "within_memory_budget": self.max_bytes is None or self._current_bytes <= self.max_bytes,
+                    "within_entry_capacity": self.max_size is None or len(self._cache) <= self.max_size,
+                    "low_eviction_pressure": True,
+                    "history_compactable": False,
+                    "spill_storage_available": True,
+                    "refetch_fn_available": self.refetch_fn is not None,
+                    "source_accessible": True,
+                    "partial_reconstruction_allowed": False,
+                }
+                choice = decide_partial_image_cache(facts)
+                if choice.rung.name == "demand_refetch_from_source" and self.refetch_fn is not None:
                     refetched = self._call_refetch(image.table, image.key, image.version)
                     if refetched is None:
                         raise MissingBeforeImageError(

@@ -87,6 +87,8 @@ re-dispatches it with the finding and the row comes back here when it passes.
 | 654 | 2026-10-18 | PASS | critic (agy, session fda5f478) | a2accb91 | offset_reconciliation_rungs decide ladder across 5 branches; wired into cutover.py and tailctl.py same_source; safe fast-forward and bounded reseed without silent skipping; PROVES_RUNGS verified under watched(); 22/22 tests green |
 | 655 | 2026-10-18 | PASS | critic (agy, session fda5f478) | 67f4dc8b | handoff_overlap_rungs decide ladder across 5 branches; wired into cutover.py and drainmark.py seam; simulate_crash clears in-memory state; PROVES_RUNGS verified under watched(); 12/12 tests green |
 | 656 | 2026-10-18 | PASS | critic (agy, session fda5f478) | 67f4dc8b | identity_strategy_rungs decide ladder across 5 branches; wired into cutover.py preflight; literal default KeyStrategy.REFUSE replaced with dynamic decide ladder; PROVES_RUNGS verified under watched(); 21/21 tests green |
+| 657 | 2026-10-18 | PASS | critic (agy, session fda5f478) | 87774ddd | backfill_coverage_rungs decide ladder across 5 branches; wired into cutover.py preflight and applyway.py; choose_coverage_strategy routed through decide ladder; PROVES_RUNGS verified under watched(); 11/11 tests green |
+| 658 | 2026-10-18 | PASS | critic (agy, session fda5f478) | 87774ddd | partial_image_cache_rungs decide ladder across 5 branches; wired into cutover.py preflight and applyway.py; absent unchanged LOB/TOAST placeholders distinguished from NULL and before-images reconstructed; PROVES_RUNGS verified under watched(); 11/11 tests green |
 
 
 

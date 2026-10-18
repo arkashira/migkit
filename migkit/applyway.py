@@ -20,7 +20,7 @@ import threading
 import time
 from collections import deque
 
-from . import canon, decide
+from . import backfill_race, canon, decide, partial_images
 
 WORK = "applying changes"
 #: the batches each rate is measured over
@@ -248,10 +248,12 @@ def _table(table, changes, at):
         return f"the changes to {table} carry different columns"
     shape = next(iter(shapes)) if shapes else ()
     names = tuple(sorted({*key, *shape}))
-    if any(map(isinstance, itertools.chain.from_iterable(
-            map(dict.values, values)), itertools.repeat(MARKED))):
+    vals_flat = list(itertools.chain.from_iterable(map(dict.values, values)))
+    if any(map(isinstance, vals_flat, itertools.repeat(MARKED))):
         return (f"a change to {table} adds to a value or keeps one where it"
                 " stands")
+    if any(isinstance(v, str) and v in partial_images.KNOWN_PLACEHOLDERS for v in vals_flat):
+        return f"a change to {table} carries an unchanged LOB/TOAST placeholder"
     cols = [[c["key"][k] for c in changes] for k in key]
     moved = set()
     for k in key:

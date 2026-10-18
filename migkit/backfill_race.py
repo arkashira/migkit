@@ -5,7 +5,92 @@ from pathlib import Path
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 
-from . import durable
+from . import decide, durable
+
+
+def backfill_coverage_rungs() -> Tuple[decide.Rung, ...]:
+    """Decision ladder for column backfill coverage preceding schema discovery (Row 657: NEED09)."""
+    return (
+        decide.Rung(
+            "selective_key_range_backfill",
+            "perform selective backfill on affected key ranges without full table resnapshot",
+            needs=(
+                decide.Need(
+                    "backfill volume is narrow",
+                    lambda f: bool(f.get("narrow_gap", True)),
+                    "backfill volume exceeds selective thresholds",
+                ),
+                decide.Need(
+                    "candidate keys or range are available",
+                    lambda f: bool(f.get("keys_available", True)),
+                    "key ranges cannot be enumerated",
+                ),
+                decide.Need(
+                    "concurrent lock pressure is manageable",
+                    lambda f: bool(f.get("low_lock_pressure", True)),
+                    "lock contention is prohibitive",
+                ),
+            ),
+            footprint=0,
+            leaves="selective key range backfill without re-snapshotting table",
+        ),
+        decide.Rung(
+            "shadow_table_resnapshot",
+            "stage shadow copy and swap atomically when backfill is dense or broad",
+            needs=(
+                decide.Need(
+                    "broad or dense backfill volume detected",
+                    lambda f: bool(f.get("broad_or_dense_backfill", False)),
+                    "backfill is not broad enough to warrant full resnapshot",
+                ),
+                decide.Need(
+                    "shadow storage budget is available",
+                    lambda f: bool(f.get("shadow_storage_available", True)),
+                    "insufficient storage budget for shadow table",
+                ),
+            ),
+            footprint=1,
+            leaves="shadow resnapshot with atomic cutover swap",
+        ),
+        decide.Rung(
+            "dual_read_reconciliation",
+            "reconcile historical coverage via dual-read schema epoch verification",
+            needs=(
+                decide.Need(
+                    "epoch discrepancy is resolvable via dual read",
+                    lambda f: bool(f.get("epoch_discrepancy_resolvable", False)),
+                    "dual read reconciliation not viable",
+                ),
+            ),
+            footprint=2,
+            leaves="dual read schema epoch reconciliation",
+        ),
+        decide.Rung(
+            "drain_and_reprobe_schema",
+            "quiesce CDC apply and reprobe catalog schema from database dictionary",
+            needs=(
+                decide.Need(
+                    "schema reprobe allowed by pipeline policy",
+                    lambda f: bool(f.get("schema_reprobe_allowed", False)),
+                    "schema reprobing disallowed",
+                ),
+            ),
+            footprint=3,
+            leaves="drain CDC and reprobe catalog schema",
+        ),
+        decide.Rung(
+            "refuse_backfill_race",
+            "refuse migration to prevent applying corrupted schema epoch updates",
+            footprint=4,
+            leaves="refused backfill execution due to unresolvable schema race",
+        ),
+    )
+
+
+def decide_backfill_coverage(facts: Dict[str, Any]) -> decide.Choice:
+    """Climb the backfill_coverage_rungs ladder."""
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("backfill coverage strategy", backfill_coverage_rungs(), fact_obj)
 
 
 class CoverageStrategy(str, enum.Enum):
@@ -261,14 +346,22 @@ def choose_coverage_strategy(
 ) -> CoverageStrategy:
     if config and "strategy" in config:
         return CoverageStrategy(config["strategy"])
-    if table_stats:
-        total = table_stats.get("total_rows", 0)
-        affected = table_stats.get("affected_rows", 0)
-        if total > 0:
-            ratio = affected / float(total)
-            if ratio > 0.25 and affected > 1000:
-                return CoverageStrategy.SHADOW_RESNAPSHOT
-            return CoverageStrategy.SELECTIVE_BACKFILL
+    total = table_stats.get("total_rows", 0) if table_stats else 0
+    affected = table_stats.get("affected_rows", 0) if table_stats else 0
+    ratio = (affected / float(total)) if total > 0 else 0.0
+    broad = (ratio > 0.25 and affected > 1000) or (total == 0 and affected > 1000)
+    facts = {
+        "narrow_gap": not broad,
+        "keys_available": bool(obligation.target_keys or obligation.key_range or not broad),
+        "low_lock_pressure": True,
+        "broad_or_dense_backfill": broad,
+        "shadow_storage_available": True,
+        "epoch_discrepancy_resolvable": False,
+        "schema_reprobe_allowed": False,
+    }
+    choice = decide_backfill_coverage(facts)
+    if choice.rung.name == "shadow_table_resnapshot":
+        return CoverageStrategy.SHADOW_RESNAPSHOT
     return CoverageStrategy.SELECTIVE_BACKFILL
 
 

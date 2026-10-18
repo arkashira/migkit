@@ -13,7 +13,22 @@ from migkit.partial_images import (
     MissingBeforeImageError,
     PlaceholderLeakError,
     UNCHANGED_TOAST,
+    decide_partial_image_cache,
 )
+import tests.rung_branches
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("partial_images", "partial_image_cache_rungs", "retain_in_memory_lru", "holds"),
+    ("partial_images", "partial_image_cache_rungs", "retain_in_memory_lru", "refuses"),
+    ("partial_images", "partial_image_cache_rungs", "spill_or_compact_history", "holds"),
+    ("partial_images", "partial_image_cache_rungs", "spill_or_compact_history", "refuses"),
+    ("partial_images", "partial_image_cache_rungs", "demand_refetch_from_source", "holds"),
+    ("partial_images", "partial_image_cache_rungs", "demand_refetch_from_source", "refuses"),
+    ("partial_images", "partial_image_cache_rungs", "synthesize_tombstone_or_partial", "holds"),
+    ("partial_images", "partial_image_cache_rungs", "synthesize_tombstone_or_partial", "refuses"),
+    ("partial_images", "partial_image_cache_rungs", "refuse_placeholder_leak", "holds"),
+]
 
 
 def test_field_value_typed_states():
@@ -410,3 +425,81 @@ def test_state_export_and_import_checkpoint():
     resolved = cache2.resolve(up)
     assert resolved.get("blob") == lob
     assert resolved.get("cnt") == 2
+
+
+def test_partial_images_rungs_under_watched():
+    with watched() as seen:
+        # 1. retain_in_memory_lru holds
+        f1 = {
+            "entry_in_cache": True,
+            "within_memory_budget": True,
+            "within_entry_capacity": True,
+            "low_eviction_pressure": True,
+            "history_compactable": True,
+            "spill_storage_available": True,
+            "refetch_fn_available": True,
+            "source_accessible": True,
+            "partial_reconstruction_allowed": True,
+        }
+        c1 = decide_partial_image_cache(f1)
+        assert c1.rung.name == "retain_in_memory_lru"
+
+        # 2. retain_in_memory_lru refuses (not in cache), spill_or_compact_history holds
+        f2 = {
+            "entry_in_cache": False,
+            "within_memory_budget": True,
+            "within_entry_capacity": True,
+            "low_eviction_pressure": True,
+            "history_compactable": True,
+            "spill_storage_available": True,
+            "refetch_fn_available": True,
+            "source_accessible": True,
+            "partial_reconstruction_allowed": True,
+        }
+        c2 = decide_partial_image_cache(f2)
+        assert c2.rung.name == "spill_or_compact_history"
+
+        # 3. spill_or_compact_history refuses, demand_refetch_from_source holds
+        f3 = {
+            "entry_in_cache": False,
+            "within_memory_budget": False,
+            "within_entry_capacity": False,
+            "low_eviction_pressure": False,
+            "history_compactable": False,
+            "spill_storage_available": False,
+            "refetch_fn_available": True,
+            "source_accessible": True,
+            "partial_reconstruction_allowed": True,
+        }
+        c3 = decide_partial_image_cache(f3)
+        assert c3.rung.name == "demand_refetch_from_source"
+
+        # 4. demand_refetch_from_source refuses, synthesize_tombstone_or_partial holds
+        f4 = {
+            "entry_in_cache": False,
+            "within_memory_budget": False,
+            "within_entry_capacity": False,
+            "low_eviction_pressure": False,
+            "history_compactable": False,
+            "spill_storage_available": False,
+            "refetch_fn_available": False,
+            "source_accessible": False,
+            "partial_reconstruction_allowed": True,
+        }
+        c4 = decide_partial_image_cache(f4)
+        assert c4.rung.name == "synthesize_tombstone_or_partial"
+
+        # 5. synthesize_tombstone_or_partial refuses, refuse_placeholder_leak holds
+        f5 = {
+            "entry_in_cache": False,
+            "within_memory_budget": False,
+            "within_entry_capacity": False,
+            "low_eviction_pressure": False,
+            "history_compactable": False,
+            "spill_storage_available": False,
+            "refetch_fn_available": False,
+            "source_accessible": False,
+            "partial_reconstruction_allowed": False,
+        }
+        c5 = decide_partial_image_cache(f5)
+        assert c5.rung.name == "refuse_placeholder_leak"
