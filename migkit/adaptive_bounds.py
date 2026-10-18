@@ -105,6 +105,10 @@ class AdaptiveBoundsEnvelope:
     def clamp(self, workers: int) -> int:
         return max(self.min_workers, min(workers, self.max_workers))
 
+    def clamp_batch(self, batch_size: int) -> int:
+        return max(self.min_batch_size, min(batch_size, self.max_batch_size))
+
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "min_workers": self.min_workers,

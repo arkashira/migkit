@@ -426,9 +426,12 @@ def main():
     ap.add_argument("--cdc-rate", type=int, default=0,
                     help="transactions a second for the change-tail lag")
     ap.add_argument("--cdc-seconds", type=int, default=30)
+    ap.add_argument("--demand-benchmark", action="store_true",
+                    help="run endpoint fault demand benchmark evaluation")
     ap.add_argument("--keep", action="store_true",
                     help="leave the containers running")
     args = ap.parse_args()
+
     shapes = [s for s in args.shapes.split(",") if s]
     tag = time.strftime("%H%M%S")
     src = Server(args.engine, "src", tag)
@@ -476,7 +479,12 @@ def main():
             migkit(hconf, reports, "move", "bench", "--go")
             result["cdc"] = cdc_lag(args.engine, src, dst, hconf, reports,
                                     args.cdc_rate, args.cdc_seconds)
+        if args.demand_benchmark:
+            from migkit import demand_benchmark as dbm
+            scorecard = dbm.run_demand_benchmark(src_engine=args.engine, tgt_engine=args.engine)
+            result["demand_benchmark"] = scorecard.to_dict()
     finally:
+
         if not args.keep:
             src.stop()
             dst.stop()

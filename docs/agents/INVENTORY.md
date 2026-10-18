@@ -15,12 +15,12 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 | persistence | 3 | 18 | 9320 | state that outlives a process: checkpoints, the audit record, the run's own files, the undo |
 | safety | 4 | 12 | 12336 | who may write, what must not leak, what keeps a mover from writing twice |
 | execution | 5 | 17 | 11450 | the running of work: processes, ranges, retries, pacing, stalls, sizing of what runs at once |
-| conversion | 6 | 69 | 48601 | a value or an object as another engine takes it: canonical text, transforms, types, stored code |
-| reporting | 7 | 14 | 11214 | what the operator reads: the verdict, the result shape, the log, the metrics, the notices |
-| decision | 8 | 36 | 37441 | choosing: the rungs, the cost model, the joint plan, what each engine can do |
+| conversion | 6 | 69 | 48792 | a value or an object as another engine takes it: canonical text, transforms, types, stored code |
+| reporting | 7 | 14 | 11447 | what the operator reads: the verdict, the result shape, the log, the metrics, the notices |
+| decision | 8 | 36 | 37466 | choosing: the rungs, the cost model, the joint plan, what each engine can do |
 | engines | 9 | 80 | 128779 | the contract every engine fills and each engine's own adapter |
 | integrations | 9 | 23 | 24368 | the programs, libraries and provider APIs migkit wraps, and the other tools it meets |
-| workflows | 10 | 111 | 151230 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
+| workflows | 10 | 111 | 151287 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
 | cli | 11 | 4 | 10542 | the command line and the guide that asks for two addresses |
 | web | 11 | 30 | 6451 | the web view and its API |
 | tools | - | 13 | 7195 | the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them |
@@ -120,7 +120,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 |---|---|---|---|---|---|---|
 | `migkit/bsontype.py` | - | 341 | 2: canon, engines.base | conversion 10 | - | 1: type_fidelity_classes |
 | `migkit/canon.py` | - | 4814 | 93: applyway, archive, avrostream, bsontype, changetopic (+88) | conversion 46, decision 1, engines 2 | - | 103: a_bigquery_pair_follows_the_hops_mapping, a_column_renders_as_canon_renders, a_cross_engine_copy_goes_server_to_server (+100) |
-| `migkit/canon_oracle.py` | - | 932 | 2: canon, cutover | decision 1 | - | 1: canonical_oracle |
+| `migkit/canon_oracle.py` | - | 932 | 3: canon, cutover, demand_benchmark | decision 1 | - | 1: canonical_oracle |
 | `migkit/charsets.py` | - | 1873 | 4: cli, engines.base, hopkeys, tableengine | configuration 1, conversion 10, decision 3, engines 5, safety 1, workflows 2 | - | 2: a_character_set_change_is_planned_and_proved, the_move_way_rungs_hold_and_refuse |
 | `migkit/commercial.py` | - | 639 | 5: canon, engines.base, engines.hetero, engines.mssql, engines.oracle | conversion 9, engines 1 | - | 3: a_column_renders_as_canon_renders, type_fidelity_classes, types_only_commercial_engines_have |
 | `migkit/copybook.py` | - | 1617 | 2: engines.copybook, engines.db2i | - | - | 2: copybook_files_move_into_postgresql, copybook_records_read_as_ibm_documents |
@@ -131,7 +131,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 | `migkit/grants.py` | - | 612 | 0 | - | - | 1: users_grants_parity_orchestrator |
 | `migkit/identity_semantics.py` | - | 477 | 2: cutover, handoff_overlap | decision 1 | - | 1: identity_semantics_collation |
 | `migkit/intervals.py` | - | 174 | 8: canon, engines.duckdb, engines.keyspaces, engines.oracle, engines.pgwire (+3) | - | - | 4: duckdb_intervals_and_vectors_are_read_whole, oracle_redo_is_read_back_exactly, teradata_as_a_side_of_a_pair (+1) |
-| `migkit/lineage_evidence.py` | - | 696 | 0 | - | - | 1: lineage_evidence_dynamic_sql |
+| `migkit/lineage_evidence.py` | - | 887 | 3: cutover, discovery_closure, ready | decision 1 | - | 1: lineage_evidence_dynamic_sql |
 | `migkit/loadtext.py` | - | 282 | 1: crossmove | conversion 2 | - | 1: a_cross_engine_table_goes_the_way_measured_fastest |
 | `migkit/merkle.py` | - | 821 | 1: ddl_shield | - | - | 2: ddl_shield_and_query_guard_wiring, in_database_merkle_tree_folding |
 | `migkit/nanotime.py` | - | 110 | 17: bsontype, changetopic, commercial, engines.clickhouse, engines.db2 (+12) | - | - | 7: a_column_renders_as_canon_renders, oracle_is_a_whole_side, oracle_redo_is_read_back_exactly (+4) |
@@ -192,7 +192,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 
 | file | owner | lines | imported by | reaches | wraps | tests |
 |---|---|---|---|---|---|---|
-| `migkit/demand_benchmark.py` | - | 965 | 0 | - | - | 1: demand_benchmark_fault_scenarios |
+| `migkit/demand_benchmark.py` | - | 1198 | 1: cutover | conversion 1, decision 2, reporting 1 | - | 1: demand_benchmark_fault_scenarios |
 | `migkit/diagnostics.py` | probes: ProbeAccumulator | 464 | 7: cli, cutover, engines.mssql, engines.mysql, engines.postgres (+2) | configuration 3, decision 1, persistence 4, reporting 2, safety 3 | - | 8: a_problem_can_be_reported_without_handing_anything_over, engine_probes_reach_the_accumulator, one_redactor_hides_every_secret (+5) |
 | `migkit/export.py` | - | 1272 | 12: anchor, cli, egress, session, ship (+7) | configuration 4, conversion 2, engines 2, integrations 2, persistence 15, reporting 5, safety 4, workflows 5 | - | 13: a_run_keeps_its_own_log, a_seed_is_shipped_on_media, an_orphan_whose_parent_the_hop_does_not_take (+10) |
 | `migkit/notify.py` | - | 668 | 11: approvals, cli, cutover, schedule, session (+6) | configuration 6, execution 1, integrations 1, reporting 1, safety 3, workflows 1 | apprise | 7: alerts_and_notifications, nothing_leaves_where_nothing_may, one_redactor_hides_every_secret (+4) |
@@ -204,14 +204,14 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 | `migkit/telemetry.py` | - | 1649 | 8: autonomous, cli, faults, model, planner (+3) | cli 1, configuration 6, decision 6, engines 2, integrations 1, persistence 11, reporting 8, safety 2, workflows 1 | - | 2: telemetry_carries_no_customer_data, telemetry_segments_are_sealed_pushed_once_and_received_checked |
 | `migkit/traces.py` | - | 309 | 4: cli, cutover, session, tooluse | configuration 3, integrations 1, reporting 1, safety 3 | opentelemetry | 2: migkit_works_inside_the_teams_tools, nothing_leaves_where_nothing_may |
 | `migkit/troubleshooting.py` | - | 235 | 1: tools.gen_docs | engines 5 | - | 4: every_module_is_reached, every_write_passes_one_guard, the_manual_is_generated_from_the_code (+1) |
-| `migkit/verdict.py` | verdict: verdict.decide | 1247 | 36: agent_control, approvals, catalog, cli, config (+31) | configuration 6, conversion 2, decision 1, engines 5, execution 1, persistence 2, reporting 2, safety 1, scope 2 | - | 39: a_cosmosdb_tail_follows_each_container_on_its_own, a_dynamodb_tail_follows_each_table_on_its_own, a_hop_that_keeps_deletes_on_mysql (+36) |
+| `migkit/verdict.py` | verdict: verdict.decide | 1247 | 37: agent_control, approvals, catalog, cli, config (+32) | configuration 6, conversion 2, decision 1, engines 5, execution 1, persistence 2, reporting 2, safety 1, scope 2 | - | 39: a_cosmosdb_tail_follows_each_container_on_its_own, a_dynamodb_tail_follows_each_table_on_its_own, a_hop_that_keeps_deletes_on_mysql (+36) |
 | `migkit/wording.py` | - | 346 | 37: autonomous, backupseed, cli, costmodel, cutover (+32) | execution 1, persistence 1, safety 1 | - | 8: a_pooler_between_migkit_and_the_database, one_progress_vocabulary, one_redactor_hides_every_secret (+5) |
 
 ## decision (36 files)
 
 | file | owner | lines | imported by | reaches | wraps | tests |
 |---|---|---|---|---|---|---|
-| `migkit/adaptive_bounds.py` | - | 899 | 2: cutover, movers | decision 1 | - | 1: adaptive_bounds_cutover_envelope |
+| `migkit/adaptive_bounds.py` | - | 903 | 3: cutover, demand_benchmark, movers | decision 1 | - | 1: adaptive_bounds_cutover_envelope |
 | `migkit/advisors.py` | - | 178 | 1: cli | decision 1 | - | 3: advise_follows_the_service_the_hop_names, every_command_ends_in_its_own_words, the_move_way_rungs_hold_and_refuse |
 | `migkit/bulkways.py` | - | 142 | 1: movers | configuration 1, decision 4, integrations 5, persistence 1, workflows 2 | - | 1: the_non_sql_tools_are_used_whole |
 | `migkit/capabilities.py` | - | 3824 | 11: cli, decide, diagnostics, engines.base, report (+6) | configuration 4, decision 3, engines 8, safety 3, workflows 6 | - | 36: a_document_store_assessment_names_versions_writers_and_what_the_target_lacks, a_document_store_carries_its_indexes_views_and_functions, a_keyed_read_is_paged_by_what_it_measured (+33) |
@@ -220,7 +220,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 | `migkit/cost_envelope.py` | - | 705 | 3: cli, costmodel, cutover | decision 1 | - | 1: cost_envelope_enforcement |
 | `migkit/costmodel.py` | - | 809 | 10: decide, engines.generic, incumbent_switch, legs, marks (+5) | configuration 2, decision 4, engines 4, persistence 2, reporting 1, workflows 1 | - | 13: a_managed_services_own_operation_is_ranked_by_its_eligibility, a_mysql_copy_passes_rows_server_to_server, a_way_is_costed_by_what_the_unit_is (+10) |
 | `migkit/dba.py` | - | 1502 | 6: cli, guide, managed, physical, ready (+1) | configuration 3, decision 1, engines 8, integrations 1 | - | 11: a_managed_mysql_says_how_long_its_log_is_kept, a_managed_side_is_read_and_held_by_what_its_admin_may_do, a_source_change_is_offered_never_assumed (+8) |
-| `migkit/decide.py` | decision: every choice is a rung | 7774 | 226: ack_lattice, action_compiler, adaptive_bounds, advisors, agent_control (+221) | configuration 1, conversion 5, decision 34, engines 5, persistence 4 | - | 257: rung_branches.py, a_batch_that_is_not_a_page_is_the_decisions, a_clone_plugin_offer_on_mysql (+254) |
+| `migkit/decide.py` | decision: every choice is a rung | 7774 | 228: ack_lattice, action_compiler, adaptive_bounds, advisors, agent_control (+223) | configuration 1, conversion 5, decision 34, engines 5, persistence 4 | - | 257: rung_branches.py, a_batch_that_is_not_a_page_is_the_decisions, a_clone_plugin_offer_on_mysql (+254) |
 | `migkit/factbook.py` | - | 483 | 5: cli, decide, fact_validity, jointplan, waysaid | - | - | 1: every_fact_is_declared |
 | `migkit/faults.py` | - | 801 | 17: autonomous, causal_diagnosis, cli, engines.generic, engines.hetero (+12) | decision 2, execution 3, reporting 1 | - | 10: a_copier_reconciles_and_retunes, a_failed_bulk_copy_falls_back_to_the_range_copier_on_mysql, a_failure_is_told_by_what_it_did (+7) |
 | `migkit/guarantees.py` | - | 682 | 10: apply_contract, cli, decide, engines.base, execution_contract (+5) | - | - | 8: a_finished_tables_indexes_build_while_the_next_copies, a_move_keeps_what_it_must, every_way_is_weighed (+5) |
@@ -233,7 +233,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 | `migkit/model.py` | - | 1146 | 12: claims, cli, guide, ha, jointplan (+7) | configuration 2, conversion 2, decision 10, engines 2, execution 1, persistence 1, reporting 3 | - | 19: large_values_rig.py, a_move_is_planned_as_one, a_rehearsal_forecasts_the_real_run (+16) |
 | `migkit/offset_diag.py` | - | 974 | 2: cutover, tailctl | decision 1 | - | 1: offset_disagreement_diagnosis |
 | `migkit/planner.py` | - | 1437 | 20: autonomous, backupseed, cli, cloudseed, decide (+15) | configuration 2, decision 22, execution 1, persistence 2, reporting 3, workflows 8 | - | 43: a_move_is_planned_as_one, a_physical_seed_is_taken_only_where_it_holds, a_provider_operation_is_offered_by_its_facts (+40) |
-| `migkit/ready.py` | - | 755 | 3: cli, cloud_readiness, managed | configuration 4, decision 12, engines 1, reporting 1, safety 2, scope 1, workflows 7 | - | 11: a_copy_goal_is_not_held_by_the_change_depth, a_fork_change_is_held_first_mysql_mariadb, a_slow_oracle_reader_stops_the_start (+8) |
+| `migkit/ready.py` | - | 776 | 3: cli, cloud_readiness, managed | configuration 4, conversion 1, decision 12, engines 1, reporting 1, safety 2, scope 1, workflows 7 | - | 11: a_copy_goal_is_not_held_by_the_change_depth, a_fork_change_is_held_first_mysql_mariadb, a_slow_oracle_reader_stops_the_start (+8) |
 | `migkit/rehearsal.py` | - | 440 | 8: cli, cutover, engines.mongodb, model, placement_advice (+3) | configuration 1, decision 5, persistence 2 | - | 4: a_rehearsal_forecasts_the_real_run, every_answer_and_position_keeps_its_scope, everything_a_goal_needs_is_known_first (+1) |
 | `migkit/repairways.py` | - | 860 | 2: cli, engines.base | configuration 1, conversion 1, decision 3, persistence 3, reporting 1, safety 2, workflows 3 | - | 6: a_repair_leaves_what_the_hop_keeps, repair_is_a_ladder, repair_ladder_on_postgres_and_mysql (+3) |
 | `migkit/scanplan.py` | - | 1072 | 6: engines.base, engines.mssql, engines.mysql, engines.postgres, keyless (+1) | configuration 1, decision 6, engines 1, execution 6, persistence 4, workflows 2 | - | 10: a_copier_reconciles_and_retunes, a_tables_checks_are_read_in_one_plan, adaptive_merkle_bucket_diff (+7) |
@@ -392,10 +392,10 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 | `migkit/continuous_scope.py` | - | 1745 | 0 | decision 1 | - | 1: continuous_scope_lifecycle |
 | `migkit/conversion_ledger.py` | - | 1148 | 1: storedcode.convert | decision 1, persistence 1 | - | 1: conversion_ledger_scope_accounting |
 | `migkit/crossmove.py` | - | 1101 | 3: engines.hetero, tools, tools.gen_codemap | configuration 1, conversion 10, decision 13, engines 3, execution 2, safety 1, workflows 1 | - | 6: a_cross_engine_copy_goes_server_to_server, a_cross_engine_table_goes_the_way_measured_fastest, a_fault_in_each_copier_is_recovered_on_a_server (+3) |
-| `migkit/cutover.py` | - | 3689 | 11: approvals, cli, flight_simulator, freeze, managed (+6) | configuration 10, conversion 4, decision 13, engines 6, execution 8, persistence 13, reporting 11, safety 17, scope 2, workflows 51 | - | 27: a_cutover_proof_on_postgres_reads_every_table, a_delta_reads_what_the_hop_takes_pg, a_kafka_cutover_drains_to_the_end_offsets (+24) |
+| `migkit/cutover.py` | - | 3736 | 11: approvals, cli, flight_simulator, freeze, managed (+6) | configuration 10, conversion 5, decision 13, engines 6, execution 8, persistence 13, reporting 12, safety 17, scope 2, workflows 51 | - | 27: a_cutover_proof_on_postgres_reads_every_table, a_delta_reads_what_the_hop_takes_pg, a_kafka_cutover_drains_to_the_end_offsets (+24) |
 | `migkit/dag_scheduler.py` | - | 748 | 2: barriers, transaction_dag | - | - | 2: transaction_dag_barrier_scheduler, transaction_dag_parallel_apply |
 | `migkit/decision_compute.py` | - | 1381 | 0 | decision 1 | - | 1: decision_compute_budget |
-| `migkit/discovery_closure.py` | - | 1406 | 0 | decision 1 | - | 1: discovery_closure_scope |
+| `migkit/discovery_closure.py` | - | 1416 | 0 | conversion 1, decision 1 | - | 1: discovery_closure_scope |
 | `migkit/document_model.py` | - | 2509 | 1: cutover | decision 1 | - | 1: document_model_transform_verification |
 | `migkit/drainmark.py` | - | 353 | 3: capabilities, cli, cutover | engines 1, persistence 1, safety 2, workflows 3 | - | 4: a_resumed_range_and_a_seam_leave_their_record, drain_and_readiness_are_wired, drain_to_position_and_the_approval_gate (+1) |
 | `migkit/drift.py` | - | 385 | 10: cli, cutover, engines.hetero, engines.mssql, engines.mysql (+5) | engines 5, persistence 1, safety 1 | - | 9: a_check_says_what_changed_since_the_move, a_move_keeps_what_it_must, an_online_rewrites_working_tables_are_left_alone (+6) |

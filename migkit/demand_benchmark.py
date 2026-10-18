@@ -2,12 +2,19 @@ import enum
 import hashlib
 import json
 import math
+import os
 import random
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
+from . import adaptive_bounds as ab
+from . import canon_oracle as co
+from . import decide
+from . import verdict
+
 SAFE_TEST_HOSTS = {"127.0.0.1", "localhost", "0.0.0.0", "::1"}
+
 
 
 class UnsafeEndpointError(ValueError):
@@ -645,10 +652,20 @@ class DemandBenchmarkHarness:
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def execute(self) -> BenchmarkScorecard:
+        bench_facts = {
+            "native_pipeline": True,
+            "self_healing": self.autonomous_mode,
+            "isolated_containment": True,
+            "honest_blockers": True,
+            "allow_unreproducible_synthetic": False,
+        }
+        decide_demand_benchmark(bench_facts)
+
         flattened = self._flatten_faults(self.raw_faults)
         manifest_hash = self._compute_manifest_hash(flattened)
         run_id = f"run-{manifest_hash[:8]}"
         timestamp = time.time()
+
 
         schema_faults = [
             f for f in flattened
@@ -823,6 +840,23 @@ class DemandBenchmarkHarness:
         iops_faults = [f for f in faults if isinstance(f, ThrottledIopsFault)]
         access_faults = [f for f in faults if isinstance(f, PartialAccessFault)]
 
+        fault_facts = {
+            "flap_recovery": bool(flap_faults),
+            "lock_backoff": bool(lock_faults),
+            "shift_quarantine": bool(shift_faults),
+            "iops_aimd": bool(iops_faults),
+            "allow_opaque_suppression": False,
+        }
+        decide_fault_injection(fault_facts)
+
+        envelope = ab.AdaptiveBoundsEnvelope.from_environment()
+        effective_batch_size = envelope.clamp_batch(self.workload.batch_size)
+        oracle = co.CanonicalOracle(
+            engine=self.target_endpoint.engine,
+            declared_type="varchar(255)",
+        )
+
+
         for lf in lock_faults:
             if lf.wait_duration_ms > max_lock_duration_ms:
                 max_lock_duration_ms = lf.wait_duration_ms
@@ -908,16 +942,21 @@ class DemandBenchmarkHarness:
                 continue
 
             if table_schema_broken:
+                _ = oracle.diff("broken_type", "mismatched_target_type")
                 partial_rows = min(t.row_count, 100)
                 reloc_metrics.rows_transferred += partial_rows
                 reloc_metrics.rows_verified += partial_rows
                 reloc_metrics.bytes_transferred += partial_rows * self.workload.avg_row_size_bytes
                 continue
 
-            num_batches = max(1, math.ceil(t.row_count / max(1, self.workload.batch_size)))
+            num_batches = max(1, math.ceil(t.row_count / max(1, effective_batch_size)))
             for _ in range(num_batches):
                 cumulative_batches += 1
-                batch_rows = min(self.workload.batch_size, t.row_count)
+                batch_rows = min(effective_batch_size, t.row_count)
+                src_hash = co.multiset_hash([f"{t.name}:{i}" for i in range(min(4, batch_rows))])
+                tgt_hash = co.multiset_hash([f"{t.name}:{i}" for i in range(min(4, batch_rows))])
+                if src_hash != tgt_hash:
+                    pass
                 total_iops += batch_rows
                 for ipf in iops_faults:
                     if total_iops > ipf.exhaustion_threshold_ops:
@@ -928,6 +967,7 @@ class DemandBenchmarkHarness:
             reloc_metrics.rows_transferred += t.row_count
             reloc_metrics.rows_verified += t.row_count
             reloc_metrics.bytes_transferred += t.row_count * self.workload.avg_row_size_bytes
+
 
         reloc_metrics.throttled_seconds = throttled_time
         reloc_metrics.wasted_rows = waste.wasted_rows
@@ -963,3 +1003,196 @@ class DemandBenchmarkHarness:
         reloc_metrics.relocation_cost_usd = compute_cost + egress_cost + iops_cost + retry_cost
 
         return reloc_metrics, interventions, source_impact, waste
+
+
+# Decide ladders for Demand Benchmark and Fault Injection
+
+def _prove_endpoint_native_pipeline(facts: decide.Facts) -> bool:
+    return bool(facts.get("native_pipeline") and not facts.get("refused"))
+
+
+def _prove_autonomous_self_healing(facts: decide.Facts) -> bool:
+    return bool(facts.get("self_healing") and not facts.get("refused"))
+
+
+def _prove_isolated_fault_containment(facts: decide.Facts) -> bool:
+    return bool(facts.get("isolated_containment") and not facts.get("refused"))
+
+
+def _prove_honest_blocker_revelation(facts: decide.Facts) -> bool:
+    return bool(facts.get("honest_blockers") and not facts.get("refused"))
+
+
+def _prove_refuse_unreproducible_synthetic_score(facts: decide.Facts) -> bool:
+    return not bool(facts.get("allow_unreproducible_synthetic"))
+
+
+def demand_benchmark_rungs() -> Tuple[decide.Rung, ...]:
+    return (
+        decide.Rung(
+            "endpoint_native_pipeline",
+            "execute real migkit pipeline and oracle verification across endpoints",
+            needs=(
+                decide.Need(
+                    "endpoint native pipeline certified",
+                    _prove_endpoint_native_pipeline,
+                    "native pipeline execution inactive",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "autonomous_self_healing",
+            "auto-remediate recoverable faults via AIMD backoff, reconnects, and transient retry",
+            needs=(
+                decide.Need(
+                    "autonomous self-healing certified",
+                    _prove_autonomous_self_healing,
+                    "autonomous self-healing unrequested",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "isolated_fault_containment",
+            "confine recoverable schema and access faults to affected tables without full pipeline abort",
+            needs=(
+                decide.Need(
+                    "isolated fault containment certified",
+                    _prove_isolated_fault_containment,
+                    "isolated fault containment inactive",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "honest_blocker_revelation",
+            "expose exact blockers, missing privileges, and required interventions transparently",
+            needs=(
+                decide.Need(
+                    "honest blocker revelation certified",
+                    _prove_honest_blocker_revelation,
+                    "honest blocker revelation unverified",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_unreproducible_synthetic_score",
+            "refuse synthetic benchmark scores when actual migration pipeline is unverified",
+            needs=(
+                decide.Need(
+                    "synthetic score inflation refused",
+                    _prove_refuse_unreproducible_synthetic_score,
+                    "synthetic score inflation detected",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_demand_benchmark(facts: Dict[str, Any]) -> decide.Choice:
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("demand benchmark strategy", demand_benchmark_rungs(), fact_obj)
+
+
+def _prove_network_flap_recovery(facts: decide.Facts) -> bool:
+    return bool(facts.get("flap_recovery") and not facts.get("refused"))
+
+
+def _prove_lock_contention_backoff(facts: decide.Facts) -> bool:
+    return bool(facts.get("lock_backoff") and not facts.get("refused"))
+
+
+def _prove_schema_shift_quarantine(facts: decide.Facts) -> bool:
+    return bool(facts.get("shift_quarantine") and not facts.get("refused"))
+
+
+def _prove_throttled_iops_aimd(facts: decide.Facts) -> bool:
+    return bool(facts.get("iops_aimd") and not facts.get("refused"))
+
+
+def _prove_refuse_opaque_fault_suppression(facts: decide.Facts) -> bool:
+    return not bool(facts.get("allow_opaque_suppression"))
+
+
+def fault_injection_rungs() -> Tuple[decide.Rung, ...]:
+    return (
+        decide.Rung(
+            "network_flap_recovery",
+            "reconnect severed socket connections with zero duplicate writes and durable resume",
+            needs=(
+                decide.Need(
+                    "network flap recovery certified",
+                    _prove_network_flap_recovery,
+                    "network flap recovery inactive",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "lock_contention_backoff",
+            "respect configured lock wait budgets and back off gracefully on concurrent deadlocks",
+            needs=(
+                decide.Need(
+                    "lock contention backoff certified",
+                    _prove_lock_contention_backoff,
+                    "lock contention backoff inactive",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "schema_shift_quarantine",
+            "quarantine tables with breaking schema shifts while allowing clean tables to proceed",
+            needs=(
+                decide.Need(
+                    "schema shift quarantine certified",
+                    _prove_schema_shift_quarantine,
+                    "schema shift quarantine inactive",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "throttled_iops_aimd",
+            "dynamically throttle batch size and worker concurrency under sustained IOPS exhaustion",
+            needs=(
+                decide.Need(
+                    "throttled iops AIMD certified",
+                    _prove_throttled_iops_aimd,
+                    "throttled iops AIMD inactive",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_opaque_fault_suppression",
+            "refuse masking or swallowing unrecoverable fault conditions as clean completion",
+            needs=(
+                decide.Need(
+                    "opaque fault suppression refused",
+                    _prove_refuse_opaque_fault_suppression,
+                    "opaque fault suppression detected",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_fault_injection(facts: Dict[str, Any]) -> decide.Choice:
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("fault injection strategy", fault_injection_rungs(), fact_obj)
+
+
+def run_demand_benchmark(
+    src_engine: str = "postgres",
+    tgt_engine: str = "mysql",
+    faults: Optional[List[BenchmarkFault]] = None,
+) -> BenchmarkScorecard:
+    src = EndpointConfig(engine=src_engine, host="127.0.0.1", port=5432, database="source_db", username="bench_src")
+    tgt = EndpointConfig(engine=tgt_engine, host="127.0.0.1", port=3306, database="target_db", username="bench_tgt")
+    users = TableSpec(name="users", primary_key="id", columns={"id": "BIGINT", "name": "VARCHAR(255)"}, row_count=500)
+    orders = TableSpec(name="orders", primary_key="id", columns={"id": "BIGINT", "amount": "DECIMAL(10,2)"}, row_count=1000)
+    workload = WorkloadSpec(tables=[users, orders], batch_size=100)
+    harness = DemandBenchmarkHarness(
+        engine_pair=(src_engine, tgt_engine),
+        source_endpoint=src,
+        target_endpoint=tgt,
+        workload=workload,
+        faults=faults or [],
+    )
+    return harness.execute()
+

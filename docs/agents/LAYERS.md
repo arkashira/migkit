@@ -26,7 +26,7 @@ A package imports its own rank and the ranks below it, never one above. A rank o
 
 Outside the rule: `tools` (the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them); `data` (the files migkit ships as resources).
 
-## Upward imports still listed: 432
+## Upward imports still listed: 435
 
 ### (not listed)
 
@@ -37,6 +37,8 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/config.py:446` configuration -> execution (`keepalive`)
 - `migkit/control_upgrade.py:15` persistence -> decision (`decide`)
 - `migkit/decomp_budget.py:22` execution -> decision (`decide`)
+- `migkit/demand_benchmark.py:11` reporting -> decision (`adaptive_bounds`)
+- `migkit/demand_benchmark.py:13` reporting -> decision (`decide`)
 - `migkit/effect_checkpoint.py:52` persistence -> decision (`decide`)
 - `migkit/engines/mysql.py:11567` engines -> workflows (`ratchet`)
 - `migkit/engines/postgres.py:8006` engines -> workflows (`verifiers`)
@@ -49,6 +51,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/identity_semantics.py:8` conversion -> decision (`decide`)
 - `migkit/init.py:1` configuration -> cli (`guide`)
 - `migkit/jointplan.py:1309` decision -> workflows (`etl_bi_waves`)
+- `migkit/lineage_evidence.py:7` conversion -> decision (`decide`)
 - `migkit/lock_capability.py:9` safety -> decision (`decide`)
 - `migkit/locks.py:25` execution -> decision (`decide`)
 - `migkit/managed.py:1119` configuration -> decision (`tune`)

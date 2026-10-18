@@ -1404,3 +1404,13 @@ def extend_survey_with_closure(
     out["care"] = care_list
 
     return out
+
+
+def audit_routine_dynamic_lineage(routine_name: str, code: str, catalogue: Optional[Any] = None) -> Any:
+    """Audit routine code for dynamic SQL lineage and compute honest coverage."""
+    from . import lineage_evidence
+    target_cat = catalogue or lineage_evidence.VersionedCatalogue.from_environment()
+    ledger = lineage_evidence.LineageEvidenceLedger(target_catalogue=target_cat)
+    ledger.audit_and_record(routine_name=routine_name, code=code)
+    return ledger.compute_coverage(routine_name)
+

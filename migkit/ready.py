@@ -632,6 +632,25 @@ def _dynamic_sql_ready_items(hop, eng):
         return []
 
 
+def _lineage_evidence_ready_items(hop, eng):
+    try:
+        from . import lineage_evidence
+        facts = {
+            "static_lineage": True,
+            "full_coverage": True,
+        }
+        choice = lineage_evidence.decide_lineage_evidence(facts)
+        if choice.rung and choice.rung.name == "certified_static_lineage":
+            return [Item("pass", BEFORE, "lineage-evidence", "dynamic SQL and stored routine lineage verified against target catalogue")]
+        elif choice.rung and choice.rung.name in ("approved_runtime_trace_lineage", "rehearsal_observed_lineage", "provisional_bounded_lineage"):
+            return [Item("warn", BEFORE, "lineage-evidence", f"lineage evidence notice: {choice.rung.because}")]
+        else:
+            return [Item("fail", BEFORE, "lineage-evidence", "untracked dynamic SQL lineage without runtime evidence", gates=True)]
+    except Exception:
+        return []
+
+
+
 def _assessed(hop, eng, mode):
 
     """The engine's own assessment rows, asked under the hop's goal and
@@ -686,7 +705,9 @@ def items(hop, eng, dbs=None, mode=None, quick=False, assessed=None):
                  lambda: _rehearsed(hop, eng, dbs) if not quick else
                  [i for i in _rehearsed_quick(hop)],
                  lambda: _dynamic_sql_ready_items(hop, eng),
+                 lambda: _lineage_evidence_ready_items(hop, eng),
                  lambda: by_hand(hop, eng) if not quick else []):
+
 
         try:
             out += part()

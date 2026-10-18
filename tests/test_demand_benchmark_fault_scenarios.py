@@ -1,6 +1,7 @@
 import json
 import pytest
 
+from tests.rung_branches import watched
 from migkit.demand_benchmark import (
     BenchmarkFault,
     BenchmarkScorecard,
@@ -22,7 +23,34 @@ from migkit.demand_benchmark import (
     ThrottledIopsFault,
     UnsafeEndpointError,
     WorkloadSpec,
+    decide_demand_benchmark,
+    decide_fault_injection,
+    run_demand_benchmark,
 )
+
+PROVES_RUNGS = [
+    ("demand_benchmark", "demand_benchmark_rungs", "endpoint_native_pipeline", "holds"),
+    ("demand_benchmark", "demand_benchmark_rungs", "endpoint_native_pipeline", "refuses"),
+    ("demand_benchmark", "demand_benchmark_rungs", "autonomous_self_healing", "holds"),
+    ("demand_benchmark", "demand_benchmark_rungs", "autonomous_self_healing", "refuses"),
+    ("demand_benchmark", "demand_benchmark_rungs", "isolated_fault_containment", "holds"),
+    ("demand_benchmark", "demand_benchmark_rungs", "isolated_fault_containment", "refuses"),
+    ("demand_benchmark", "demand_benchmark_rungs", "honest_blocker_revelation", "holds"),
+    ("demand_benchmark", "demand_benchmark_rungs", "honest_blocker_revelation", "refuses"),
+    ("demand_benchmark", "demand_benchmark_rungs", "refuse_unreproducible_synthetic_score", "holds"),
+    ("demand_benchmark", "demand_benchmark_rungs", "refuse_unreproducible_synthetic_score", "refuses"),
+    ("demand_benchmark", "fault_injection_rungs", "network_flap_recovery", "holds"),
+    ("demand_benchmark", "fault_injection_rungs", "network_flap_recovery", "refuses"),
+    ("demand_benchmark", "fault_injection_rungs", "lock_contention_backoff", "holds"),
+    ("demand_benchmark", "fault_injection_rungs", "lock_contention_backoff", "refuses"),
+    ("demand_benchmark", "fault_injection_rungs", "schema_shift_quarantine", "holds"),
+    ("demand_benchmark", "fault_injection_rungs", "schema_shift_quarantine", "refuses"),
+    ("demand_benchmark", "fault_injection_rungs", "throttled_iops_aimd", "holds"),
+    ("demand_benchmark", "fault_injection_rungs", "throttled_iops_aimd", "refuses"),
+    ("demand_benchmark", "fault_injection_rungs", "refuse_opaque_fault_suppression", "holds"),
+    ("demand_benchmark", "fault_injection_rungs", "refuse_opaque_fault_suppression", "refuses"),
+]
+
 
 
 def make_safe_endpoints():
@@ -466,3 +494,63 @@ def test_multiple_engine_pairs():
         scorecard = harness.execute()
         assert scorecard.engine_pair == (src_eng, tgt_eng)
         assert scorecard.verified_completion_rate == 1.0
+
+
+def test_demand_benchmark_rungs_under_watched():
+    with watched():
+        # demand_benchmark_rungs:
+        # 1. endpoint_native_pipeline
+        c1 = decide_demand_benchmark({"native_pipeline": True})
+        assert c1.rung.name == "endpoint_native_pipeline"
+
+        # 2. autonomous_self_healing
+        c2 = decide_demand_benchmark({"native_pipeline": False, "self_healing": True})
+        assert c2.rung.name == "autonomous_self_healing"
+
+        # 3. isolated_fault_containment
+        c3 = decide_demand_benchmark({"native_pipeline": False, "self_healing": False, "isolated_containment": True})
+        assert c3.rung.name == "isolated_fault_containment"
+
+        # 4. honest_blocker_revelation
+        c4 = decide_demand_benchmark({"native_pipeline": False, "self_healing": False, "isolated_containment": False, "honest_blockers": True})
+        assert c4.rung.name == "honest_blocker_revelation"
+
+        # 5. refuse_unreproducible_synthetic_score
+        c5 = decide_demand_benchmark({"native_pipeline": False, "self_healing": False, "isolated_containment": False, "honest_blockers": False})
+        assert c5.rung.name == "refuse_unreproducible_synthetic_score"
+
+        # 6. refuse fallback
+        c6 = decide_demand_benchmark({"native_pipeline": False, "self_healing": False, "isolated_containment": False, "honest_blockers": False, "allow_unreproducible_synthetic": True})
+        assert c6.rung is None
+
+        # fault_injection_rungs:
+        # 1. network_flap_recovery
+        f1 = decide_fault_injection({"flap_recovery": True})
+        assert f1.rung.name == "network_flap_recovery"
+
+        # 2. lock_contention_backoff
+        f2 = decide_fault_injection({"flap_recovery": False, "lock_backoff": True})
+        assert f2.rung.name == "lock_contention_backoff"
+
+        # 3. schema_shift_quarantine
+        f3 = decide_fault_injection({"flap_recovery": False, "lock_backoff": False, "shift_quarantine": True})
+        assert f3.rung.name == "schema_shift_quarantine"
+
+        # 4. throttled_iops_aimd
+        f4 = decide_fault_injection({"flap_recovery": False, "lock_backoff": False, "shift_quarantine": False, "iops_aimd": True})
+        assert f4.rung.name == "throttled_iops_aimd"
+
+        # 5. refuse_opaque_fault_suppression
+        f5 = decide_fault_injection({"flap_recovery": False, "lock_backoff": False, "shift_quarantine": False, "iops_aimd": False})
+        assert f5.rung.name == "refuse_opaque_fault_suppression"
+
+        # 6. refuse fallback
+        f6 = decide_fault_injection({"flap_recovery": False, "lock_backoff": False, "shift_quarantine": False, "iops_aimd": False, "allow_opaque_suppression": True})
+        assert f6.rung is None
+
+
+def test_run_demand_benchmark_helper():
+    scorecard = run_demand_benchmark()
+    assert scorecard.verified_completion_rate == 1.0
+    assert scorecard.success is True
+

@@ -1,7 +1,19 @@
+import os
 import re
 import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+from . import decide
+
+
+def get_default_target_engine() -> str:
+    return os.environ.get("MIGKIT_TARGET_ENGINE", "postgres")
+
+
+def get_default_target_version() -> str:
+    return os.environ.get("MIGKIT_TARGET_VERSION", "15.0")
+
 
 
 def _parse_version(v: str) -> Tuple[int, ...]:
@@ -97,13 +109,21 @@ class RuntimeTrace:
 
 @dataclass
 class VersionedCatalogue:
-    engine: str = "postgres"
-    version: str = "15.0"
+    engine: str = field(default_factory=get_default_target_engine)
+    version: str = field(default_factory=get_default_target_version)
     tables: Set[str] = field(default_factory=set)
     views: Set[str] = field(default_factory=set)
     routines: Set[str] = field(default_factory=set)
     supported_extensions: Dict[str, str] = field(default_factory=dict)
     unavailable_dependencies: Set[str] = field(default_factory=set)
+
+    @classmethod
+    def from_environment(cls) -> "VersionedCatalogue":
+        return cls(
+            engine=get_default_target_engine(),
+            version=get_default_target_version(),
+        )
+
 
     def has_entity(self, name: str) -> bool:
         low = name.lower()
@@ -676,9 +696,7 @@ class LineageEvidenceLedger:
                 is_full = True
         else:
             cov_pct = round((resolved / total) * 100.0, 2)
-            if (unresolved_dynamic > 0 or unavail_count > 0) and cov_pct >= 100.0:
-                cov_pct = 99.0
-            is_full = (unresolved_dynamic == 0 and unavail_count == 0)
+            is_full = (unresolved_dynamic == 0 and unavail_count == 0 and cov_pct == 100.0)
 
         return AssessmentCoverage(
             routine_name=routine_name,
@@ -694,3 +712,176 @@ class LineageEvidenceLedger:
     def compute_all_coverage(self) -> Dict[str, AssessmentCoverage]:
         all_routines = set(self._syntax_references.keys()) | set(self._unknown_lineages.keys())
         return {r: self.compute_coverage(r) for r in all_routines}
+
+
+# Decide ladders for Lineage Evidence and Coverage Auditing
+
+def _prove_certified_static_lineage(facts: decide.Facts) -> bool:
+    return bool(facts.get("static_lineage") and not facts.get("refused"))
+
+
+def _prove_approved_runtime_trace_lineage(facts: decide.Facts) -> bool:
+    return bool(facts.get("runtime_trace") and not facts.get("refused"))
+
+
+def _prove_rehearsal_observed_lineage(facts: decide.Facts) -> bool:
+    return bool(facts.get("rehearsal_observed") and not facts.get("refused"))
+
+
+def _prove_provisional_bounded_lineage(facts: decide.Facts) -> bool:
+    return bool(facts.get("provisional_bounded") and not facts.get("refused"))
+
+
+def _prove_refuse_untracked_dynamic_lineage(facts: decide.Facts) -> bool:
+    return not bool(facts.get("allow_untracked_dynamic"))
+
+
+def lineage_evidence_rungs() -> Tuple[decide.Rung, ...]:
+    return (
+        decide.Rung(
+            "certified_static_lineage",
+            "verify all routine and query dependencies statically against target catalogue",
+            needs=(
+                decide.Need(
+                    "static dependency resolution certified",
+                    _prove_certified_static_lineage,
+                    "static dependency resolution unverified",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "approved_runtime_trace_lineage",
+            "reconcile dynamic SQL identifiers using approved production runtime traces",
+            needs=(
+                decide.Need(
+                    "runtime trace evidence approved",
+                    _prove_approved_runtime_trace_lineage,
+                    "runtime trace evidence unapproved or absent",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "rehearsal_observed_lineage",
+            "supplement dynamic dependencies observed during full-scale rehearsal replay",
+            needs=(
+                decide.Need(
+                    "rehearsal observation certified",
+                    _prove_rehearsal_observed_lineage,
+                    "rehearsal observation inactive",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "provisional_bounded_lineage",
+            "bound unparsed dynamic identifiers within declared table and schema boundaries",
+            needs=(
+                decide.Need(
+                    "provisional bounds certified",
+                    _prove_provisional_bounded_lineage,
+                    "provisional bounds exceed limits",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_untracked_dynamic_lineage",
+            "refuse migration when untracked dynamic SQL statements lack runtime proof",
+            needs=(
+                decide.Need(
+                    "untracked dynamic SQL refused",
+                    _prove_refuse_untracked_dynamic_lineage,
+                    "untracked dynamic SQL detected",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_lineage_evidence(facts: Dict[str, Any]) -> decide.Choice:
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("lineage evidence resolution", lineage_evidence_rungs(), fact_obj)
+
+
+def _prove_full_lineage_coverage(facts: decide.Facts) -> bool:
+    return bool(facts.get("full_coverage") and not facts.get("refused"))
+
+
+def _prove_trace_supplemented_coverage(facts: decide.Facts) -> bool:
+    return bool(facts.get("trace_supplemented") and not facts.get("refused"))
+
+
+def _prove_bounded_gap_coverage(facts: decide.Facts) -> bool:
+    return bool(facts.get("bounded_gap") and not facts.get("refused"))
+
+
+def _prove_honest_partial_coverage(facts: decide.Facts) -> bool:
+    return bool(facts.get("honest_partial") and not facts.get("refused"))
+
+
+def _prove_refuse_opaque_lineage_downcast(facts: decide.Facts) -> bool:
+    return not bool(facts.get("allow_opaque_downcast"))
+
+
+def lineage_coverage_rungs() -> Tuple[decide.Rung, ...]:
+    return (
+        decide.Rung(
+            "full_lineage_coverage",
+            "certify 100% verified dependency resolution with zero unknown dynamic constructs",
+            needs=(
+                decide.Need(
+                    "full lineage coverage certified",
+                    _prove_full_lineage_coverage,
+                    "full lineage coverage incomplete",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "trace_supplemented_coverage",
+            "certify complete coverage by supplementing static analysis with runtime traces",
+            needs=(
+                decide.Need(
+                    "trace supplemented coverage certified",
+                    _prove_trace_supplemented_coverage,
+                    "trace supplementation incomplete",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "bounded_gap_coverage",
+            "isolate remaining unknown dynamic statements to non-destructive queries",
+            needs=(
+                decide.Need(
+                    "bounded gap isolation certified",
+                    _prove_bounded_gap_coverage,
+                    "unbounded dynamic modifications detected",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "honest_partial_coverage",
+            "report exact mathematical fraction of resolved dependencies without synthetic caps",
+            needs=(
+                decide.Need(
+                    "honest partial coverage certified",
+                    _prove_honest_partial_coverage,
+                    "honest partial coverage inactive",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_opaque_lineage_downcast",
+            "refuse treating uninspected dynamic SQL as resolved dependencies",
+            needs=(
+                decide.Need(
+                    "opaque lineage downcast refused",
+                    _prove_refuse_opaque_lineage_downcast,
+                    "opaque lineage downcast requested",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_lineage_coverage(facts: Dict[str, Any]) -> decide.Choice:
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("lineage coverage resolution", lineage_coverage_rungs(), fact_obj)
+

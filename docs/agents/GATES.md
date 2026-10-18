@@ -105,6 +105,9 @@ re-dispatches it with the finding and the row comes back here when it passes.
 | 672 | 2026-10-18 | PASS | critic (agy, session fda5f478) | 6eb58fdb | partial_access_rungs and honest_coverage_rungs decide ladders across 10 branches; get_default_allowed_networks dynamic networks; single canonical verdict owner delegated to verdict.VERDICTS; wired into cutover.py preflight and cli.py verify-partial-access; PROVES_RUNGS verified under watched(); 17/17 tests green |
 | 673 | 2026-10-18 | PASS | critic (agy, session fda5f478) | f9358fbf | adaptive_bounds_rungs and partition_routing_rungs decide ladders across 10 branches; dynamic worker and batch bounds resolution from env/topology; wired into cutover.py preflight and movers.py native_move worker clamping; PROVES_RUNGS verified under watched(); 19/19 tests green |
 | 674 | 2026-10-18 | PASS | critic (agy, session fda5f478) | f9358fbf | canonical_oracle_rungs and canonical_policy_rungs decide ladders across 10 branches; engine_version plumbed into TypeSpec and CanonicalOracle; wired into cutover.py preflight; PROVES_RUNGS verified under watched(); 13/13 tests green |
+| 675 | 2026-10-18 | PASS | critic (agy, session fda5f478) | 8d0d596f | lineage_evidence_rungs and lineage_coverage_rungs decide ladders across 10 branches; removed coverage cap 99.0 literal; VersionedCatalogue dynamic environment factory; wired into ready.py assess, discovery_closure.py, and cutover.py preflight; PROVES_RUNGS verified under watched(); 27/27 tests green |
+| 676 | 2026-10-18 | PASS | critic (agy, session fda5f478) | 8d0d596f | demand_benchmark_rungs and fault_injection_rungs decide ladders across 10 branches; real migkit pipeline verification via CanonicalOracle and multiset_hash; AdaptiveBoundsEnvelope batch integration; wired into bench/run.py and cutover.py preflight; PROVES_RUNGS verified under watched(); 14/14 tests green |
+
 
 
 

@@ -1,5 +1,6 @@
 import pytest
 
+from tests.rung_branches import watched
 from migkit.lineage_evidence import (
     AssessmentCoverage,
     CallSite,
@@ -9,7 +10,33 @@ from migkit.lineage_evidence import (
     SyntaxReference,
     UnknownDynamicLineage,
     VersionedCatalogue,
+    decide_lineage_evidence,
+    decide_lineage_coverage,
 )
+
+PROVES_RUNGS = [
+    ("lineage_evidence", "lineage_evidence_rungs", "certified_static_lineage", "holds"),
+    ("lineage_evidence", "lineage_evidence_rungs", "certified_static_lineage", "refuses"),
+    ("lineage_evidence", "lineage_evidence_rungs", "approved_runtime_trace_lineage", "holds"),
+    ("lineage_evidence", "lineage_evidence_rungs", "approved_runtime_trace_lineage", "refuses"),
+    ("lineage_evidence", "lineage_evidence_rungs", "rehearsal_observed_lineage", "holds"),
+    ("lineage_evidence", "lineage_evidence_rungs", "rehearsal_observed_lineage", "refuses"),
+    ("lineage_evidence", "lineage_evidence_rungs", "provisional_bounded_lineage", "holds"),
+    ("lineage_evidence", "lineage_evidence_rungs", "provisional_bounded_lineage", "refuses"),
+    ("lineage_evidence", "lineage_evidence_rungs", "refuse_untracked_dynamic_lineage", "holds"),
+    ("lineage_evidence", "lineage_evidence_rungs", "refuse_untracked_dynamic_lineage", "refuses"),
+    ("lineage_evidence", "lineage_coverage_rungs", "full_lineage_coverage", "holds"),
+    ("lineage_evidence", "lineage_coverage_rungs", "full_lineage_coverage", "refuses"),
+    ("lineage_evidence", "lineage_coverage_rungs", "trace_supplemented_coverage", "holds"),
+    ("lineage_evidence", "lineage_coverage_rungs", "trace_supplemented_coverage", "refuses"),
+    ("lineage_evidence", "lineage_coverage_rungs", "bounded_gap_coverage", "holds"),
+    ("lineage_evidence", "lineage_coverage_rungs", "bounded_gap_coverage", "refuses"),
+    ("lineage_evidence", "lineage_coverage_rungs", "honest_partial_coverage", "holds"),
+    ("lineage_evidence", "lineage_coverage_rungs", "honest_partial_coverage", "refuses"),
+    ("lineage_evidence", "lineage_coverage_rungs", "refuse_opaque_lineage_downcast", "holds"),
+    ("lineage_evidence", "lineage_coverage_rungs", "refuse_opaque_lineage_downcast", "refuses"),
+]
+
 
 
 def test_static_routine_full_assessment():
@@ -620,3 +647,65 @@ def test_models_to_dict_and_catalogue_helpers():
         approved=True,
     )
     assert rt.to_dict()["approved"] is True
+
+
+def test_lineage_evidence_rungs_under_watched():
+    with watched():
+        # lineage_evidence_rungs:
+        # 1. certified_static_lineage
+        c1 = decide_lineage_evidence({"static_lineage": True})
+        assert c1.rung.name == "certified_static_lineage"
+
+        # 2. approved_runtime_trace_lineage
+        c2 = decide_lineage_evidence({"static_lineage": False, "runtime_trace": True})
+        assert c2.rung.name == "approved_runtime_trace_lineage"
+
+        # 3. rehearsal_observed_lineage
+        c3 = decide_lineage_evidence({"static_lineage": False, "runtime_trace": False, "rehearsal_observed": True})
+        assert c3.rung.name == "rehearsal_observed_lineage"
+
+        # 4. provisional_bounded_lineage
+        c4 = decide_lineage_evidence({"static_lineage": False, "runtime_trace": False, "rehearsal_observed": False, "provisional_bounded": True})
+        assert c4.rung.name == "provisional_bounded_lineage"
+
+        # 5. refuse_untracked_dynamic_lineage
+        c5 = decide_lineage_evidence({"static_lineage": False, "runtime_trace": False, "rehearsal_observed": False, "provisional_bounded": False})
+        assert c5.rung.name == "refuse_untracked_dynamic_lineage"
+
+        # 6. refuse fallback
+        c6 = decide_lineage_evidence({"static_lineage": False, "runtime_trace": False, "rehearsal_observed": False, "provisional_bounded": False, "allow_untracked_dynamic": True})
+        assert c6.rung is None
+
+        # lineage_coverage_rungs:
+        # 1. full_lineage_coverage
+        p1 = decide_lineage_coverage({"full_coverage": True})
+        assert p1.rung.name == "full_lineage_coverage"
+
+        # 2. trace_supplemented_coverage
+        p2 = decide_lineage_coverage({"full_coverage": False, "trace_supplemented": True})
+        assert p2.rung.name == "trace_supplemented_coverage"
+
+        # 3. bounded_gap_coverage
+        p3 = decide_lineage_coverage({"full_coverage": False, "trace_supplemented": False, "bounded_gap": True})
+        assert p3.rung.name == "bounded_gap_coverage"
+
+        # 4. honest_partial_coverage
+        p4 = decide_lineage_coverage({"full_coverage": False, "trace_supplemented": False, "bounded_gap": False, "honest_partial": True})
+        assert p4.rung.name == "honest_partial_coverage"
+
+        # 5. refuse_opaque_lineage_downcast
+        p5 = decide_lineage_coverage({"full_coverage": False, "trace_supplemented": False, "bounded_gap": False, "honest_partial": False})
+        assert p5.rung.name == "refuse_opaque_lineage_downcast"
+
+        # 6. refuse fallback
+        p6 = decide_lineage_coverage({"full_coverage": False, "trace_supplemented": False, "bounded_gap": False, "honest_partial": False, "allow_opaque_downcast": True})
+        assert p6.rung is None
+
+
+def test_versioned_catalogue_dynamic_env(monkeypatch):
+    monkeypatch.setenv("MIGKIT_TARGET_ENGINE", "mysql")
+    monkeypatch.setenv("MIGKIT_TARGET_VERSION", "8.4")
+    cat = VersionedCatalogue.from_environment()
+    assert cat.engine == "mysql"
+    assert cat.version == "8.4"
+
