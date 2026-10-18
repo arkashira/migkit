@@ -323,3 +323,103 @@ def test_cutover_reverse_rows_flags_unratcheted_headroom():
     assert hit, rows
     assert hit[0][0] == "fail"
     assert "public.orders_seq" in hit[0][1]
+
+
+PROVES_RUNGS = [
+    ("ratchet", "headroom_ratchet_rungs", "adequate_headroom_verified", "holds"),
+    ("ratchet", "headroom_ratchet_rungs", "adequate_headroom_verified", "refuses"),
+    ("ratchet", "headroom_ratchet_rungs", "automated_forward_ratchet_applied", "holds"),
+    ("ratchet", "headroom_ratchet_rungs", "automated_forward_ratchet_applied", "refuses"),
+    ("ratchet", "headroom_ratchet_rungs", "replication_slot_pre_snapshot_verified", "holds"),
+    ("ratchet", "headroom_ratchet_rungs", "replication_slot_pre_snapshot_verified", "refuses"),
+    ("ratchet", "headroom_ratchet_rungs", "reversible_rollback_script_generation", "holds"),
+    ("ratchet", "headroom_ratchet_rungs", "reversible_rollback_script_generation", "refuses"),
+    ("ratchet", "headroom_ratchet_rungs", "refuse_unratcheted_cutover_deficit", "holds"),
+    ("ratchet", "headroom_ratchet_rungs", "refuse_unratcheted_cutover_deficit", "refuses"),
+]
+
+from tests.rung_branches import branch, watched, HOLDS, REFUSES
+
+
+def test_headroom_ratchet_decide_ladder_all_branches():
+    with watched() as seen:
+        c = ratchet.decide_headroom_ratchet({
+            "current_seq": 25000,
+            "greatest_max": 10000,
+            "headroom": 10000,
+        })
+    assert branch(seen, "adequate_headroom_verified") == [HOLDS]
+    assert c.rung.name == "adequate_headroom_verified"
+
+    with watched() as seen:
+        c = ratchet.decide_headroom_ratchet({
+            "deficit_detected": True,
+            "forward_applied": True,
+        })
+    assert branch(seen, "adequate_headroom_verified") == [REFUSES]
+    assert branch(seen, "automated_forward_ratchet_applied") == [HOLDS]
+    assert c.rung.name == "automated_forward_ratchet_applied"
+
+    with watched() as seen:
+        c = ratchet.decide_headroom_ratchet({
+            "deficit_detected": True,
+            "forward_failed": True,
+            "slot_verified": True,
+        })
+    assert branch(seen, "automated_forward_ratchet_applied") == [REFUSES]
+    assert branch(seen, "replication_slot_pre_snapshot_verified") == [HOLDS]
+    assert c.rung.name == "replication_slot_pre_snapshot_verified"
+
+    with watched() as seen:
+        c = ratchet.decide_headroom_ratchet({
+            "deficit_detected": True,
+            "forward_failed": True,
+            "slot_missing": True,
+            "has_rollback_script": True,
+        })
+    assert branch(seen, "replication_slot_pre_snapshot_verified") == [REFUSES]
+    assert branch(seen, "reversible_rollback_script_generation") == [HOLDS]
+    assert c.rung.name == "reversible_rollback_script_generation"
+
+    with watched() as seen:
+        c = ratchet.decide_headroom_ratchet({
+            "deficit_detected": True,
+            "forward_failed": True,
+            "slot_missing": True,
+            "rollback_omitted": True,
+            "explicit_deficit_override": True,
+        })
+    assert branch(seen, "reversible_rollback_script_generation") == [REFUSES]
+    assert branch(seen, "refuse_unratcheted_cutover_deficit") == [HOLDS]
+    assert c.rung.name == "refuse_unratcheted_cutover_deficit"
+
+    with watched() as seen:
+        try:
+            ratchet.decide_headroom_ratchet({
+                "deficit_detected": True,
+                "forward_failed": True,
+                "slot_missing": True,
+                "rollback_omitted": True,
+                "unratcheted_refused": True,
+            })
+        except Exception:
+            pass
+    assert branch(seen, "refuse_unratcheted_cutover_deficit") == [REFUSES]
+
+
+def test_dynamic_headroom_getter(monkeypatch):
+    monkeypatch.setenv("MIGKIT_HEADROOM_RATCHET", "25000")
+    assert ratchet.get_default_headroom() == 25000
+
+
+def test_build_headroom_ratchet_plan_refuses_on_exception():
+    class FailingEngine:
+        engine = "postgres"
+
+        def _psql(self, side, db, q):
+            raise RuntimeError("database unreachable")
+
+    plan = ratchet.build_headroom_ratchet_plan(FailingEngine(), "mydb")
+    assert plan.refused is True
+    assert any("database unreachable" in r for r in plan.refusal_reasons)
+

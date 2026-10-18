@@ -381,13 +381,18 @@ def keepalives(ep=None):
     from .. import envkeys
     from ..keepalive import DEFAULT_KEEPIDLE, DEFAULT_KEEPINTVL, DEFAULT_KEEPCNT
     opts = ep.options if ep and hasattr(ep, "options") else {}
-    env_val = os.environ.get("MIGKIT_KEEPALIVE_IDLE")
-    if env_val:
-        idle = envkeys.number("MIGKIT_KEEPALIVE_IDLE")
-    else:
+    if opts and ("tcp_keepidle" in opts or "keepalive_idle" in opts):
         idle = int(opts.get("tcp_keepidle", opts.get("keepalive_idle", DEFAULT_KEEPIDLE)))
-    interval = int(opts.get("tcp_keepintvl", opts.get("keepalive_interval", DEFAULT_KEEPINTVL)))
-    count = int(opts.get("tcp_keepcnt", opts.get("keepalive_count", DEFAULT_KEEPCNT)))
+    else:
+        idle = int(envkeys.number("MIGKIT_KEEPALIVE_IDLE") or DEFAULT_KEEPIDLE)
+    if opts and ("tcp_keepintvl" in opts or "keepalive_interval" in opts):
+        interval = int(opts.get("tcp_keepintvl", opts.get("keepalive_interval", DEFAULT_KEEPINTVL)))
+    else:
+        interval = int(envkeys.number("MIGKIT_KEEPALIVE_INTERVAL") or DEFAULT_KEEPINTVL)
+    if opts and ("tcp_keepcnt" in opts or "keepalive_count" in opts):
+        count = int(opts.get("tcp_keepcnt", opts.get("keepalive_count", DEFAULT_KEEPCNT)))
+    else:
+        count = int(envkeys.number("MIGKIT_KEEPALIVE_COUNT") or DEFAULT_KEEPCNT)
     return {"keepalives": 1,
             "keepalives_idle": idle,
             "keepalives_interval": interval,
@@ -12788,8 +12793,13 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
             self, db, headroom=headroom, auto_ratchet=auto_ratchet, refuse_on_deficit=refuse_on_deficit
         )
 
-    def _export_snapshot(self, side, db, slot_name=None, verify_target_slot=False):
-        if verify_target_slot or (self.hop and getattr(self.hop, "options", {}).get("verify_slot_before_snapshot")):
+    def _export_snapshot(self, side, db, slot_name=None, verify_target_slot=None):
+        from .. import envkeys
+        do_verify = verify_target_slot if verify_target_slot is not None else (
+            envkeys.flag("MIGKIT_VERIFY_SLOT_BEFORE_SNAPSHOT")
+            or bool(self.hop and getattr(self.hop, "options", {}).get("verify_slot_before_snapshot"))
+        )
+        if do_verify:
             self.authorize_snapshot_export(db, slot_name=slot_name, side="dst" if side == "src" else "src")
         try:
             conn = self._connect(side, db)

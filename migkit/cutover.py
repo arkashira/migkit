@@ -1100,8 +1100,8 @@ def _slot_rows(hop, eng, d):
                                   f" where database = '{d}'"
                                   " and slot_name not like 'migkit\\_delta\\_%'"
                                   " and slot_name not like 'pg\\_%\\_sync\\_%'")
-    except Exception:  # noqa: BLE001
-        return []
+    except Exception as e:
+        return [("warn", f"{d}: failed to inspect source replication slots: {e}")]
     others = [s for s in got.split() if s not in mine]
     if not others:
         return []

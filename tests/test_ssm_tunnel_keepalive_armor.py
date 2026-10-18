@@ -302,3 +302,89 @@ def test_postgres_connect_socket_keepalives(monkeypatch):
         for s in created_socks:
             s.close()
 
+
+PROVES_RUNGS = [
+    ("keepalive", "keepalive_armor_rungs", "tcp_socket_keepalive_applied", "holds"),
+    ("keepalive", "keepalive_armor_rungs", "tcp_socket_keepalive_applied", "refuses"),
+    ("keepalive", "keepalive_armor_rungs", "background_heartbeat_session_armor", "holds"),
+    ("keepalive", "keepalive_armor_rungs", "background_heartbeat_session_armor", "refuses"),
+    ("keepalive", "keepalive_armor_rungs", "keepalive_custom_parameters_envelope", "holds"),
+    ("keepalive", "keepalive_armor_rungs", "keepalive_custom_parameters_envelope", "refuses"),
+    ("keepalive", "keepalive_armor_rungs", "keepalive_connection_resilience", "holds"),
+    ("keepalive", "keepalive_armor_rungs", "keepalive_connection_resilience", "refuses"),
+    ("keepalive", "keepalive_armor_rungs", "refuse_unarmored_proxy_connection", "holds"),
+    ("keepalive", "keepalive_armor_rungs", "refuse_unarmored_proxy_connection", "refuses"),
+]
+
+from tests.rung_branches import branch, watched, HOLDS, REFUSES
+
+
+def test_keepalive_armor_decide_ladder_all_branches():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        with watched() as seen:
+            c = keepalive.decide_keepalive_armor({
+                "sock": s,
+                "keepalive_applied": True,
+            })
+        assert branch(seen, "tcp_socket_keepalive_applied") == [HOLDS]
+        assert c.rung.name == "tcp_socket_keepalive_applied"
+
+        with watched() as seen:
+            c = keepalive.decide_keepalive_armor({
+                "disabled": True,
+                "heartbeat_active": True,
+            })
+        assert branch(seen, "tcp_socket_keepalive_applied") == [REFUSES]
+        assert branch(seen, "background_heartbeat_session_armor") == [HOLDS]
+        assert c.rung.name == "background_heartbeat_session_armor"
+
+        with watched() as seen:
+            c = keepalive.decide_keepalive_armor({
+                "disabled": True,
+                "heartbeat_failed": True,
+                "idle": 30, "interval": 10, "count": 5,
+            })
+        assert branch(seen, "background_heartbeat_session_armor") == [REFUSES]
+        assert branch(seen, "keepalive_custom_parameters_envelope") == [HOLDS]
+        assert c.rung.name == "keepalive_custom_parameters_envelope"
+
+        with watched() as seen:
+            c = keepalive.decide_keepalive_armor({
+                "disabled": True,
+                "heartbeat_failed": True,
+                "envelope_violation": True,
+                "long_query_in_progress": True,
+            })
+        assert branch(seen, "keepalive_custom_parameters_envelope") == [REFUSES]
+        assert branch(seen, "keepalive_connection_resilience") == [HOLDS]
+        assert c.rung.name == "keepalive_connection_resilience"
+
+        with watched() as seen:
+            c = keepalive.decide_keepalive_armor({
+                "disabled": True,
+                "heartbeat_failed": True,
+                "envelope_violation": True,
+                "resilience_compromised": True,
+                "explicit_unarmored_bypass": True,
+            })
+        assert branch(seen, "keepalive_connection_resilience") == [REFUSES]
+        assert branch(seen, "refuse_unarmored_proxy_connection") == [HOLDS]
+        assert c.rung.name == "refuse_unarmored_proxy_connection"
+
+        with watched() as seen:
+            try:
+                keepalive.decide_keepalive_armor({
+                    "disabled": True,
+                    "heartbeat_failed": True,
+                    "envelope_violation": True,
+                    "resilience_compromised": True,
+                    "unarmored_refused": True,
+                })
+            except Exception:
+                pass
+        assert branch(seen, "refuse_unarmored_proxy_connection") == [REFUSES]
+    finally:
+        s.close()
+
+

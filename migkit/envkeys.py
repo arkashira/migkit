@@ -168,7 +168,7 @@ VARS = {
     "MIGKIT_READ_TIMEOUT": Var("seconds one MySQL read may take", "whole",
                                3600),
     "MIGKIT_KEEPALIVE_IDLE": Var("seconds a quiet connection waits before"
-                                 " it is probed", "whole", 60, least=1),
+                                 " it is probed", "whole", 15, least=1),
     "MIGKIT_SEED_START_WAIT": Var("seconds a copy of the pages is given to"
                                   " start", "number"),
     "MIGKIT_CLOUD_POLL": Var("seconds between looks at a cloud's restore"
@@ -187,6 +187,16 @@ VARS = {
                                         "whole", 16, least=1),
     "MIGKIT_MERKLE_MAX_DEPTH": Var("maximum recursion depth for Merkle tree bisection",
                                    "whole", 8, least=1),
+    "MIGKIT_KEEPALIVE_INTERVAL": Var("seconds between keepalive probes",
+                                     "whole", 5, least=1),
+    "MIGKIT_KEEPALIVE_COUNT": Var("number of unacknowledged keepalive probes before declaring failure",
+                                  "whole", 3, least=1),
+    "MIGKIT_HEARTBEAT_INTERVAL": Var("seconds between application background heartbeats",
+                                     "number", 20.0, least=1.0),
+    "MIGKIT_HEADROOM_RATCHET": Var("sequence headroom addition before syncback cutover",
+                                   "whole", 10000, least=1),
+    "MIGKIT_VERIFY_SLOT_BEFORE_SNAPSHOT": Var("verify logical replication slot exists before snapshot export",
+                                              "flag", False),
     # ---- schedule -------------------------------------------------------
     "MIGKIT_SCHEDULED": Var("the command runs in its hop's schedule",
                             "flag", False),

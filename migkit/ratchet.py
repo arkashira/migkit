@@ -1,8 +1,17 @@
 import dataclasses
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from . import decide
 
 HEADROOM_DEFAULT = 10000
+
+
+def get_default_headroom() -> int:
+    if HEADROOM_DEFAULT != 10000:
+        return int(HEADROOM_DEFAULT)
+    from . import envkeys
+    v = envkeys.number("MIGKIT_HEADROOM_RATCHET")
+    return int(v) if v is not None else HEADROOM_DEFAULT
 
 
 class RatchetError(RuntimeError):
@@ -332,8 +341,14 @@ def build_headroom_ratchet_plan(
                 sources[name] = sm
                 targets[name] = dm
                 current[name] = cv
-        except Exception:
-            pass
+        except Exception as e:
+            return HeadroomRatchetPlan(
+                engine="postgres",
+                db=db,
+                headroom=headroom,
+                refused=True,
+                refusal_reasons=[f"failed to read sequence metadata for {db}: {e}"],
+            )
         return plan_ratchet(sources, targets, current, engine="postgres", db=db, headroom=headroom)
 
     if "mysql" in eng_name or "mariadb" in eng_name:
@@ -349,8 +364,14 @@ def build_headroom_ratchet_plan(
                 sources[tbl] = sv
                 targets[tbl] = dv
                 current[tbl] = dv
-        except Exception:
-            pass
+        except Exception as e:
+            return HeadroomRatchetPlan(
+                engine="mysql",
+                db=db,
+                headroom=headroom,
+                refused=True,
+                refusal_reasons=[f"failed to read counter metadata for {db}: {e}"],
+            )
         return plan_ratchet(sources, targets, current, engine="mysql", db=db, headroom=headroom)
 
     return plan_ratchet(sources, targets, current, engine=eng_name, db=db, headroom=headroom)
@@ -359,9 +380,11 @@ def build_headroom_ratchet_plan(
 def execute_headroom_ratchet(
     engine: Any,
     db: str,
-    headroom: int = HEADROOM_DEFAULT,
+    headroom: Optional[int] = None,
     apply: bool = True,
 ) -> HeadroomRatchetPlan:
+    if headroom is None:
+        headroom = get_default_headroom()
     plan = build_headroom_ratchet_plan(engine, db, headroom=headroom)
     if apply and plan.forward_ddl:
         plan.apply_forward(engine, side="dst")
@@ -371,10 +394,12 @@ def execute_headroom_ratchet(
 def pre_syncback_cutover_check(
     engine: Any,
     db: str,
-    headroom: int = HEADROOM_DEFAULT,
+    headroom: Optional[int] = None,
     auto_ratchet: bool = False,
     refuse_on_deficit: bool = True,
 ) -> HeadroomRatchetPlan:
+    if headroom is None:
+        headroom = get_default_headroom()
     if auto_ratchet:
         plan = execute_headroom_ratchet(engine, db, headroom=headroom, apply=True)
     else:
@@ -384,3 +409,100 @@ def pre_syncback_cutover_check(
         raise HeadroomDeficitError(f"cutover refused: {'; '.join(plan.refusal_reasons)}")
 
     return plan
+
+
+def _prove_adequate_headroom(facts: Dict[str, Any]) -> bool:
+    if facts.get("deficit_detected"):
+        return False
+    current = facts.get("current_seq", 0)
+    greatest = facts.get("greatest_max", 0)
+    headroom = facts.get("headroom", get_default_headroom())
+    return int(current) >= int(greatest) + int(headroom)
+
+
+def _prove_forward_ratchet_applied(facts: Dict[str, Any]) -> bool:
+    if facts.get("forward_failed"):
+        return False
+    return bool(facts.get("forward_applied") or facts.get("applied"))
+
+
+def _prove_slot_pre_snapshot_verified(facts: Dict[str, Any]) -> bool:
+    if facts.get("slot_missing"):
+        return False
+    return bool(facts.get("slot_verified") or facts.get("slot_exists"))
+
+
+def _prove_rollback_script_generation(facts: Dict[str, Any]) -> bool:
+    if facts.get("rollback_omitted"):
+        return False
+    return bool(facts.get("rollback_ddl") or facts.get("has_rollback_script"))
+
+
+def _prove_refuse_unratcheted_deficit(facts: Dict[str, Any]) -> bool:
+    if facts.get("unratcheted_refused"):
+        return False
+    return bool(facts.get("explicit_deficit_override"))
+
+
+def headroom_ratchet_rungs() -> Tuple[decide.Rung, ...]:
+    return (
+        decide.Rung(
+            "adequate_headroom_verified",
+            "verify target sequences possess adequate headroom over greatest source/target max",
+            needs=(
+                decide.Need(
+                    "target sequence value meets or exceeds greatest max plus headroom",
+                    _prove_adequate_headroom,
+                    "target sequence lacks required headroom buffer",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "automated_forward_ratchet_applied",
+            "apply automated forward ratchet DDL ensuring non-colliding cutover sequence space",
+            needs=(
+                decide.Need(
+                    "forward ratchet DDL applied successfully to target",
+                    _prove_forward_ratchet_applied,
+                    "forward ratchet DDL unapplied or failed during execution",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "replication_slot_pre_snapshot_verified",
+            "verify logical replication slot existence before authorizing snapshot export",
+            needs=(
+                decide.Need(
+                    "replication slot confirmed present on publisher before snapshot",
+                    _prove_slot_pre_snapshot_verified,
+                    "replication slot missing on publisher prior to snapshot export",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "reversible_rollback_script_generation",
+            "generate reversible rollback script restoring previous sequence counters",
+            needs=(
+                decide.Need(
+                    "rollback statements generated for all ratcheted items",
+                    _prove_rollback_script_generation,
+                    "rollback statements incomplete or missing previous values",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_unratcheted_cutover_deficit",
+            "refuse cutover execution when sequence deficit remains un-ratcheted",
+            needs=(
+                decide.Need(
+                    "all sequence deficits resolved or explicit unrefused override",
+                    _prove_refuse_unratcheted_deficit,
+                    "cutover refused due to unresolved sequence headroom deficit",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_headroom_ratchet(facts: Dict[str, Any]) -> decide.Choice:
+    return decide.climb("headroom ratchet", headroom_ratchet_rungs(), facts=decide.Facts(facts))
