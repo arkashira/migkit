@@ -9,6 +9,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from . import decide
+
 
 class AdaptiveBoundsError(Exception):
     pass
@@ -16,6 +18,41 @@ class AdaptiveBoundsError(Exception):
 
 class InfeasibleBoundsError(AdaptiveBoundsError):
     pass
+
+
+def get_default_worker_bounds(
+    min_w: Optional[int] = None,
+    start_w: Optional[int] = None,
+    max_w: Optional[int] = None,
+) -> Tuple[int, int, int]:
+    env_min = os.environ.get("MIGKIT_MIN_WORKERS")
+    resolved_min = int(env_min) if env_min else (min_w if min_w is not None else 1)
+
+    cpu = os.cpu_count() or 4
+    env_start = os.environ.get("MIGKIT_START_WORKERS")
+    resolved_start = int(env_start) if env_start else (start_w if start_w is not None else min(2, cpu))
+
+    env_max = os.environ.get("MIGKIT_MAX_WORKERS")
+    resolved_max = int(env_max) if env_max else (max_w if max_w is not None else max(8, cpu * 2))
+
+    return resolved_min, max(resolved_min, resolved_start), max(resolved_start, resolved_max)
+
+
+def get_default_batch_bounds(
+    min_b: Optional[int] = None,
+    start_b: Optional[int] = None,
+    max_b: Optional[int] = None,
+) -> Tuple[int, int, int]:
+    env_min = os.environ.get("MIGKIT_MIN_BATCH_SIZE")
+    resolved_min = int(env_min) if env_min else (min_b if min_b is not None else 100)
+
+    env_start = os.environ.get("MIGKIT_START_BATCH_SIZE")
+    resolved_start = int(env_start) if env_start else (start_b if start_b is not None else 1000)
+
+    env_max = os.environ.get("MIGKIT_MAX_BATCH_SIZE")
+    resolved_max = int(env_max) if env_max else (max_b if max_b is not None else 50000)
+
+    return resolved_min, max(resolved_min, resolved_start), max(resolved_start, resolved_max)
 
 
 class CutoverStatus(str, Enum):
@@ -91,6 +128,47 @@ class AdaptiveBoundsEnvelope:
             max_batch_size=int(data.get("max_batch_size", 50000)),
             max_connections_per_worker=int(data.get("max_connections_per_worker", 2)),
             name=str(data.get("name", "default")),
+        )
+
+    @classmethod
+    def from_environment(
+        cls,
+        min_workers: Optional[int] = None,
+        start_workers: Optional[int] = None,
+        max_workers: Optional[int] = None,
+        min_batch_size: Optional[int] = None,
+        start_batch_size: Optional[int] = None,
+        max_batch_size: Optional[int] = None,
+        name: str = "env_adaptive",
+    ) -> AdaptiveBoundsEnvelope:
+        min_w, start_w, max_w = get_default_worker_bounds(min_workers, start_workers, max_workers)
+        min_b, start_b, max_b = get_default_batch_bounds(min_batch_size, start_batch_size, max_batch_size)
+        return cls(
+            min_workers=min_w,
+            start_workers=start_w,
+            max_workers=max_w,
+            min_batch_size=min_b,
+            start_batch_size=start_b,
+            max_batch_size=max_b,
+            name=name,
+        )
+
+    @classmethod
+    def from_topology(
+        cls,
+        topology: Any,
+        connections_per_worker: int = 2,
+        name: str = "topology_envelope",
+    ) -> AdaptiveBoundsEnvelope:
+        eff_max = getattr(topology, "effective_max_workers", None)
+        max_w = max(1, eff_max(connections_per_worker) if callable(eff_max) else 8)
+        start_w = max(1, min(max_w, max_w // 2 or 1))
+        min_w = 1
+        return cls(
+            min_workers=min_w,
+            start_workers=start_w,
+            max_workers=max_w,
+            name=name,
         )
 
 
@@ -172,7 +250,9 @@ class ClusterTopology:
         return sum(n.max_connections for n in self.nodes.values() if n.status == "active")
 
     def effective_max_workers(self, connections_per_worker: int = 2) -> int:
-        conn_cap = self.total_connections() // max(1, connections_per_worker)
+        conns = self.total_connections()
+        cpu_bound = (os.cpu_count() or 4) * 4
+        conn_cap = conns // max(1, connections_per_worker) if conns > 0 else cpu_bound
         if self.max_cluster_workers is not None:
             return min(self.max_cluster_workers, conn_cap)
         return conn_cap
@@ -644,3 +724,176 @@ class PartitionRoutingJournal:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         return cls.from_dict(data, journal_path=path)
+
+
+# Decide ladders for Adaptive Bounds and Partition Routing
+
+def _prove_topology_capacity_constrained(facts: decide.Facts) -> bool:
+    return bool(facts.get("topology_constrained") and not facts.get("refused"))
+
+
+def _prove_latency_aimd_regulated(facts: decide.Facts) -> bool:
+    return bool(facts.get("aimd_regulated") and not facts.get("refused"))
+
+
+def _prove_conservative_cold_start(facts: decide.Facts) -> bool:
+    return bool(facts.get("cold_start") and not facts.get("refused"))
+
+
+def _prove_partition_throughput_optimized(facts: decide.Facts) -> bool:
+    return bool(facts.get("throughput_optimized") and not facts.get("refused"))
+
+
+def _prove_refuse_infeasible_overcommit(facts: decide.Facts) -> bool:
+    return not bool(facts.get("allow_infeasible_overcommit"))
+
+
+def adaptive_bounds_rungs() -> Tuple[decide.Rung, ...]:
+    return (
+        decide.Rung(
+            "topology_capacity_constrained",
+            "constrain worker count strictly within physical cluster connection and node capacity",
+            needs=(
+                decide.Need(
+                    "topology capacity boundaries verified",
+                    _prove_topology_capacity_constrained,
+                    "topology capacity constraint not satisfied",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "latency_aimd_regulated",
+            "adaptively regulate batch size and concurrency based on real-time query latency feedback",
+            needs=(
+                decide.Need(
+                    "aimd latency regulation active",
+                    _prove_latency_aimd_regulated,
+                    "aimd latency regulation inactive",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "conservative_cold_start",
+            "initialize migration worker allocation with minimum safe baseline prior to scale-up",
+            needs=(
+                decide.Need(
+                    "conservative cold start certified",
+                    _prove_conservative_cold_start,
+                    "cold start safety criteria not met",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "partition_throughput_optimized",
+            "scale batch sizing and worker allocation for maximum throughput across balanced partitions",
+            needs=(
+                decide.Need(
+                    "partition throughput optimization active",
+                    _prove_partition_throughput_optimized,
+                    "partition throughput optimization inactive",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_infeasible_overcommit",
+            "refuse envelope allocation when requested workers or batches violate feasibility boundaries",
+            needs=(
+                decide.Need(
+                    "infeasible overcommit refused",
+                    _prove_refuse_infeasible_overcommit,
+                    "infeasible overcommit detected",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_adaptive_bounds(facts: Dict[str, Any]) -> decide.Choice:
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("adaptive bounds envelope", adaptive_bounds_rungs(), fact_obj)
+
+
+def _prove_direct_endpoint_routing(facts: decide.Facts) -> bool:
+    return bool(facts.get("direct_routing") and not facts.get("refused"))
+
+
+def _prove_replica_read_offload(facts: decide.Facts) -> bool:
+    return bool(facts.get("replica_offload") and not facts.get("refused"))
+
+
+def _prove_split_partition_rebalancing(facts: decide.Facts) -> bool:
+    return bool(facts.get("split_rebalancing") and not facts.get("refused"))
+
+
+def _prove_coalesce_quiesced_partition(facts: decide.Facts) -> bool:
+    return bool(facts.get("coalesce_quiesced") and not facts.get("refused"))
+
+
+def _prove_refuse_unreachable_endpoint_route(facts: decide.Facts) -> bool:
+    return not bool(facts.get("allow_unreachable_endpoint"))
+
+
+def partition_routing_rungs() -> Tuple[decide.Rung, ...]:
+    return (
+        decide.Rung(
+            "direct_endpoint_routing",
+            "route migration partition directly to primary shard leader endpoint",
+            needs=(
+                decide.Need(
+                    "direct endpoint reachable",
+                    _prove_direct_endpoint_routing,
+                    "direct leader endpoint unreachable",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "replica_read_offload",
+            "offload read verification queries to healthy follower read replicas",
+            needs=(
+                decide.Need(
+                    "replica read offload available",
+                    _prove_replica_read_offload,
+                    "replica offload unavailable or lag exceeded",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "split_partition_rebalancing",
+            "dynamically route across split child partitions during active cutover",
+            needs=(
+                decide.Need(
+                    "split partition rebalancing certified",
+                    _prove_split_partition_rebalancing,
+                    "split partition routing not required",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "coalesce_quiesced_partition",
+            "coalesce routing paths when parent partitions complete and quiesce",
+            needs=(
+                decide.Need(
+                    "partition coalescing certified",
+                    _prove_coalesce_quiesced_partition,
+                    "partition coalescing criteria not met",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_unreachable_endpoint_route",
+            "refuse partition routing when destination node or endpoint is disconnected or unverified",
+            needs=(
+                decide.Need(
+                    "unreachable route refused",
+                    _prove_refuse_unreachable_endpoint_route,
+                    "unreachable endpoint route detected",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_partition_routing(facts: Dict[str, Any]) -> decide.Choice:
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("partition routing strategy", partition_routing_rungs(), fact_obj)
+

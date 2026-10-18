@@ -579,7 +579,10 @@ def native_move(hop, db, workers, go, log):
     means (`native_bulk`); the rest are left to the table copier, as every
     routing bulk path leaves them."""
     from . import planner
+    from .adaptive_bounds import AdaptiveBoundsEnvelope
     from .engines import get_engine
+    if workers is not None:
+        workers = AdaptiveBoundsEnvelope.from_environment().clamp(workers)
     eng = get_engine(hop)
     plan = planner.plan(hop, db, "native", eng.neutral_tables("src", db),
                         qualifier_for(hop), eng.table_facts("src", db))

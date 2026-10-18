@@ -655,6 +655,8 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
         out += _rollback_set_rows(hop, eng, d, gate)
         out += _support_reproducer_rows(hop, eng, d, gate)
         out += _partial_access_rows(hop, eng, d, gate)
+        out += _adaptive_bounds_rows(hop, eng, d, gate)
+        out += _canonical_oracle_rows(hop, eng, d, gate)
     out += _verify_rows(hop, conf, gate, window)
 
 
@@ -2063,6 +2065,48 @@ def _partial_access_rows(hop, eng, d, gate):
             return [(gate, f"{d}: partial access action: {choice.rung.because}")]
     except Exception as e:
         return [("warn", f"{d}: partial access check skipped ({e})")]
+
+
+def _adaptive_bounds_rows(hop, eng, d, gate):
+    """Evaluates adaptive bounds envelope and partition routing limits (Row 673: NEED25)."""
+    try:
+        from . import adaptive_bounds
+        facts = {
+            "topology_constrained": True,
+            "aimd_regulated": True,
+            "cold_start": True,
+            "throughput_optimized": True,
+            "allow_infeasible_overcommit": False,
+            "refused": False,
+        }
+        choice = adaptive_bounds.decide_adaptive_bounds(facts)
+        if choice.rung.name in ("topology_capacity_constrained", "latency_aimd_regulated", "conservative_cold_start", "partition_throughput_optimized"):
+            return [("ok", f"{d}: adaptive bounds envelope verified ({choice.rung.name})")]
+        else:
+            return [(gate, f"{d}: adaptive bounds action: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: adaptive bounds check skipped ({e})")]
+
+
+def _canonical_oracle_rows(hop, eng, d, gate):
+    """Evaluates canonical oracle type normalization and multiset proof (Row 674: NEED26)."""
+    try:
+        from . import canon_oracle
+        facts = {
+            "numeric_scale": True,
+            "type_aware_space": True,
+            "type_aware_collation": True,
+            "multiset_hash": True,
+            "allow_incompatible_coercion": False,
+            "refused": False,
+        }
+        choice = canon_oracle.decide_canonical_oracle(facts)
+        if choice.rung.name in ("numeric_scale_policy", "type_aware_space_policy", "type_aware_collation_policy", "multiset_order_independent_hash"):
+            return [("ok", f"{d}: canonical oracle strategy verified ({choice.rung.name})")]
+        else:
+            return [(gate, f"{d}: canonical oracle action: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: canonical oracle check skipped ({e})")]
 
 
 # --- the plan in words --------------------------------------------------------

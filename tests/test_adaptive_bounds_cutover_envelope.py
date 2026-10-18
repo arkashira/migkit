@@ -2,6 +2,7 @@ import os
 import tempfile
 import pytest
 
+from tests.rung_branches import watched
 from migkit.adaptive_bounds import (
     AdaptiveBoundsEnvelope,
     AdaptiveBoundsError,
@@ -15,7 +16,37 @@ from migkit.adaptive_bounds import (
     PartitionRoutingJournal,
     ShardInfo,
     ShardSplitRecord,
+    get_default_worker_bounds,
+    get_default_batch_bounds,
+    adaptive_bounds_rungs,
+    decide_adaptive_bounds,
+    partition_routing_rungs,
+    decide_partition_routing,
 )
+
+PROVES_RUNGS = [
+    ("adaptive_bounds", "adaptive_bounds_rungs", "topology_capacity_constrained", "holds"),
+    ("adaptive_bounds", "adaptive_bounds_rungs", "topology_capacity_constrained", "refuses"),
+    ("adaptive_bounds", "adaptive_bounds_rungs", "latency_aimd_regulated", "holds"),
+    ("adaptive_bounds", "adaptive_bounds_rungs", "latency_aimd_regulated", "refuses"),
+    ("adaptive_bounds", "adaptive_bounds_rungs", "conservative_cold_start", "holds"),
+    ("adaptive_bounds", "adaptive_bounds_rungs", "conservative_cold_start", "refuses"),
+    ("adaptive_bounds", "adaptive_bounds_rungs", "partition_throughput_optimized", "holds"),
+    ("adaptive_bounds", "adaptive_bounds_rungs", "partition_throughput_optimized", "refuses"),
+    ("adaptive_bounds", "adaptive_bounds_rungs", "refuse_infeasible_overcommit", "holds"),
+    ("adaptive_bounds", "adaptive_bounds_rungs", "refuse_infeasible_overcommit", "refuses"),
+    ("adaptive_bounds", "partition_routing_rungs", "direct_endpoint_routing", "holds"),
+    ("adaptive_bounds", "partition_routing_rungs", "direct_endpoint_routing", "refuses"),
+    ("adaptive_bounds", "partition_routing_rungs", "replica_read_offload", "holds"),
+    ("adaptive_bounds", "partition_routing_rungs", "replica_read_offload", "refuses"),
+    ("adaptive_bounds", "partition_routing_rungs", "split_partition_rebalancing", "holds"),
+    ("adaptive_bounds", "partition_routing_rungs", "split_partition_rebalancing", "refuses"),
+    ("adaptive_bounds", "partition_routing_rungs", "coalesce_quiesced_partition", "holds"),
+    ("adaptive_bounds", "partition_routing_rungs", "coalesce_quiesced_partition", "refuses"),
+    ("adaptive_bounds", "partition_routing_rungs", "refuse_unreachable_endpoint_route", "holds"),
+    ("adaptive_bounds", "partition_routing_rungs", "refuse_unreachable_endpoint_route", "refuses"),
+]
+
 
 
 def test_adaptive_bounds_envelope_valid():
@@ -488,3 +519,83 @@ def test_persist_without_path_raises_error():
 def test_load_nonexistent_file_raises_not_found():
     with pytest.raises(FileNotFoundError):
         PartitionRoutingJournal.load("/path/to/definitely/nonexistent/journal.json")
+
+
+def test_adaptive_bounds_rungs_under_watched():
+    with watched():
+        # adaptive_bounds_rungs:
+        # 1. topology_capacity_constrained
+        c1 = decide_adaptive_bounds({"topology_constrained": True})
+        assert c1.rung.name == "topology_capacity_constrained"
+
+        # 2. latency_aimd_regulated
+        c2 = decide_adaptive_bounds({"topology_constrained": False, "aimd_regulated": True})
+        assert c2.rung.name == "latency_aimd_regulated"
+
+        # 3. conservative_cold_start
+        c3 = decide_adaptive_bounds({"topology_constrained": False, "aimd_regulated": False, "cold_start": True})
+        assert c3.rung.name == "conservative_cold_start"
+
+        # 4. partition_throughput_optimized
+        c4 = decide_adaptive_bounds({"topology_constrained": False, "aimd_regulated": False, "cold_start": False, "throughput_optimized": True})
+        assert c4.rung.name == "partition_throughput_optimized"
+
+        # 5. refuse_infeasible_overcommit
+        c5 = decide_adaptive_bounds({"topology_constrained": False, "aimd_regulated": False, "cold_start": False, "throughput_optimized": False})
+        assert c5.rung.name == "refuse_infeasible_overcommit"
+
+        # 6. refuse fallback
+        c6 = decide_adaptive_bounds({"topology_constrained": False, "aimd_regulated": False, "cold_start": False, "throughput_optimized": False, "allow_infeasible_overcommit": True})
+        assert c6.rung is None
+
+        # partition_routing_rungs:
+        # 1. direct_endpoint_routing
+        p1 = decide_partition_routing({"direct_routing": True})
+        assert p1.rung.name == "direct_endpoint_routing"
+
+        # 2. replica_read_offload
+        p2 = decide_partition_routing({"direct_routing": False, "replica_offload": True})
+        assert p2.rung.name == "replica_read_offload"
+
+        # 3. split_partition_rebalancing
+        p3 = decide_partition_routing({"direct_routing": False, "replica_offload": False, "split_rebalancing": True})
+        assert p3.rung.name == "split_partition_rebalancing"
+
+        # 4. coalesce_quiesced_partition
+        p4 = decide_partition_routing({"direct_routing": False, "replica_offload": False, "split_rebalancing": False, "coalesce_quiesced": True})
+        assert p4.rung.name == "coalesce_quiesced_partition"
+
+        # 5. refuse_unreachable_endpoint_route
+        p5 = decide_partition_routing({"direct_routing": False, "replica_offload": False, "split_rebalancing": False, "coalesce_quiesced": False})
+        assert p5.rung.name == "refuse_unreachable_endpoint_route"
+
+        # 6. refuse fallback
+        p6 = decide_partition_routing({"direct_routing": False, "replica_offload": False, "split_rebalancing": False, "coalesce_quiesced": False, "allow_unreachable_endpoint": True})
+        assert p6.rung is None
+
+
+def test_dynamic_env_bounds_and_movers_wiring(monkeypatch):
+    monkeypatch.setenv("MIGKIT_MIN_WORKERS", "3")
+    monkeypatch.setenv("MIGKIT_START_WORKERS", "6")
+    monkeypatch.setenv("MIGKIT_MAX_WORKERS", "16")
+    monkeypatch.setenv("MIGKIT_MIN_BATCH_SIZE", "200")
+    monkeypatch.setenv("MIGKIT_START_BATCH_SIZE", "2500")
+    monkeypatch.setenv("MIGKIT_MAX_BATCH_SIZE", "60000")
+
+    w_bounds = get_default_worker_bounds()
+    assert w_bounds == (3, 6, 16)
+
+    b_bounds = get_default_batch_bounds()
+    assert b_bounds == (200, 2500, 60000)
+
+    env = AdaptiveBoundsEnvelope.from_environment()
+    assert env.min_workers == 3
+    assert env.start_workers == 6
+    assert env.max_workers == 16
+    assert env.clamp(1) == 3
+    assert env.clamp(30) == 16
+
+    topo = ClusterTopology(cluster_id="c1", max_cluster_workers=12)
+    topo_env = AdaptiveBoundsEnvelope.from_topology(topo)
+    assert topo_env.max_workers == 12
+

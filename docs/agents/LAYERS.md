@@ -26,12 +26,13 @@ A package imports its own rank and the ranks below it, never one above. A rank o
 
 Outside the rule: `tools` (the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them); `data` (the files migkit ships as resources).
 
-## Upward imports still listed: 431
+## Upward imports still listed: 432
 
 ### (not listed)
 
 - `migkit/ack_lattice.py:7` execution -> decision (`decide`)
 - `migkit/cancel_recovery.py:13` execution -> decision (`decide`)
+- `migkit/canon_oracle.py:11` conversion -> decision (`decide`)
 - `migkit/checkpoint.py:33` persistence -> decision (`sizing`)
 - `migkit/config.py:446` configuration -> execution (`keepalive`)
 - `migkit/control_upgrade.py:15` persistence -> decision (`decide`)

@@ -5,6 +5,31 @@ import pytest
 
 from migkit import canon_oracle as co
 from migkit import canon
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("canon_oracle", "canonical_oracle_rungs", "numeric_scale_policy", "holds"),
+    ("canon_oracle", "canonical_oracle_rungs", "numeric_scale_policy", "refuses"),
+    ("canon_oracle", "canonical_oracle_rungs", "type_aware_space_policy", "holds"),
+    ("canon_oracle", "canonical_oracle_rungs", "type_aware_space_policy", "refuses"),
+    ("canon_oracle", "canonical_oracle_rungs", "type_aware_collation_policy", "holds"),
+    ("canon_oracle", "canonical_oracle_rungs", "type_aware_collation_policy", "refuses"),
+    ("canon_oracle", "canonical_oracle_rungs", "multiset_order_independent_hash", "holds"),
+    ("canon_oracle", "canonical_oracle_rungs", "multiset_order_independent_hash", "refuses"),
+    ("canon_oracle", "canonical_oracle_rungs", "refuse_incompatible_type_coercion", "holds"),
+    ("canon_oracle", "canonical_oracle_rungs", "refuse_incompatible_type_coercion", "refuses"),
+    ("canon_oracle", "canonical_policy_rungs", "preserve_exact_scale", "holds"),
+    ("canon_oracle", "canonical_policy_rungs", "preserve_exact_scale", "refuses"),
+    ("canon_oracle", "canonical_policy_rungs", "pad_fixed_space", "holds"),
+    ("canon_oracle", "canonical_policy_rungs", "pad_fixed_space", "refuses"),
+    ("canon_oracle", "canonical_policy_rungs", "normalize_unicode_collation", "holds"),
+    ("canon_oracle", "canonical_policy_rungs", "normalize_unicode_collation", "refuses"),
+    ("canon_oracle", "canonical_policy_rungs", "signed_zero_numeric_equal", "holds"),
+    ("canon_oracle", "canonical_policy_rungs", "signed_zero_numeric_equal", "refuses"),
+    ("canon_oracle", "canonical_policy_rungs", "refuse_lossy_downcast", "holds"),
+    ("canon_oracle", "canonical_policy_rungs", "refuse_lossy_downcast", "refuses"),
+]
+
 
 
 def test_decimal_scale_and_leading_zeros():
@@ -253,3 +278,57 @@ def test_version_and_engine_awareness():
     assert orc_pg.type_spec.cls == "decimal"
     assert orc_pg.type_spec.precision == 12
     assert orc_pg.type_spec.scale == 4
+
+
+def test_canonical_oracle_rungs_under_watched():
+    with watched():
+        # canonical_oracle_rungs:
+        # 1. numeric_scale_policy
+        o1 = co.decide_canonical_oracle({"numeric_scale": True})
+        assert o1.rung.name == "numeric_scale_policy"
+
+        # 2. type_aware_space_policy
+        o2 = co.decide_canonical_oracle({"numeric_scale": False, "type_aware_space": True})
+        assert o2.rung.name == "type_aware_space_policy"
+
+        # 3. type_aware_collation_policy
+        o3 = co.decide_canonical_oracle({"numeric_scale": False, "type_aware_space": False, "type_aware_collation": True})
+        assert o3.rung.name == "type_aware_collation_policy"
+
+        # 4. multiset_order_independent_hash
+        o4 = co.decide_canonical_oracle({"numeric_scale": False, "type_aware_space": False, "type_aware_collation": False, "multiset_hash": True})
+        assert o4.rung.name == "multiset_order_independent_hash"
+
+        # 5. refuse_incompatible_type_coercion
+        o5 = co.decide_canonical_oracle({"numeric_scale": False, "type_aware_space": False, "type_aware_collation": False, "multiset_hash": False})
+        assert o5.rung.name == "refuse_incompatible_type_coercion"
+
+        # 6. refuse fallback
+        o6 = co.decide_canonical_oracle({"numeric_scale": False, "type_aware_space": False, "type_aware_collation": False, "multiset_hash": False, "allow_incompatible_coercion": True})
+        assert o6.rung is None
+
+        # canonical_policy_rungs:
+        # 1. preserve_exact_scale
+        p1 = co.decide_canonical_policy({"exact_scale": True})
+        assert p1.rung.name == "preserve_exact_scale"
+
+        # 2. pad_fixed_space
+        p2 = co.decide_canonical_policy({"exact_scale": False, "pad_space": True})
+        assert p2.rung.name == "pad_fixed_space"
+
+        # 3. normalize_unicode_collation
+        p3 = co.decide_canonical_policy({"exact_scale": False, "pad_space": False, "unicode_norm": True})
+        assert p3.rung.name == "normalize_unicode_collation"
+
+        # 4. signed_zero_numeric_equal
+        p4 = co.decide_canonical_policy({"exact_scale": False, "pad_space": False, "unicode_norm": False, "signed_zero_equal": True})
+        assert p4.rung.name == "signed_zero_numeric_equal"
+
+        # 5. refuse_lossy_downcast
+        p5 = co.decide_canonical_policy({"exact_scale": False, "pad_space": False, "unicode_norm": False, "signed_zero_equal": False})
+        assert p5.rung.name == "refuse_lossy_downcast"
+
+        # 6. refuse fallback
+        p6 = co.decide_canonical_policy({"exact_scale": False, "pad_space": False, "unicode_norm": False, "signed_zero_equal": False, "allow_lossy_downcast": True})
+        assert p6.rung is None
+

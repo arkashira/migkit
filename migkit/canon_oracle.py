@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
+from . import decide
+
 MODULUS_256 = 1 << 256
 
 
@@ -65,6 +67,7 @@ class TypeSpec:
     length: Optional[int] = None
     is_char: bool = False
     is_binary: bool = False
+    engine_version: str = ""
 
 
 _TYPE_RE = re.compile(
@@ -72,10 +75,10 @@ _TYPE_RE = re.compile(
 )
 
 
-def parse_type(engine: str = "", declared: str = "") -> TypeSpec:
+def parse_type(engine: str = "", declared: str = "", engine_version: str = "") -> TypeSpec:
     raw = (declared or "").strip()
     if not raw:
-        return TypeSpec(raw="", base="text", cls="text")
+        return TypeSpec(raw="", base="text", cls="text", engine_version=str(engine_version))
     m = _TYPE_RE.match(raw)
     base = m.group("base").strip().lower() if m else raw.lower()
     p1 = int(m.group("p1")) if m and m.group("p1") else None
@@ -102,7 +105,7 @@ def parse_type(engine: str = "", declared: str = "") -> TypeSpec:
         cls = "text"
         is_char = True
         length = p1
-    elif base in ("varchar", "character varying", "nvarchar", "text", "string", "clob"):
+    elif base in ("varchar", "character varying", "nvarchar", "text", "string", "clob", "varchar2", "nvarchar2"):
         cls = "text"
         length = p1
     elif base in ("bool", "boolean"):
@@ -128,6 +131,7 @@ def parse_type(engine: str = "", declared: str = "") -> TypeSpec:
         length=length,
         is_char=is_char,
         is_binary=is_binary,
+        engine_version=str(engine_version),
     )
 
 
@@ -195,7 +199,7 @@ class CanonicalOracle:
         self.space_policy = space_policy
         self.collation_policy = collation_policy
         self.signed_zero_policy = signed_zero_policy
-        self.type_spec = parse_type(self.engine, declared_type)
+        self.type_spec = parse_type(self.engine, declared_type, engine_version=self.engine_version)
 
     def display(self, value: Any) -> str:
         if value is None:
@@ -753,3 +757,176 @@ def verify_test_vectors(
         else:
             failed.append((tv, res))
     return passed, failed
+
+
+# Decide ladders for Canonical Oracle and Canonical Policies
+
+def _prove_numeric_scale_policy(facts: decide.Facts) -> bool:
+    return bool(facts.get("numeric_scale") and not facts.get("refused"))
+
+
+def _prove_type_aware_space_policy(facts: decide.Facts) -> bool:
+    return bool(facts.get("type_aware_space") and not facts.get("refused"))
+
+
+def _prove_type_aware_collation_policy(facts: decide.Facts) -> bool:
+    return bool(facts.get("type_aware_collation") and not facts.get("refused"))
+
+
+def _prove_multiset_order_independent_hash(facts: decide.Facts) -> bool:
+    return bool(facts.get("multiset_hash") and not facts.get("refused"))
+
+
+def _prove_refuse_incompatible_type_coercion(facts: decide.Facts) -> bool:
+    return not bool(facts.get("allow_incompatible_coercion"))
+
+
+def canonical_oracle_rungs() -> Tuple[decide.Rung, ...]:
+    return (
+        decide.Rung(
+            "numeric_scale_policy",
+            "normalize numeric scale across source and target decimal precision",
+            needs=(
+                decide.Need(
+                    "numeric scale policy certified",
+                    _prove_numeric_scale_policy,
+                    "numeric scale policy inactive",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "type_aware_space_policy",
+            "normalize whitespace and padding based on declared data type semantics",
+            needs=(
+                decide.Need(
+                    "type aware space policy certified",
+                    _prove_type_aware_space_policy,
+                    "type aware space policy inactive",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "type_aware_collation_policy",
+            "evaluate string equivalence respecting source and target database collations",
+            needs=(
+                decide.Need(
+                    "type aware collation policy certified",
+                    _prove_type_aware_collation_policy,
+                    "type aware collation policy inactive",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "multiset_order_independent_hash",
+            "calculate order-independent hash over row multiset in finite abelian group",
+            needs=(
+                decide.Need(
+                    "multiset hash calculation certified",
+                    _prove_multiset_order_independent_hash,
+                    "multiset hash criteria not met",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_incompatible_type_coercion",
+            "refuse canonicalization when disparate data types cannot be safely compared",
+            needs=(
+                decide.Need(
+                    "incompatible coercion refused",
+                    _prove_refuse_incompatible_type_coercion,
+                    "incompatible type coercion requested",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_canonical_oracle(facts: Dict[str, Any]) -> decide.Choice:
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("canonical oracle strategy", canonical_oracle_rungs(), fact_obj)
+
+
+def _prove_preserve_exact_scale(facts: decide.Facts) -> bool:
+    return bool(facts.get("exact_scale") and not facts.get("refused"))
+
+
+def _prove_pad_fixed_space(facts: decide.Facts) -> bool:
+    return bool(facts.get("pad_space") and not facts.get("refused"))
+
+
+def _prove_normalize_unicode_collation(facts: decide.Facts) -> bool:
+    return bool(facts.get("unicode_norm") and not facts.get("refused"))
+
+
+def _prove_signed_zero_numeric_equal(facts: decide.Facts) -> bool:
+    return bool(facts.get("signed_zero_equal") and not facts.get("refused"))
+
+
+def _prove_refuse_lossy_downcast(facts: decide.Facts) -> bool:
+    return not bool(facts.get("allow_lossy_downcast"))
+
+
+def canonical_policy_rungs() -> Tuple[decide.Rung, ...]:
+    return (
+        decide.Rung(
+            "preserve_exact_scale",
+            "preserve exact declared scale and trailing zeroes without truncation",
+            needs=(
+                decide.Need(
+                    "exact scale preservation certified",
+                    _prove_preserve_exact_scale,
+                    "exact scale preservation not required",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "pad_fixed_space",
+            "pad fixed-width character values to declared column length",
+            needs=(
+                decide.Need(
+                    "fixed space padding certified",
+                    _prove_pad_fixed_space,
+                    "fixed space padding not required",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "normalize_unicode_collation",
+            "apply unicode canonical composition (NFC/NFKC) across collation boundaries",
+            needs=(
+                decide.Need(
+                    "unicode normalization certified",
+                    _prove_normalize_unicode_collation,
+                    "unicode normalization not required",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "signed_zero_numeric_equal",
+            "treat IEEE 754 positive and negative zero (+0.0 and -0.0) as numerically equivalent",
+            needs=(
+                decide.Need(
+                    "signed zero equivalence certified",
+                    _prove_signed_zero_numeric_equal,
+                    "signed zero equivalence not requested",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_lossy_downcast",
+            "refuse type canonicalization when conversion results in silent data loss or overflow",
+            needs=(
+                decide.Need(
+                    "lossy downcast refused",
+                    _prove_refuse_lossy_downcast,
+                    "lossy downcast detected",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_canonical_policy(facts: Dict[str, Any]) -> decide.Choice:
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("canonical policy resolution", canonical_policy_rungs(), fact_obj)
+
