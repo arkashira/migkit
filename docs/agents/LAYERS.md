@@ -26,21 +26,22 @@ A package imports its own rank and the ranks below it, never one above. A rank o
 
 Outside the rule: `tools` (the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them); `data` (the files migkit ships as resources).
 
-## Upward imports still listed: 435
+## Upward imports still listed: 437
 
 ### (not listed)
 
 - `migkit/ack_lattice.py:7` execution -> decision (`decide`)
 - `migkit/cancel_recovery.py:13` execution -> decision (`decide`)
 - `migkit/canon_oracle.py:11` conversion -> decision (`decide`)
-- `migkit/checkpoint.py:33` persistence -> decision (`sizing`)
+- `migkit/checkpoint.py:33` persistence -> decision (`decide`)
+- `migkit/checkpoint.py:34` persistence -> decision (`sizing`)
 - `migkit/config.py:446` configuration -> execution (`keepalive`)
 - `migkit/control_upgrade.py:15` persistence -> decision (`decide`)
 - `migkit/decomp_budget.py:22` execution -> decision (`decide`)
 - `migkit/demand_benchmark.py:11` reporting -> decision (`adaptive_bounds`)
 - `migkit/demand_benchmark.py:13` reporting -> decision (`decide`)
 - `migkit/effect_checkpoint.py:52` persistence -> decision (`decide`)
-- `migkit/engines/mysql.py:11567` engines -> workflows (`ratchet`)
+- `migkit/engines/mysql.py:11568` engines -> workflows (`ratchet`)
 - `migkit/engines/postgres.py:8006` engines -> workflows (`verifiers`)
 - `migkit/engines/postgres.py:12707` engines -> workflows (`ratchet`)
 - `migkit/engines/synapse.py:101` engines -> workflows (`users`)
@@ -51,6 +52,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/identity_semantics.py:8` conversion -> decision (`decide`)
 - `migkit/init.py:1` configuration -> cli (`guide`)
 - `migkit/jointplan.py:1309` decision -> workflows (`etl_bi_waves`)
+- `migkit/lease.py:47` safety -> decision (`decide`)
 - `migkit/lineage_evidence.py:7` conversion -> decision (`decide`)
 - `migkit/lock_capability.py:9` safety -> decision (`decide`)
 - `migkit/locks.py:25` execution -> decision (`decide`)
@@ -214,7 +216,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a durable record uses the executor's `ranges`; the shared piece moves below persistence
 
-- `migkit/checkpoint.py:395` persistence -> execution (`ranges`)
+- `migkit/checkpoint.py:409` persistence -> execution (`ranges`)
 - `migkit/claims.py:417` persistence -> execution (`ranges`)
 
 ### a durable record uses the executor's `util`; the shared piece moves below persistence
@@ -595,7 +597,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a safety check reads `fleet` for the step it guards; the step reports its own state down
 
-- `migkit/lease.py:203` safety -> workflows (`fleet`)
+- `migkit/lease.py:205` safety -> workflows (`fleet`)
 
 ### a safety check reads `tailctl` for the step it guards; the step reports its own state down
 
@@ -756,7 +758,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### an engine calls `replicasum` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/mysql.py:6348` engines -> workflows (`replicasum`)
+- `migkit/engines/mysql.py:6349` engines -> workflows (`replicasum`)
 
 ### an engine calls `rules` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
@@ -766,7 +768,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 - `migkit/engines/base.py:2541` engines -> workflows (`second_reader`)
 - `migkit/engines/hetero.py:3399` engines -> workflows (`second_reader`)
-- `migkit/engines/mysql.py:11540` engines -> workflows (`second_reader`)
+- `migkit/engines/mysql.py:11541` engines -> workflows (`second_reader`)
 - `migkit/engines/postgres.py:7444` engines -> workflows (`second_reader`)
 
 ### an engine calls `streamout` for a step it cannot do itself; the engine split gives that step a contract below the engines
@@ -829,7 +831,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/engines/kafka.py:2152` engines -> workflows (`users`)
 - `migkit/engines/mongodb.py:3703` engines -> workflows (`users`)
 - `migkit/engines/mssql.py:2162` engines -> workflows (`users`)
-- `migkit/engines/mysql.py:7706` engines -> workflows (`users`)
+- `migkit/engines/mysql.py:7707` engines -> workflows (`users`)
 - `migkit/engines/postgres.py:10135` engines -> workflows (`users`)
 - `migkit/engines/redis.py:291` engines -> workflows (`users`)
 

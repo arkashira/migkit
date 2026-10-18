@@ -30,6 +30,7 @@ import json
 import threading
 import uuid
 
+from . import decide
 from .sizing import (
     AIMDChunkSizer, AdaptiveChunkSizer, AdaptiveBatchSizer,
     aimd_adjust_chunk, aimd_chunk_size, is_lob_type, lob_length_sql,
@@ -102,7 +103,7 @@ def _key(lo, hi):
     return f"{_repr(lo)}..{_repr(hi)}"
 
 
-def record_progress_range(report_dir, hop_name, db, table, lo, hi, rows, checksum):
+def record_progress_range(report_dir, hop_name, db, table, lo, hi, rows, checksum, fingerprint=""):
     """Write sub-unit range completion to check-progress.jsonl for durable recovery."""
     if not report_dir:
         return
@@ -115,6 +116,7 @@ def record_progress_range(report_dir, hop_name, db, table, lo, hi, rows, checksu
         "db": str(db or ""),
         "table": str(table or ""),
         "range_id": _key(lo, hi),
+        "fingerprint": str(fingerprint or ""),
         "cursor": {
             "lo": serialize_cursor(lo),
             "hi": serialize_cursor(hi),
@@ -223,7 +225,17 @@ class Checkpoint:
         with self._lock:
             self._touched.add(table)
             entry = self._data["tables"].get(table)
-            if not entry or entry.get("fingerprint") != fp:
+            if not entry:
+                entry = {"fingerprint": fp, "done": {},
+                         "chunk": None}
+                self._data["tables"][table] = entry
+            elif entry.get("fingerprint") == fp:
+                pass
+            elif entry.get("fingerprint") in ("", None):
+                entry["fingerprint"] = fp
+                planned_keys = {_key(lo, hi) for lo, hi in ranges}
+                entry["done"] = {k: v for k, v in (entry.get("done") or {}).items() if k in planned_keys}
+            else:
                 entry = {"fingerprint": fp, "done": {},
                          "chunk": (entry or {}).get("chunk")}
                 self._data["tables"][table] = entry
@@ -269,10 +281,12 @@ class Checkpoint:
                         continue
                     self._touched.add(tbl)
                     entry = self._data["tables"].setdefault(tbl, {"fingerprint": "", "done": {}})
+                    if r.get("fingerprint") and not entry.get("fingerprint"):
+                        entry["fingerprint"] = str(r["fingerprint"])
                     if rid not in entry["done"]:
                         entry["done"][rid] = [int(r.get("rows", 0)), str(r.get("checksum", "0"))]
                         loaded += 1
-            except Exception:
+            except (json.JSONDecodeError, OSError):
                 pass
             if loaded:
                 self._flush()
@@ -488,7 +502,7 @@ def plan_adaptive_ranges(lo, hi, sizer=None, initial_chunk=1000):
     return plan_ranges(lo, hi, sizer.chunk)
 
 
-def plan_ranges(lo, hi, chunk):
+def plan_ranges(lo, hi, chunk, total_rows=None):
     """Split the keyspace into half-open ranges of `chunk` keys.
 
     The ranges cover everything, not just [lo, hi]: the first is open at the
@@ -496,6 +510,9 @@ def plan_ranges(lo, hi, chunk):
     and the target is free to hold keys outside them - a row below the
     source's minimum or above its maximum is exactly the kind of thing worth
     catching, so it must fall inside a range rather than between two.
+    If `total_rows` is provided and greater than 0, timestamp and date ranges
+    are partitioned proportionally to row density rather than treating chunk
+    as literal seconds or days.
     """
     if isinstance(chunk, AIMDChunkSizer):
         chunk = chunk.chunk
@@ -510,7 +527,12 @@ def plan_ranges(lo, hi, chunk):
             return [(None, None)]
         cuts = []
         cur = t_lo
-        step = float(chunk)
+        if total_rows is not None and total_rows > 0:
+            import math
+            num_chunks = max(1, math.ceil(float(total_rows) / float(chunk)))
+            step = max(1.0, (t_hi - t_lo) / num_chunks)
+        else:
+            step = float(chunk)
         while cur <= t_hi:
             cur += step
             if cur <= t_hi:
@@ -523,7 +545,14 @@ def plan_ranges(lo, hi, chunk):
             return [(None, None)]
         cuts = []
         cur = lo
-        delta = datetime.timedelta(days=max(1, int(chunk)))
+        if total_rows is not None and total_rows > 0:
+            import math
+            total_days = max(1, (hi - lo).days)
+            num_chunks = max(1, math.ceil(float(total_rows) / float(chunk)))
+            day_step = max(1, math.ceil(float(total_days) / float(num_chunks)))
+            delta = datetime.timedelta(days=day_step)
+        else:
+            delta = datetime.timedelta(days=max(1, int(chunk)))
         while cur <= hi:
             cur += delta
             if cur <= hi:
@@ -613,4 +642,174 @@ def where(column, lo, hi, lob_pred=None):
     if lob_pred:
         return f"{base} and ({lob_pred})" if base else f"({lob_pred})"
     return base
+
+
+def _prove_o1_journal_replay(facts: decide.Facts) -> bool:
+    return bool(facts.get("journal_replay") and not facts.get("refused"))
+
+
+def _prove_typed_cursor_preservation(facts: decide.Facts) -> bool:
+    return bool(facts.get("typed_cursor") and not facts.get("refused"))
+
+
+def _prove_matching_fingerprint_retention(facts: decide.Facts) -> bool:
+    return bool(facts.get("matching_fingerprint") and not facts.get("refused"))
+
+
+def _prove_adaptive_range_density_scaling(facts: decide.Facts) -> bool:
+    return bool(facts.get("adaptive_density") and not facts.get("refused"))
+
+
+def _prove_refuse_corrupted_journal_plan(facts: decide.Facts) -> bool:
+    return not bool(facts.get("allow_incompatible_plan"))
+
+
+def universal_resume_rungs() -> tuple:
+    return (
+        decide.Rung(
+            "o1_journal_checkpoint_replay",
+            "replay completed sub-unit ranges from journal into checkpoint in O(1) without rescanning",
+            needs=(
+                decide.Need(
+                    "o1 replay enabled",
+                    _prove_o1_journal_replay,
+                    "o1 replay not enabled",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "typed_cursor_preservation",
+            "preserve exact typed boundaries across resume (datetime, date, uuid, decimal, composite)",
+            needs=(
+                decide.Need(
+                    "typed cursor preserved",
+                    _prove_typed_cursor_preservation,
+                    "typed cursor boundaries not preserved",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "matching_fingerprint_retention",
+            "retain completed ranges when journal plan matches or is compatible with current table plan",
+            needs=(
+                decide.Need(
+                    "plan fingerprint matched",
+                    _prove_matching_fingerprint_retention,
+                    "plan fingerprint mismatch detected",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "adaptive_range_density_scaling",
+            "scale range boundaries proportionally based on key density and total row counts",
+            needs=(
+                decide.Need(
+                    "range density scaled",
+                    _prove_adaptive_range_density_scaling,
+                    "range density scaling criteria not met",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_corrupted_journal_plan",
+            "refuse mixing ranges when plan fingerprint contradicts an earlier incompatible plan",
+            needs=(
+                decide.Need(
+                    "incompatible plan refused",
+                    _prove_refuse_corrupted_journal_plan,
+                    "incompatible journal plan permitted",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_universal_resume(facts) -> decide.Choice:
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("universal resume", universal_resume_rungs(), fact_obj)
+
+
+def _prove_datetime_timezone_aware(facts: decide.Facts) -> bool:
+    return bool(facts.get("datetime_supported") and not facts.get("refused"))
+
+
+def _prove_uuid_canonical_hex(facts: decide.Facts) -> bool:
+    return bool(facts.get("uuid_supported") and not facts.get("refused"))
+
+
+def _prove_decimal_fixed_scale(facts: decide.Facts) -> bool:
+    return bool(facts.get("decimal_supported") and not facts.get("refused"))
+
+
+def _prove_composite_tuple_cursor(facts: decide.Facts) -> bool:
+    return bool(facts.get("composite_supported") and not facts.get("refused"))
+
+
+def _prove_refuse_untyped_opaque_cursor(facts: decide.Facts) -> bool:
+    return not bool(facts.get("allow_untyped_cursor"))
+
+
+def cursor_serialization_rungs() -> tuple:
+    return (
+        decide.Rung(
+            "datetime_timezone_aware",
+            "serialize and deserialize timezone-aware datetimes with exact ISO-8601 UTC offsets",
+            needs=(
+                decide.Need(
+                    "datetime serialization verified",
+                    _prove_datetime_timezone_aware,
+                    "datetime serialization unsupported",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "uuid_canonical_hex",
+            "preserve 128-bit UUID cursors in canonical hyphenated string format",
+            needs=(
+                decide.Need(
+                    "uuid serialization verified",
+                    _prove_uuid_canonical_hex,
+                    "uuid serialization unsupported",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "decimal_fixed_scale",
+            "preserve exact arbitrary-precision Decimal strings without float precision loss",
+            needs=(
+                decide.Need(
+                    "decimal serialization verified",
+                    _prove_decimal_fixed_scale,
+                    "decimal serialization unsupported",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "composite_tuple_cursor",
+            "serialize multi-column composite key cursors with element-level typing",
+            needs=(
+                decide.Need(
+                    "composite serialization verified",
+                    _prove_composite_tuple_cursor,
+                    "composite serialization unsupported",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_untyped_opaque_cursor",
+            "refuse unhandled object types from being serialized as opaque unrecoverable strings",
+            needs=(
+                decide.Need(
+                    "untyped cursor refused",
+                    _prove_refuse_untyped_opaque_cursor,
+                    "untyped cursor permitted",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_cursor_serialization(facts) -> decide.Choice:
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("cursor serialization", cursor_serialization_rungs(), fact_obj)
 

@@ -3103,8 +3103,17 @@ def _sync_go(hop_name, db, tag, on_conflict=None, kind="all"):
         hop.engine, "snapshot",
         "use migkit sync --apply, which repairs without the snapshot --go"
         " takes first")
-    first, results = _check(hop, db, "", "", False, False, 0, False, "",
-                            hints=False)
+    from .lease import Lease, Held
+    from .state import run_state
+    try:
+        with Lease(hop.report_dir() / "lease-check.json",
+                   what="verification",
+                   remote=run_state(hop)):
+            first, results = _check(hop, db, "", "", False, False, 0, False, "",
+                                    hints=False)
+    except Held as e:
+        from .verdict import Refused
+        raise Refused(f"[BLOCKED] {e}")
     if first.status != "different":
         return first
     dbs = _repair_dbs(results, kind)
@@ -3287,8 +3296,17 @@ def _orchestrate(hop_name, db, mode, go, serve, interval, on_conflict=None):
         _say_goal(hop, hopkeys.explain_mode("sync", mode))
     if mode == "verify":
         console.print("[bold]verify[/bold]: read-only, consistent snapshot")
-        got, _ = _check(hop, db, "", "", False, True, 0, False, "",
-                        hints=False)
+        from .lease import Lease, Held
+        from .state import run_state
+        try:
+            with Lease(hop.report_dir() / "lease-check.json",
+                       what="verification",
+                       remote=run_state(hop)):
+                got, _ = _check(hop, db, "", "", False, True, 0, False, "",
+                                hints=False)
+        except Held as e:
+            from .verdict import Refused
+            raise Refused(f"[BLOCKED] {e}")
         return got
     move_mode = {"seed": "full", "migrate": "full+cdc", "stream": "cdc"}[mode]
     console.print(f"[bold]{mode}[/bold]: migkit move {_esc(hop_name)}"

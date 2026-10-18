@@ -4901,6 +4901,7 @@ class MySQLEngine(Engine):
                     continue
                 if col:
                     cp.record(scope, lo, hi, ra[0], int(ra[1] or 0))
+                    _cp.record_progress_range(self.hop.report_dir(db), self.hop.name, db, scope, lo, hi, ra[0], int(ra[1] or 0))
                 else:
                     rows_a += ra[0]
                     rows_b += rb[0]

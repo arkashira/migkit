@@ -44,6 +44,8 @@ import socket
 import threading
 import time
 
+from . import decide
+
 
 def term():
     from . import envkeys
@@ -469,3 +471,88 @@ class Lease:
 
 #: Exported alias for active verification lease lock
 ActiveLease = Lease
+
+
+def _prove_exclusive_lease_acquired(facts: decide.Facts) -> bool:
+    return bool(facts.get("exclusive_lock") and not facts.get("refused"))
+
+
+def _prove_stale_holder_evicted(facts: decide.Facts) -> bool:
+    return bool(facts.get("stale_evicted") and not facts.get("refused"))
+
+
+def _prove_fenced_epoch_incremented(facts: decide.Facts) -> bool:
+    return bool(facts.get("fenced_epoch") and not facts.get("refused"))
+
+
+def _prove_heartbeat_lease_extended(facts: decide.Facts) -> bool:
+    return bool(facts.get("heartbeat_active") and not facts.get("refused"))
+
+
+def _prove_refuse_overlapping_lease_collision(facts: decide.Facts) -> bool:
+    return not bool(facts.get("allow_concurrent_lease"))
+
+
+def active_lease_lock_rungs() -> tuple:
+    return (
+        decide.Rung(
+            "exclusive_lease_acquired",
+            "acquire exclusive verification lease lock before reading or modifying hop state",
+            needs=(
+                decide.Need(
+                    "exclusive lease acquired",
+                    _prove_exclusive_lease_acquired,
+                    "exclusive lease acquisition failed",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "stale_holder_evicted",
+            "evict expired lease when previous holder's process is dead or heartbeat lapsed",
+            needs=(
+                decide.Need(
+                    "stale lease evicted",
+                    _prove_stale_holder_evicted,
+                    "stale lease eviction criteria not met",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "fenced_epoch_monotonically_incremented",
+            "advance fencing epoch token to prevent split-brain zombies",
+            needs=(
+                decide.Need(
+                    "fencing epoch advanced",
+                    _prove_fenced_epoch_incremented,
+                    "fencing epoch not incremented",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "heartbeat_lease_extended",
+            "background thread actively extends lease duration while verification runs",
+            needs=(
+                decide.Need(
+                    "heartbeat active",
+                    _prove_heartbeat_lease_extended,
+                    "heartbeat renewal inactive",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_overlapping_lease_collision",
+            "refuse execution with Refused(4) when active concurrent lease held",
+            needs=(
+                decide.Need(
+                    "concurrent lease collision refused",
+                    _prove_refuse_overlapping_lease_collision,
+                    "concurrent lease collision permitted",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_active_lease_lock(facts) -> decide.Choice:
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("active lease lock", active_lease_lock_rungs(), fact_obj)
