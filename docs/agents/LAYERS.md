@@ -852,12 +852,12 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/attempts.py:786` execution -> decision (`decide`)
 - `migkit/ranges.py:1098` execution -> decision (`decide`)
 - `migkit/runner.py:55` execution -> decision (`decide`)
-- `migkit/util.py:663` execution -> decision (`decide`)
+- `migkit/util.py:664` execution -> decision (`decide`)
 
 ### an executor asks the decision engine (`faults`) how many or how fast; the call becomes a fact handed down
 
 - `migkit/failpoint.py:53` execution -> decision (`faults`)
-- `migkit/util.py:178` execution -> decision (`faults`)
+- `migkit/util.py:179` execution -> decision (`faults`)
 
 ### an executor asks the decision engine (`sizing`) how many or how fast; the call becomes a fact handed down
 
@@ -892,7 +892,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### an executor says its progress through `wording`; the notice goes through an event below execution
 
 - `migkit/runner.py:122` execution -> reporting (`wording`)
-- `migkit/util.py:281` execution -> reporting (`wording`)
+- `migkit/util.py:282` execution -> reporting (`wording`)
 
 ### configuration reaches `audit` (persistence); the shared piece moves below both, or the call is inverted
 
@@ -961,7 +961,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### execution reaches `engines` (engines); the shared piece moves below both, or the call is inverted
 
 - `migkit/attempts.py:221` execution -> engines (`engines`)
-- `migkit/util.py:1279` execution -> engines (`engines`)
+- `migkit/util.py:1288` execution -> engines (`engines`)
 
 ### execution reaches `tools` (integrations); the shared piece moves below both, or the call is inverted
 

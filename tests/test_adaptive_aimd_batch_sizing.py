@@ -2,6 +2,56 @@ import sqlite3
 import pytest
 from migkit import sizing
 from migkit import checkpoint
+from tests.rung_branches import HOLDS, REFUSES, branch, watched, why
+
+PROVES_RUNGS = [
+    ("sizing", "adaptive_aimd_rungs", "aimd_backoff_on_latency_spike", "holds"),
+    ("sizing", "adaptive_aimd_rungs", "aimd_backoff_on_latency_spike", "refuses"),
+    ("sizing", "adaptive_aimd_rungs", "aimd_additive_increase_on_healthy", "holds"),
+    ("sizing", "adaptive_aimd_rungs", "aimd_additive_increase_on_healthy", "refuses"),
+    ("sizing", "adaptive_aimd_rungs", "memory_pressure_suppression", "holds"),
+    ("sizing", "adaptive_aimd_rungs", "memory_pressure_suppression", "refuses"),
+    ("sizing", "adaptive_aimd_rungs", "dynamic_bounds_clamped", "holds"),
+    ("sizing", "adaptive_aimd_rungs", "dynamic_bounds_clamped", "refuses"),
+    ("sizing", "adaptive_aimd_rungs", "refuse_unbounded_aimd_oscillation", "holds"),
+    ("sizing", "adaptive_aimd_rungs", "refuse_unbounded_aimd_oscillation", "refuses"),
+]
+
+
+def test_adaptive_aimd_rungs_hold_and_refuse():
+    with watched() as seen:
+        c = sizing.decide_adaptive_aimd({"latency": 6.0, "max_latency": 5.0, "chunk": 1000})
+    assert c.rung.name == "aimd_backoff_on_latency_spike"
+    assert branch(seen, "aimd_backoff_on_latency_spike") == [HOLDS]
+
+    with watched() as seen:
+        c = sizing.decide_adaptive_aimd({"latency": 0.5, "row_bytes": 100, "memory_healthy": True, "chunk": 1000})
+    assert branch(seen, "aimd_backoff_on_latency_spike") == [REFUSES]
+    assert c.rung.name == "aimd_additive_increase_on_healthy"
+    assert branch(seen, "aimd_additive_increase_on_healthy") == [HOLDS]
+
+    with watched() as seen:
+        c = sizing.decide_adaptive_aimd({"latency": 2.0, "memory_healthy": True, "chunk": 1000})
+    assert branch(seen, "aimd_additive_increase_on_healthy") == [REFUSES]
+    assert branch(seen, "memory_pressure_suppression") == [REFUSES]
+    assert c.rung.name == "dynamic_bounds_clamped"
+    assert branch(seen, "dynamic_bounds_clamped") == [HOLDS]
+
+    with watched() as seen:
+        c = sizing.decide_adaptive_aimd({"latency": 2.0, "memory_healthy": False, "chunk": 1000})
+    assert c.rung.name == "memory_pressure_suppression"
+    assert branch(seen, "memory_pressure_suppression") == [HOLDS]
+
+    with watched() as seen:
+        c = sizing.decide_adaptive_aimd({"latency": 2.0, "memory_healthy": True, "chunk": 50, "min_chunk": 100, "max_chunk": 50000})
+    assert branch(seen, "dynamic_bounds_clamped") == [REFUSES]
+    assert c.rung.name == "refuse_unbounded_aimd_oscillation"
+    assert branch(seen, "refuse_unbounded_aimd_oscillation") == [HOLDS]
+
+    with watched() as seen:
+        c = sizing.decide_adaptive_aimd({"latency": 2.0, "memory_healthy": True, "chunk": 50, "unbounded_oscillation": True})
+    assert branch(seen, "refuse_unbounded_aimd_oscillation") == [REFUSES]
+
 
 
 def test_aimd_halve_on_large_row_bytes():

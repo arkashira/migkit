@@ -6,6 +6,58 @@ leaving operators blind. `forecast` now scales effective warmup to min(warmup, l
 and supports instant cold-start ETA (eta.initial) upon first unit completion.
 """
 from migkit.util import Unit, forecast, human_secs
+from tests.rung_branches import HOLDS, REFUSES, branch, watched, why
+
+PROVES_RUNGS = [
+    ("util", "instant_eta_rungs", "byte_weighted_ewma_converged", "holds"),
+    ("util", "instant_eta_rungs", "byte_weighted_ewma_converged", "refuses"),
+    ("util", "instant_eta_rungs", "cold_start_initial_unit_projection", "holds"),
+    ("util", "instant_eta_rungs", "cold_start_initial_unit_projection", "refuses"),
+    ("util", "instant_eta_rungs", "p90_confidence_interval_bounded", "holds"),
+    ("util", "instant_eta_rungs", "p90_confidence_interval_bounded", "refuses"),
+    ("util", "instant_eta_rungs", "historical_rate_bootstrap", "holds"),
+    ("util", "instant_eta_rungs", "historical_rate_bootstrap", "refuses"),
+    ("util", "instant_eta_rungs", "refuse_insufficient_sample_extrapolation", "holds"),
+    ("util", "instant_eta_rungs", "refuse_insufficient_sample_extrapolation", "refuses"),
+]
+
+
+def test_instant_eta_rungs_hold_and_refuse():
+    from migkit import util
+
+    with watched() as seen:
+        c = util.decide_instant_eta({"measured": 5, "warmup": 3, "has_byte_rates": True})
+    assert c.rung.name == "byte_weighted_ewma_converged"
+    assert branch(seen, "byte_weighted_ewma_converged") == [HOLDS]
+
+    with watched() as seen:
+        c = util.decide_instant_eta({"measured": 1, "warmup": 3, "has_byte_rates": False, "instant": True})
+    assert branch(seen, "byte_weighted_ewma_converged") == [REFUSES]
+    assert c.rung.name == "cold_start_initial_unit_projection"
+    assert branch(seen, "cold_start_initial_unit_projection") == [HOLDS]
+
+    with watched() as seen:
+        c = util.decide_instant_eta({"measured": 0, "warmup": 3, "instant": False, "lo_seconds": 10.0, "hi_seconds": 20.0, "confidence": 0.5})
+    assert branch(seen, "cold_start_initial_unit_projection") == [REFUSES]
+    assert c.rung.name == "p90_confidence_interval_bounded"
+    assert branch(seen, "p90_confidence_interval_bounded") == [HOLDS]
+
+    with watched() as seen:
+        c = util.decide_instant_eta({"measured": 0, "warmup": 3, "instant": False, "kept_rate": 1000.0})
+    assert branch(seen, "p90_confidence_interval_bounded") == [REFUSES]
+    assert c.rung.name == "historical_rate_bootstrap"
+    assert branch(seen, "historical_rate_bootstrap") == [HOLDS]
+
+    with watched() as seen:
+        c = util.decide_instant_eta({"measured": 0, "warmup": 3, "instant": False})
+    assert branch(seen, "historical_rate_bootstrap") == [REFUSES]
+    assert c.rung.name == "refuse_insufficient_sample_extrapolation"
+    assert branch(seen, "refuse_insufficient_sample_extrapolation") == [HOLDS]
+
+    with watched() as seen:
+        c = util.decide_instant_eta({"measured": 10, "warmup": 3, "has_byte_rates": False, "instant": False, "lo_seconds": None})
+    assert branch(seen, "refuse_insufficient_sample_extrapolation") == [REFUSES]
+
 
 
 def test_two_unit_task_gives_eta_after_first_unit():

@@ -464,11 +464,14 @@ class Rate:
     the next run in a form worth trusting.
     """
 
-    def __init__(self, rows_per_second=DEFAULT_ROWS_PER_SECOND, aimd=False, initial_chunk=1000):
+    def __init__(self, rows_per_second=DEFAULT_ROWS_PER_SECOND, aimd=None, initial_chunk=1000):
         self.value = float(rows_per_second)
         self.samples = 0
-        self.aimd = aimd
-        self.sizer = AIMDChunkSizer(initial=initial_chunk) if aimd else None
+        if aimd is None:
+            env_val = os.environ.get("MIGKIT_AIMD_AUTOSIZING", "").lower()
+            aimd = env_val in ("1", "true", "yes", "on")
+        self.aimd = bool(aimd)
+        self.sizer = AIMDChunkSizer(initial=initial_chunk) if self.aimd else None
 
     def enable_aimd(self, initial=1000):
         self.aimd = True
@@ -500,6 +503,25 @@ def plan_adaptive_ranges(lo, hi, sizer=None, initial_chunk=1000):
     if sizer is None:
         sizer = AIMDChunkSizer(initial=initial_chunk)
     return plan_ranges(lo, hi, sizer.chunk)
+
+
+def plan_adaptive_next_range(cur_lo, hi_bound, sizer=None, chunk=None, total_rows=None):
+    if sizer is not None:
+        effective_chunk = sizer.chunk
+    elif chunk is not None:
+        effective_chunk = int(chunk)
+    else:
+        effective_chunk = 1000
+    if cur_lo is None:
+        return (None, hi_bound)
+    if isinstance(cur_lo, (int, float)):
+        next_hi = min(hi_bound, cur_lo + effective_chunk) if hi_bound is not None else cur_lo + effective_chunk
+        return (cur_lo, next_hi)
+    if isinstance(cur_lo, datetime.datetime):
+        delta = datetime.timedelta(seconds=effective_chunk)
+        next_hi = min(hi_bound, cur_lo + delta) if hi_bound is not None else cur_lo + delta
+        return (cur_lo, next_hi)
+    return (cur_lo, hi_bound)
 
 
 def plan_ranges(lo, hi, chunk, total_rows=None):

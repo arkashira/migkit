@@ -33,6 +33,9 @@ import math
 import os
 import threading
 import time
+from typing import Any, Dict, List, Optional, Tuple
+
+from . import envkeys
 
 #: memory one worker may hold: a read of the table copier (`READ_BYTES`,
 #: 64 MB) and what the driver holds beside it - measured, 36 MB a copier on
@@ -1086,14 +1089,51 @@ class Memory:
         return None
 
 
+def get_default_aimd_min_chunk() -> int:
+    val = os.environ.get("MIGKIT_AIMD_MIN_CHUNK")
+    return int(val) if val else 100
+
+
+def get_default_aimd_max_chunk() -> int:
+    val = os.environ.get("MIGKIT_AIMD_MAX_CHUNK")
+    return int(val) if val else 50000
+
+
+def get_default_aimd_max_row_bytes() -> int:
+    val = os.environ.get("MIGKIT_AIMD_MAX_ROW_BYTES")
+    return int(val) if val else 64 * 1024
+
+
+def get_default_aimd_max_latency() -> float:
+    val = os.environ.get("MIGKIT_AIMD_MAX_LATENCY")
+    return float(val) if val else 5.0
+
+
+def get_default_aimd_min_latency() -> float:
+    val = os.environ.get("MIGKIT_AIMD_MIN_LATENCY")
+    return float(val) if val else 1.0
+
+
+def get_default_aimd_expand_factor() -> float:
+    val = os.environ.get("MIGKIT_AIMD_EXPAND_FACTOR")
+    return float(val) if val else 1.5
+
+
 def aimd_adjust_chunk(chunk, latency=0.0, row_bytes=0, memory_healthy=True,
-                      min_chunk=100, max_chunk=50000, max_row_bytes=64 * 1024,
-                      max_latency=5.0, min_latency=1.0, expand_factor=1.5):
+                      min_chunk=None, max_chunk=None, max_row_bytes=None,
+                      max_latency=None, min_latency=None, expand_factor=None):
+    min_c = min_chunk if min_chunk is not None else get_default_aimd_min_chunk()
+    max_c = max_chunk if max_chunk is not None else get_default_aimd_max_chunk()
+    max_rb = max_row_bytes if max_row_bytes is not None else get_default_aimd_max_row_bytes()
+    max_lat = max_latency if max_latency is not None else get_default_aimd_max_latency()
+    min_lat = min_latency if min_latency is not None else get_default_aimd_min_latency()
+    exp_f = expand_factor if expand_factor is not None else get_default_aimd_expand_factor()
+
     chunk = int(chunk)
-    if row_bytes > max_row_bytes or latency > max_latency:
-        return max(min_chunk, chunk // 2)
-    if latency < min_latency and memory_healthy:
-        return min(max_chunk, int(chunk * expand_factor))
+    if row_bytes > max_rb or latency > max_lat:
+        return max(min_c, chunk // 2)
+    if latency < min_lat and memory_healthy:
+        return min(max_c, int(chunk * exp_f))
     return chunk
 
 
@@ -1101,23 +1141,17 @@ aimd_chunk_size = aimd_adjust_chunk
 
 
 class AIMDChunkSizer:
-    MIN_CHUNK = 100
-    MAX_CHUNK = 50000
-    MAX_ROW_BYTES = 64 * 1024
-    LATENCY_HALVE = 5.0
-    LATENCY_EXPAND = 1.0
-    EXPAND_FACTOR = 1.5
-
-    def __init__(self, initial=1000, min_chunk=100, max_chunk=50000,
-                 max_row_bytes=64 * 1024, max_latency=5.0, min_latency=1.0,
-                 memory_healthy_fn=None):
-        self.min_chunk = min_chunk
-        self.max_chunk = max_chunk
-        self.max_row_bytes = max_row_bytes
-        self.max_latency = max_latency
-        self.min_latency = min_latency
+    def __init__(self, initial=1000, min_chunk=None, max_chunk=None,
+                 max_row_bytes=None, max_latency=None, min_latency=None,
+                 expand_factor=None, memory_healthy_fn=None):
+        self.min_chunk = min_chunk if min_chunk is not None else get_default_aimd_min_chunk()
+        self.max_chunk = max_chunk if max_chunk is not None else get_default_aimd_max_chunk()
+        self.max_row_bytes = max_row_bytes if max_row_bytes is not None else get_default_aimd_max_row_bytes()
+        self.max_latency = max_latency if max_latency is not None else get_default_aimd_max_latency()
+        self.min_latency = min_latency if min_latency is not None else get_default_aimd_min_latency()
+        self.expand_factor = expand_factor if expand_factor is not None else get_default_aimd_expand_factor()
         self.memory_healthy_fn = memory_healthy_fn
-        self.chunk = max(min_chunk, min(int(initial), max_chunk))
+        self.chunk = max(self.min_chunk, min(int(initial), self.max_chunk))
         self.history = [self.chunk]
 
     def is_memory_healthy(self):
@@ -1140,7 +1174,7 @@ class AIMDChunkSizer:
             memory_healthy=memory_healthy, min_chunk=self.min_chunk,
             max_chunk=self.max_chunk, max_row_bytes=self.max_row_bytes,
             max_latency=self.max_latency, min_latency=self.min_latency,
-            expand_factor=self.EXPAND_FACTOR)
+            expand_factor=self.expand_factor)
         self.history.append(self.chunk)
         return self.chunk
 
@@ -1152,6 +1186,108 @@ class AIMDChunkSizer:
 
 AdaptiveChunkSizer = AIMDChunkSizer
 AdaptiveBatchSizer = AIMDChunkSizer
+
+
+def _prove_aimd_backoff(f: Dict[str, Any]) -> bool:
+    max_lat = f.get("max_latency", get_default_aimd_max_latency())
+    max_rb = f.get("max_row_bytes", get_default_aimd_max_row_bytes())
+    lat = float(f.get("latency", 0.0))
+    rb = float(f.get("row_bytes", 0.0))
+    return lat > max_lat or rb > max_rb
+
+
+def _prove_aimd_additive_increase(f: Dict[str, Any]) -> bool:
+    min_lat = f.get("min_latency", get_default_aimd_min_latency())
+    max_c = f.get("max_chunk", get_default_aimd_max_chunk())
+    lat = float(f.get("latency", 0.0))
+    mem_healthy = bool(f.get("memory_healthy", True))
+    chunk = int(f.get("chunk", 0))
+    return lat < min_lat and mem_healthy and chunk < max_c
+
+
+def _prove_memory_pressure_suppression(f: Dict[str, Any]) -> bool:
+    return not bool(f.get("memory_healthy", True))
+
+
+def _prove_dynamic_bounds_clamped(f: Dict[str, Any]) -> bool:
+    min_c = f.get("min_chunk", get_default_aimd_min_chunk())
+    max_c = f.get("max_chunk", get_default_aimd_max_chunk())
+    chunk = int(f.get("chunk", 0))
+    return min_c <= chunk <= max_c
+
+
+def _prove_refuse_unbounded_aimd_oscillation(f: Dict[str, Any]) -> bool:
+    consecutive_flips = int(f.get("consecutive_flips", 0))
+    max_flips = int(f.get("max_consecutive_flips", 5))
+    unbounded = bool(f.get("unbounded_oscillation", False))
+    return not unbounded and consecutive_flips < max_flips
+
+
+def adaptive_aimd_rungs() -> Tuple[Any, ...]:
+    from . import decide
+    return (
+        decide.Rung(
+            "aimd_backoff_on_latency_spike",
+            "multiplicatively halve chunk size upon query latency or row size spike",
+            needs=(
+                decide.Need(
+                    "latency or row bytes threshold exceeded",
+                    _prove_aimd_backoff,
+                    "latency and row bytes within nominal tolerances",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "aimd_additive_increase_on_healthy",
+            "exponentially expand chunk size when subsecond latency and memory healthy",
+            needs=(
+                decide.Need(
+                    "subsecond latency and healthy memory headroom",
+                    _prove_aimd_additive_increase,
+                    "latency above expansion threshold or memory constrained",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "memory_pressure_suppression",
+            "suppress chunk expansion when available host memory drops below safety reserve",
+            needs=(
+                decide.Need(
+                    "host memory pressure detected",
+                    _prove_memory_pressure_suppression,
+                    "memory capacity healthy",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "dynamic_bounds_clamped",
+            "ensure dynamic chunk strictly bounded within minimum floor and maximum ceiling",
+            needs=(
+                decide.Need(
+                    "chunk bounded within configured envelope",
+                    _prove_dynamic_bounds_clamped,
+                    "chunk outside allowed min/max boundaries",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_unbounded_aimd_oscillation",
+            "refuse unbounded rapid oscillations between expansion and backoff",
+            needs=(
+                decide.Need(
+                    "aimd oscillation within stability envelope",
+                    _prove_refuse_unbounded_aimd_oscillation,
+                    "unbounded aimd oscillation detected",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_adaptive_aimd(facts: Dict[str, Any]) -> Any:
+    from . import decide
+    return decide.climb("adaptive aimd batch sizing", adaptive_aimd_rungs(), facts=decide.Facts(facts))
+
 
 
 _LOB_TYPES = frozenset({

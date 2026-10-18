@@ -1,11 +1,12 @@
 import math
+import os
 import shutil
 import subprocess
 import sys
 import sysconfig
 import time
 from pathlib import Path
-from typing import NamedTuple, Optional
+from typing import Any, Dict, NamedTuple, Optional, Tuple
 
 _BASE = Path(__file__).resolve().parent.parent
 
@@ -671,8 +672,8 @@ def _estimate_rungs():
                      " and the link as they are now"),
         Rung("eta.initial", "the first measured units of this run",
              needs=(Need("at least one finished unit measured",
-                         lambda f: f.get("instant", False) and f["measured"] >= 1,
-                         why="instant cold-start disabled or no units measured yet"),),
+                         lambda f: bool(f.get("instant", False)) and 1 <= f["measured"] < f["warmup"],
+                         why=lambda f: "this run has measured enough of its own" if f["measured"] >= f["warmup"] else "instant cold-start disabled or no units measured yet"),),
              because="an initial cold-start estimate from the first unit's throughput,"
                      " narrowing as more units land"),
         Rung("eta.kept", "the rate an earlier run of this hop kept",
@@ -691,7 +692,7 @@ def _estimate_rungs():
 
 def forecast(units, kind="move", scope="", workers=None, health=(),
              now=None, kept_rate=None, undiscovered=False, history=None,
-             warmup=WARMUP_UNITS, instant=False):
+             warmup=WARMUP_UNITS, instant=None):
     """When the remaining work of one task ends, from the work itself.
 
     `units` are the ledger's units of the task, finished and not; what is
@@ -713,6 +714,10 @@ def forecast(units, kind="move", scope="", workers=None, health=(),
     next - and no time where the evidence holds none: warmup, nothing
     measured, a stall."""
     from .decide import Facts, climb
+    if instant is None:
+        instant = (os.environ.get("MIGKIT_INSTANT_ETA", "1").lower() in ("1", "true", "yes", "on"))
+    else:
+        instant = bool(instant)
     now = time.time() if now is None else float(now)
     scope = scope or TASK_KINDS.get(kind, kind)
     units, earlier = list(units), []
@@ -734,13 +739,12 @@ def forecast(units, kind="move", scope="", workers=None, health=(),
     row_rates = [u.rows / u.seconds for u in window if u.rows]
     byte_rates = [u.bytes / u.seconds for u in window if u.bytes]
     durations = [u.seconds for u in window]
+    total_window_bytes = sum(u.bytes for u in window if u.bytes and u.seconds and u.seconds > 0)
+    total_window_seconds = sum(u.seconds for u in window if u.seconds and u.seconds > 0)
+    byte_weighted_rate = (total_window_bytes / total_window_seconds) if (total_window_bytes > 0 and total_window_seconds > 0) else None
     evidence = []
     target_warmup = int(warmup)
-    total_units = len(units)
-    if total_units > 0 and total_units < target_warmup:
-        effective_warmup = 1
-    else:
-        effective_warmup = target_warmup
+    effective_warmup = target_warmup
     facts = Facts({"measured": len(window), "warmup": effective_warmup,
                    "instant": bool(instant)},
                   kept_rate=kept_rate if callable(kept_rate)
@@ -786,8 +790,9 @@ def forecast(units, kind="move", scope="", workers=None, health=(),
         share = 1.0 - (u.done_rows / u.rows if u.rows else 0.0)
         if u.rows is not None and row_rates:
             return max(0.0, u.rows - u.done_rows) / _quantile(row_rates, q)
-        if u.bytes is not None and byte_rates:
-            return u.bytes * share / _quantile(byte_rates, q)
+        if u.bytes is not None and (byte_rates or byte_weighted_rate is not None):
+            rate = byte_weighted_rate if (q == 0.5 and byte_weighted_rate) else _quantile(byte_rates or [byte_weighted_rate], q)
+            return u.bytes * share / max(1.0, rate)
         if durations:
             return _quantile(durations, 1.0 - q) * share
         return 0.0
@@ -822,8 +827,12 @@ def forecast(units, kind="move", scope="", workers=None, health=(),
     evidence.append(f"{len(left)} units left, {workers} at a time:"
                     f" {human_secs(active)} of work, the longest chain"
                     f" {human_secs(critical)}")
-    conf = min(1.0, len(window) / 6.0) if choice.path == "eta.window" \
-        else (0.45 if choice.path == "eta.initial" else 0.25)
+    if choice.path == "eta.window":
+        conf = min(1.0, len(window) / 6.0)
+    elif choice.path == "eta.initial":
+        conf = max(0.20, min(0.60, 0.35 + 0.10 * len(window)))
+    else:
+        conf = 0.25
     if len(row_rates) >= 2:
         mid = _quantile(row_rates, 0.5)
         spread = _quantile(row_rates, 0.9) - _quantile(row_rates, 0.1)
@@ -1455,3 +1464,105 @@ class _Reading:
             return False
         self.probes.failed(self.name, err)
         return True
+
+
+def _prove_byte_weighted_ewma_converged(f: Dict[str, Any]) -> bool:
+    measured = int(f.get("measured", 0))
+    warmup = int(f.get("warmup", 3))
+    has_bytes = bool(f.get("has_byte_rates", False))
+    return measured >= warmup and has_bytes
+
+
+def _prove_cold_start_initial_unit(f: Dict[str, Any]) -> bool:
+    instant = bool(f.get("instant", True))
+    measured = int(f.get("measured", 0))
+    warmup = int(f.get("warmup", 3))
+    return instant and 1 <= measured < warmup
+
+
+def _prove_p90_confidence_bounded(f: Dict[str, Any]) -> bool:
+    lo = f.get("lo_seconds")
+    hi = f.get("hi_seconds")
+    conf = f.get("confidence")
+    if lo is None or hi is None or conf is None:
+        return False
+    return float(lo) <= float(hi) and 0.0 <= float(conf) <= 1.0
+
+
+def _prove_historical_rate_bootstrap(f: Dict[str, Any]) -> bool:
+    measured = int(f.get("measured", 0))
+    warmup = int(f.get("warmup", 3))
+    kept_rate = f.get("kept_rate")
+    return measured < warmup and kept_rate is not None and float(kept_rate) > 0.0
+
+
+def _prove_refuse_insufficient_sample(f: Dict[str, Any]) -> bool:
+    measured = int(f.get("measured", 0))
+    kept_rate = f.get("kept_rate")
+    return measured == 0 and kept_rate is None
+
+
+def instant_eta_rungs() -> Tuple[Any, ...]:
+    from . import decide
+    return (
+        decide.Rung(
+            "byte_weighted_ewma_converged",
+            "forecast remaining time using converged byte-weighted exponential moving average",
+            needs=(
+                decide.Need(
+                    "byte-weighted rate converged over measured window",
+                    _prove_byte_weighted_ewma_converged,
+                    "insufficient byte-weighted observations or pre-warmup",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "cold_start_initial_unit_projection",
+            "project early duration from initial finished unit prior to full warmup",
+            needs=(
+                decide.Need(
+                    "instant cold start unit available",
+                    _prove_cold_start_initial_unit,
+                    "not in cold-start range or instant eta disabled",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "p90_confidence_interval_bounded",
+            "bound forecast spread within empirical 10th-to-90th quantile interval",
+            needs=(
+                decide.Need(
+                    "confidence interval bounded",
+                    _prove_p90_confidence_bounded,
+                    "confidence interval unbounded or invalid",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "historical_rate_bootstrap",
+            "bootstrap cold-start baseline from rate preserved by preceding hop execution",
+            needs=(
+                decide.Need(
+                    "historical rate available",
+                    _prove_historical_rate_bootstrap,
+                    "no historical rate preserved for this hop",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_insufficient_sample_extrapolation",
+            "refuse to emit unverifiable duration without minimum sample or prior rate",
+            needs=(
+                decide.Need(
+                    "refuse unmeasured extrapolation",
+                    _prove_refuse_insufficient_sample,
+                    "measured samples or prior rate present",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_instant_eta(facts: Dict[str, Any]) -> Any:
+    from . import decide
+    return decide.climb("instant eta forecasting", instant_eta_rungs(), facts=decide.Facts(facts))
