@@ -18,7 +18,18 @@ from migkit.snapshot_state import (
     TransferInvariant,
     WorkUnit,
     WorkUnitStatus,
+    decide_subworkflow_transition,
 )
+import tests.rung_branches
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("snapshot_state", "snapshot_subworkflow_rungs", "discharge_obligation_and_advance", "holds"),
+    ("snapshot_state", "snapshot_subworkflow_rungs", "discharge_obligation_and_advance", "refuses"),
+    ("snapshot_state", "snapshot_subworkflow_rungs", "retain_pending_subworkflow", "holds"),
+    ("snapshot_state", "snapshot_subworkflow_rungs", "retain_pending_subworkflow", "refuses"),
+    ("snapshot_state", "snapshot_subworkflow_rungs", "refuse_phase_wipe", "holds"),
+]
 
 
 def test_work_unit_and_obligation_lifecycle():
@@ -334,4 +345,35 @@ def test_failed_unit_recording():
     assert snap.failed_units == 1
     assert snap.status == SubworkflowStatus.FAILED
     assert snap.units["err_unit"].error == "connection timed out"
+
+
+def test_snapshot_subworkflow_rungs_under_watched():
+    with watched() as seen:
+        # 1. discharge_obligation_and_advance holds
+        facts_ok = {
+            "obligations_discharged": True,
+            "coverage_non_shrinking": True,
+            "watermark_monotonic": True,
+        }
+        c1 = decide_subworkflow_transition(facts_ok)
+        assert c1.rung.name == "discharge_obligation_and_advance"
+
+        # 2. discharge_obligation_and_advance refuses, retain_pending_subworkflow holds
+        facts_pending = {
+            "obligations_discharged": False,
+            "coverage_non_shrinking": True,
+            "watermark_monotonic": True,
+        }
+        c2 = decide_subworkflow_transition(facts_pending)
+        assert c2.rung.name == "retain_pending_subworkflow"
+
+        # 3. retain_pending_subworkflow refuses, refuse_phase_wipe holds
+        facts_wipe = {
+            "obligations_discharged": False,
+            "coverage_non_shrinking": False,
+            "watermark_monotonic": True,
+        }
+        c3 = decide_subworkflow_transition(facts_wipe)
+        assert c3.rung.name == "refuse_phase_wipe"
+
 

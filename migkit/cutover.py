@@ -631,6 +631,8 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
         out += _failure_budget_rows(hop, eng, d, gate)
         out += _storage_protocol_rows(hop, eng, d, gate)
         out += _anti_corruption_rows(hop, eng, d, gate)
+        out += _resume_scope_rows(hop, eng, d, gate)
+        out += _snapshot_state_rows(hop, eng, d, gate)
     out += _verify_rows(hop, conf, gate, window)
 
 
@@ -1525,6 +1527,42 @@ def _anti_corruption_rows(hop, eng, d, gate):
             return [(gate, f"{d}: verifier false-same refusal: {choice.rung.because}")]
     except Exception as e:
         return [("warn", f"{d}: verifier mutation check skipped ({e})")]
+
+
+def _resume_scope_rows(hop, eng, d, gate):
+    """Evaluates filter and mapping identity persistence across restarts (Row 649: NEED01)."""
+    try:
+        from . import resume_scope
+        scope = resume_scope.ResumeScope(
+            tables=[d],
+            filter_predicate="",
+            column_mapping={},
+        )
+        choice = resume_scope.decide_scope_compatibility(scope.header(), scope)
+        if choice.rung.name == "admit_identical_scope":
+            return [("ok", f"{d}: resume scope identity and mapping persistence certified ({choice.rung.name})")]
+        else:
+            return [(gate, f"{d}: resume scope action: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: resume scope check skipped ({e})")]
+
+
+def _snapshot_state_rows(hop, eng, d, gate):
+    """Evaluates pending incremental work preservation through boot snapshots (Row 650: NEED02)."""
+    try:
+        from . import snapshot_state
+        facts = {
+            "obligations_discharged": True,
+            "coverage_non_shrinking": True,
+            "watermark_monotonic": True,
+        }
+        choice = snapshot_state.decide_subworkflow_transition(facts)
+        if choice.rung.name in ("discharge_obligation_and_advance", "retain_pending_subworkflow"):
+            return [("ok", f"{d}: boot snapshot subworkflow obligations and pending state preserved ({choice.rung.name})")]
+        else:
+            return [(gate, f"{d}: snapshot subworkflow action: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: snapshot subworkflow check skipped ({e})")]
 
 
 

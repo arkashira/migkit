@@ -2,8 +2,9 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
+from . import decide
 from . import durable
 
 
@@ -665,3 +666,63 @@ class SnapshotWorkflowCoordinator:
             cdc=cdc,
             active_phase=manifest.get("active_phase", SubworkflowType.SNAPSHOT),
         )
+
+
+def snapshot_subworkflow_rungs() -> Tuple[decide.Rung, ...]:
+    """Decision ladder for preserving pending incremental work and discharging subworkflow obligations."""
+    return (
+        decide.Rung(
+            "discharge_obligation_and_advance",
+            "advance subworkflow phase after all obligations discharged and monotonic coverage proved",
+            needs=(
+                decide.Need(
+                    "all phase obligations discharged",
+                    lambda f: bool(f.get("obligations_discharged", True)),
+                    "undischarged obligations remain in current subworkflow phase",
+                ),
+                decide.Need(
+                    "coverage is monotonic non-shrinking",
+                    lambda f: bool(f.get("coverage_non_shrinking", True)),
+                    "subworkflow phase transition would shrink verified coverage",
+                ),
+                decide.Need(
+                    "watermark is monotonically increasing",
+                    lambda f: bool(f.get("watermark_monotonic", True)),
+                    "new watermark regresses behind previous subworkflow state",
+                ),
+            ),
+            footprint=0,
+            leaves="advanced subworkflow status and discharged obligations",
+        ),
+        decide.Rung(
+            "retain_pending_subworkflow",
+            "retain pending subworkflow and preserve partial work across boot snapshot",
+            needs=(
+                decide.Need(
+                    "coverage is monotonic non-shrinking",
+                    lambda f: bool(f.get("coverage_non_shrinking", True)),
+                    "subworkflow phase transition would shrink verified coverage",
+                ),
+                decide.Need(
+                    "watermark is monotonically increasing",
+                    lambda f: bool(f.get("watermark_monotonic", True)),
+                    "new watermark regresses behind previous subworkflow state",
+                ),
+            ),
+            footprint=1,
+            leaves="preserved subworkflow units across boot snapshot",
+        ),
+        decide.Rung(
+            "refuse_phase_wipe",
+            "refuse boot snapshot phase transition that wipes obligations or regresses watermarks",
+            footprint=2,
+            leaves="blocked transition preserving existing state",
+        ),
+    )
+
+
+def decide_subworkflow_transition(facts: Dict[str, Any]) -> decide.Choice:
+    """Climb the snapshot_subworkflow_rungs ladder."""
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("snapshot subworkflow phase transition", snapshot_subworkflow_rungs(), fact_obj)
+

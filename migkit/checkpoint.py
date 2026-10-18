@@ -163,10 +163,13 @@ class Checkpoint:
     whole view over the other's before.
     """
 
-    def __init__(self, path):
+    def __init__(self, path, scope=None):
         self.path = path
+        self.scope = scope
         self._lock = threading.Lock()
         self._data = {"format_version": FORMAT_VERSION, "tables": {}}
+        if self.scope is not None:
+            self._data["scope_header"] = self.scope.header()
         # the tables this run worked on: its saves write those, and keep
         # what another run saved of the rest
         self._touched = set()
@@ -175,7 +178,11 @@ class Checkpoint:
             loaded = read_state(path, "cache")
             if isinstance(loaded, dict) and \
                     loaded.get("format_version") == FORMAT_VERSION:
+                if self.scope is not None and loaded.get("scope_header"):
+                    self.scope.validate_compatibility(loaded["scope_header"])
                 self._data = loaded
+                if self.scope is not None and not loaded.get("scope_header"):
+                    self._data["scope_header"] = self.scope.header()
 
     # ---- resume decisions ----
 

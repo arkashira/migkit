@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from . import checkpoint as cp_mod
+from . import decide
 from . import durable
 from . import rowfilter
 
@@ -106,6 +107,84 @@ class DurableUnitIdentity:
         return hash(self.unit_id)
 
 
+def resume_scope_compatibility_rungs() -> Tuple[decide.Rung, ...]:
+    """Decision ladder evaluating resume compatibility against stored checkpoint scope."""
+    return (
+        decide.Rung(
+            "admit_identical_scope",
+            "admit resume into checkpoint with matching scope, filter, and mappings",
+            needs=(
+                decide.Need(
+                    "table scope matches stored header",
+                    lambda f: bool(f.get("tables_match", True)),
+                    lambda f: f"table scope mismatch: expected {sorted(f.get('expected_tables', []))}, found {sorted(f.get('stored_tables', []))}",
+                ),
+                decide.Need(
+                    "filter predicate matches stored header",
+                    lambda f: bool(f.get("filter_match", True)),
+                    lambda f: f"filter predicate mismatch: expected {f.get('expected_filter')!r}, found {f.get('stored_filter')!r}",
+                ),
+                decide.Need(
+                    "column mappings match stored header",
+                    lambda f: bool(f.get("mapping_match", True)),
+                    lambda f: f"column mapping mismatch: expected {f.get('expected_mapping')!r}, found {f.get('stored_mapping')!r}",
+                ),
+                decide.Need(
+                    "tenant predicate matches stored header",
+                    lambda f: bool(f.get("tenant_match", True)),
+                    lambda f: f"tenant predicate mismatch: expected {f.get('expected_tenant')!r}, found {f.get('stored_tenant')!r}",
+                ),
+                decide.Need(
+                    "scope identity matches stored header",
+                    lambda f: bool(f.get("identity_match", True)),
+                    lambda f: f"scope identity mismatch: expected {f.get('expected_identity')!r}, found {f.get('stored_identity')!r}",
+                ),
+            ),
+            footprint=0,
+            leaves="reused partials and durable unit identities",
+        ),
+        decide.Rung(
+            "refuse_incompatible_scope",
+            "refuse resume and discard stored partials due to scope or filter drift",
+            footprint=1,
+            leaves="fresh checkpoint on new scope identity",
+        ),
+    )
+
+
+def decide_scope_compatibility(stored_header: Dict[str, Any], current_scope: "ResumeScope") -> decide.Choice:
+    """Climb the resume_scope_compatibility_rungs ladder."""
+    stored_tables = set(stored_header.get("tables") or [])
+    expected_tables = set(current_scope.tables)
+    stored_filter = str(stored_header.get("filter_predicate") or "").strip()
+    expected_filter = str(current_scope.filter_predicate or "").strip()
+    stored_mapping = {str(k): v for k, v in sorted((stored_header.get("column_mapping") or {}).items())}
+    expected_mapping = current_scope.column_mapping
+    stored_tenant = stored_header.get("tenant_predicate") or ""
+    expected_tenant = current_scope.tenant_predicate or ""
+    stored_identity = stored_header.get("scope_identity") or ""
+    expected_identity = current_scope.scope_identity or ""
+
+    facts = decide.Facts({
+        "tables_match": stored_tables == expected_tables,
+        "stored_tables": list(stored_tables),
+        "expected_tables": list(expected_tables),
+        "filter_match": stored_filter == expected_filter,
+        "stored_filter": stored_filter,
+        "expected_filter": expected_filter,
+        "mapping_match": stored_mapping == expected_mapping,
+        "stored_mapping": stored_mapping,
+        "expected_mapping": expected_mapping,
+        "tenant_match": stored_tenant == expected_tenant,
+        "stored_tenant": stored_tenant,
+        "expected_tenant": expected_tenant,
+        "identity_match": not stored_identity or stored_identity == expected_identity,
+        "stored_identity": stored_identity,
+        "expected_identity": expected_identity,
+    })
+    return decide.climb("resume scope compatibility", resume_scope_compatibility_rungs(), facts)
+
+
 class ResumeScope:
     def __init__(
         self,
@@ -159,38 +238,9 @@ class ResumeScope:
         if not isinstance(hdr, dict):
             raise IncompatibleResumeScopeError(f"invalid checkpoint scope header: {hdr!r}")
 
-        stored_tables = set(hdr.get("tables") or [])
-        expected_tables = set(self.tables)
-        if stored_tables != expected_tables:
-            raise IncompatibleResumeScopeError(
-                f"table scope mismatch: expected {sorted(expected_tables)}, found {sorted(stored_tables)}"
-            )
-
-        stored_filter = str(hdr.get("filter_predicate") or "").strip()
-        expected_filter = str(self.filter_predicate or "").strip()
-        if stored_filter != expected_filter:
-            raise IncompatibleResumeScopeError(
-                f"filter predicate mismatch: expected {expected_filter!r}, found {stored_filter!r}"
-            )
-
-        stored_mapping = {str(k): v for k, v in sorted((hdr.get("column_mapping") or {}).items())}
-        if stored_mapping != self.column_mapping:
-            raise IncompatibleResumeScopeError(
-                f"column mapping mismatch: expected {self.column_mapping!r}, found {stored_mapping!r}"
-            )
-
-        stored_tenant = hdr.get("tenant_predicate") or ""
-        expected_tenant = self.tenant_predicate or ""
-        if stored_tenant != expected_tenant:
-            raise IncompatibleResumeScopeError(
-                f"tenant predicate mismatch: expected {expected_tenant!r}, found {stored_tenant!r}"
-            )
-
-        stored_identity = hdr.get("scope_identity")
-        if stored_identity and stored_identity != self.scope_identity:
-            raise IncompatibleResumeScopeError(
-                f"scope identity mismatch: expected {self.scope_identity!r}, found {stored_identity!r}"
-            )
+        choice = decide_scope_compatibility(hdr, self)
+        if choice.rung.name != "admit_identical_scope":
+            raise IncompatibleResumeScopeError(choice.reason or choice.rung.because)
 
         return True
 

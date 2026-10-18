@@ -8,7 +8,16 @@ from migkit.resume_scope import (
     DurableUnitIdentity,
     ScopedCheckpoint,
     ResumeScopeRunner,
+    decide_scope_compatibility,
 )
+import tests.rung_branches
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("resume_scope", "resume_scope_compatibility_rungs", "admit_identical_scope", "holds"),
+    ("resume_scope", "resume_scope_compatibility_rungs", "admit_identical_scope", "refuses"),
+    ("resume_scope", "resume_scope_compatibility_rungs", "refuse_incompatible_scope", "holds"),
+]
 
 
 def test_scope_header_persists_identity_filter_mapping_tenant():
@@ -378,3 +387,19 @@ def test_sqlite_crash_and_resume_end_to_end(tmp_path):
             assert r[1] == "t1"
             assert r[2] == "active"
             assert r[3] > 100.0
+
+
+def test_resume_scope_compatibility_rungs_under_watched():
+    with watched() as seen:
+        s1 = ResumeScope(tables=["orders"], filter_predicate="active = 1", column_mapping={"id": "pk"})
+
+        # 1. admit_identical_scope holds
+        choice_match = decide_scope_compatibility(s1.header(), s1)
+        assert choice_match.rung.name == "admit_identical_scope"
+
+        # 2. admit_identical_scope refuses, refuse_incompatible_scope holds
+        diff_hdr = dict(s1.header())
+        diff_hdr["filter_predicate"] = "active = 0"
+        choice_diff = decide_scope_compatibility(diff_hdr, s1)
+        assert choice_diff.rung.name == "refuse_incompatible_scope"
+

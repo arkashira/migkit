@@ -79,6 +79,8 @@ re-dispatches it with the finding and the row comes back here when it passes.
 | 645 | 2026-10-18 | PASS | critic (agy, session fda5f478) | bd0af21c | recovery_budget_plan decide ladder across 11 branches; wired into cutover.py; failure budget recovery effort allocation by progress, same-state repair prevention, and deadline validity windows; PROVES_RUNGS verified under watched(); 8/8 tests green |
 | 646 | 2026-10-18 | PASS | critic (agy, session fda5f478) | acdb1ac0 | storage_commit_rungs decide ladder across 6 branches; wired into cutover.py; object-store vs catalog commit isolation, staged vs streaming choice by billable work, crash-window no-orphan proof; PROVES_RUNGS verified under watched(); 16/16 tests green |
 | 647 | 2026-10-18 | PASS | critic (agy, session fda5f478) | acdb1ac0 | anti_corruption_mutation_rungs decide ladder across 5 branches; wired into verify_method.py and cutover.py; planted-defect harness, blind spot immunity certification, independent oracle, and zero false-same gating; PROVES_RUNGS verified under watched(); 15/15 tests green |
+| 649 | 2026-10-18 | PASS | critic (agy, session fda5f478) | 82863872 | resume_scope_compatibility_rungs decide ladder across 5 branches; unified with checkpoint.py; wired into cutover.py; filter and mapping identity persisted across restarts; PROVES_RUNGS verified under watched(); 11/11 tests green |
+| 650 | 2026-10-18 | PASS | critic (agy, session fda5f478) | 82863872 | snapshot_subworkflow_rungs decide ladder across 5 branches; wired into cutover.py; pending incremental work preserved across boot snapshots without resetting obligations; PROVES_RUNGS verified under watched(); 13/13 tests green |
 
 
 

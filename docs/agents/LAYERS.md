@@ -26,7 +26,7 @@ A package imports its own rank and the ranks below it, never one above. A rank o
 
 Outside the rule: `tools` (the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them); `data` (the files migkit ships as resources).
 
-## Upward imports still listed: 412
+## Upward imports still listed: 414
 
 ### (not listed)
 
@@ -47,13 +47,15 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/query_guard.py:280` reporting -> decision (`decide`)
 - `migkit/ready.py:615` decision -> workflows (`dynamic_sql_tracer`)
 - `migkit/resume_scope.py:8` scope -> persistence (`checkpoint`)
-- `migkit/resume_scope.py:9` scope -> persistence (`durable`)
+- `migkit/resume_scope.py:9` scope -> decision (`decide`)
+- `migkit/resume_scope.py:10` scope -> persistence (`durable`)
 - `migkit/scanplan.py:854` decision -> engines (`engines.base`)
 - `migkit/scanplan.py:1016` decision -> workflows (`leaves`)
 - `migkit/schema.py:1` conversion -> workflows (`indexes`)
 - `migkit/schema_drift.py:480` conversion -> decision (`sizing`)
 - `migkit/schema_drift.py:1287` conversion -> decision (`decide`)
 - `migkit/schema_epoch_plan.py:537` conversion -> decision (`decide`)
+- `migkit/snapshot_state.py:7` persistence -> decision (`decide`)
 - `migkit/storedcode/convert.py:356` conversion -> workflows (`conversion_ledger`)
 
 ### a brand's confidence is a rung (`decide.brand_confidence`) the configuration reads once the server's signs are in; the rung moves below configuration
@@ -191,7 +193,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a durable record uses the executor's `ranges`; the shared piece moves below persistence
 
-- `migkit/checkpoint.py:388` persistence -> execution (`ranges`)
+- `migkit/checkpoint.py:395` persistence -> execution (`ranges`)
 - `migkit/claims.py:417` persistence -> execution (`ranges`)
 
 ### a durable record uses the executor's `util`; the shared piece moves below persistence
