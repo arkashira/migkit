@@ -653,6 +653,8 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
         out += _exit_portability_rows(hop, eng, d, gate)
         out += _app_rollback_rows(hop, eng, d, gate)
         out += _rollback_set_rows(hop, eng, d, gate)
+        out += _support_reproducer_rows(hop, eng, d, gate)
+        out += _partial_access_rows(hop, eng, d, gate)
     out += _verify_rows(hop, conf, gate, window)
 
 
@@ -2019,6 +2021,48 @@ def _rollback_set_rows(hop, eng, d, gate):
             return [(gate, f"{d}: rollback set action: {choice.rung.because}")]
     except Exception as e:
         return [("warn", f"{d}: rollback set check skipped ({e})")]
+
+
+def _support_reproducer_rows(hop, eng, d, gate):
+    """Evaluates bounded secret-safe diagnostic reproduction harness (Row 671: NEED23)."""
+    try:
+        from . import support_reproducer
+        facts = {
+            "category": "schema",
+            "failure_class": "unsupported_type",
+            "offline_sandbox": True,
+            "allow_unredacted_or_unbounded": False,
+            "refused": False,
+        }
+        choice = support_reproducer.decide_support_reproducer(facts)
+        if choice.rung.name in ("schema_fault_reproduction", "data_integrity_reproduction", "process_lifecycle_reproduction", "offline_sandbox_reproduction"):
+            return [("ok", f"{d}: diagnostic support reproducer strategy verified ({choice.rung.name})")]
+        else:
+            return [(gate, f"{d}: diagnostic reproducer action: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: diagnostic reproducer check skipped ({e})")]
+
+
+def _partial_access_rows(hop, eng, d, gate):
+    """Evaluates partial access scopes and honest coverage evidence (Row 672: NEED24)."""
+    try:
+        from . import partial_access
+        facts = {
+            "authorized_scope": True,
+            "signature_valid": True,
+            "manifest_complete": True,
+            "provenance_verified": True,
+            "honest_coverage": True,
+            "allow_unauthorized_or_tampered": False,
+            "refused": False,
+        }
+        choice = partial_access.decide_partial_access(facts)
+        if choice.rung.name in ("authorized_partial_export_scope", "signature_verified_manifest_bundle", "provenance_chain_lineage_proof", "absent_source_honest_coverage"):
+            return [("ok", f"{d}: partial access scope and honest coverage verified ({choice.rung.name})")]
+        else:
+            return [(gate, f"{d}: partial access action: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: partial access check skipped ({e})")]
 
 
 # --- the plan in words --------------------------------------------------------

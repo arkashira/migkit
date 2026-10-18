@@ -2,10 +2,23 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import os
 import time
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+from . import decide
+from .verdict import VERDICTS
+
+
+def get_default_allowed_networks(override: Optional[Iterable[str]] = None) -> Set[str]:
+    if override is not None:
+        return set(override)
+    env = os.environ.get("MIGKIT_ALLOWED_NETWORKS")
+    if env:
+        return {s.strip() for s in env.split(",") if s.strip()}
+    return {"127.0.0.1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "::1"}
 
 
 class PartialAccessError(Exception):
@@ -299,7 +312,7 @@ class PartialAccessScope:
     permitted_columns: Dict[str, Set[str]] = field(default_factory=dict)
     inaccessible_columns: Dict[str, Set[str]] = field(default_factory=dict)
     predicates: Dict[str, str] = field(default_factory=dict)
-    allowed_networks: Set[str] = field(default_factory=lambda: {"127.0.0.1"})
+    allowed_networks: Set[str] = field(default_factory=get_default_allowed_networks)
     allowed_roles: Set[str] = field(default_factory=set)
     is_partial: bool = True
 
@@ -354,7 +367,7 @@ class AuthorizedCollectorRegistry:
         self._collectors[collector_id] = {
             "allowed_scopes": set(allowed_scopes),
             "secret_key": secret_key,
-            "allowed_networks": set(allowed_networks or ["127.0.0.1"]),
+            "allowed_networks": set(allowed_networks if allowed_networks is not None else get_default_allowed_networks()),
             "roles": set(roles or []),
             "revoked": False,
         }
@@ -639,11 +652,11 @@ class PartialAccessReconciler:
 
         total_objects = len(self.known_upstream_objects)
         if len(discrepancies) > 0:
-            final_verdict = "different"
-            exit_code = 1
+            canonical = VERDICTS["different"]
         else:
-            final_verdict = "incomplete"
-            exit_code = 3
+            canonical = VERDICTS["incomplete"]
+        final_verdict = canonical.word
+        exit_code = canonical.exit
 
         summary = (
             f"Partial export coverage: {len(accessible_verified)}/{total_objects} objects verified; "
@@ -661,3 +674,176 @@ class PartialAccessReconciler:
             discrepancies=discrepancies,
             summary=summary,
         )
+
+
+# Decide ladders for Partial Access Scope and Honest Coverage
+
+def _prove_authorized_partial_export_scope(facts: decide.Facts) -> bool:
+    return bool(facts.get("authorized_scope") and not facts.get("refused"))
+
+
+def _prove_signature_verified_manifest_bundle(facts: decide.Facts) -> bool:
+    return bool(facts.get("signature_valid") and facts.get("manifest_complete") and not facts.get("refused"))
+
+
+def _prove_provenance_chain_lineage_proof(facts: decide.Facts) -> bool:
+    return bool(facts.get("provenance_verified") and not facts.get("refused"))
+
+
+def _prove_absent_source_honest_coverage(facts: decide.Facts) -> bool:
+    return bool(facts.get("honest_coverage") and not facts.get("refused"))
+
+
+def _prove_refuse_unauthorized_scope_tampering(facts: decide.Facts) -> bool:
+    return not bool(facts.get("allow_unauthorized_or_tampered"))
+
+
+def partial_access_rungs() -> Tuple[decide.Rung, ...]:
+    return (
+        decide.Rung(
+            "authorized_partial_export_scope",
+            "verify partial access scope against authorized tenant boundaries and allowed networks",
+            needs=(
+                decide.Need(
+                    "authorized export scope certified",
+                    _prove_authorized_partial_export_scope,
+                    "scope authorization check failed",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "signature_verified_manifest_bundle",
+            "authenticate export bundle using HMAC signature and complete object manifest",
+            needs=(
+                decide.Need(
+                    "manifest signature and completeness verified",
+                    _prove_signature_verified_manifest_bundle,
+                    "manifest signature invalid or parts incomplete",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "provenance_chain_lineage_proof",
+            "verify source lineage, collector identity, and epoch sequence proof",
+            needs=(
+                decide.Need(
+                    "provenance lineage verified",
+                    _prove_provenance_chain_lineage_proof,
+                    "provenance chain broken or unverified",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "absent_source_honest_coverage",
+            "produce honest coverage verdicts recording absent evidence without false-same assertion",
+            needs=(
+                decide.Need(
+                    "honest coverage certified",
+                    _prove_absent_source_honest_coverage,
+                    "honest coverage criteria not met",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_unauthorized_scope_tampering",
+            "refuse partial access operations when scope violation, privilege escalation, or payload tampering is detected",
+            needs=(
+                decide.Need(
+                    "scope tampering or privilege escalation refused",
+                    _prove_refuse_unauthorized_scope_tampering,
+                    "scope tampering or privilege escalation detected",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_partial_access(facts: Dict[str, Any]) -> decide.Choice:
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("partial access scope", partial_access_rungs(), fact_obj)
+
+
+def _prove_all_accessible_verified(facts: decide.Facts) -> bool:
+    return bool(facts.get("all_accessible_ok") and not facts.get("refused"))
+
+
+def _prove_explicit_absent_evidence(facts: decide.Facts) -> bool:
+    return bool(facts.get("has_absent_evidence") and not facts.get("refused"))
+
+
+def _prove_discrepancy_divergence_review(facts: decide.Facts) -> bool:
+    return bool(facts.get("discrepancies_detected") and not facts.get("refused"))
+
+
+def _prove_partial_scope_certified(facts: decide.Facts) -> bool:
+    return bool(facts.get("scope_certified") and not facts.get("refused"))
+
+
+def _prove_refuse_uncovered_omission(facts: decide.Facts) -> bool:
+    return not bool(facts.get("allow_uncovered_omission"))
+
+
+def honest_coverage_rungs() -> Tuple[decide.Rung, ...]:
+    return (
+        decide.Rung(
+            "all_accessible_verified",
+            "all accessible objects in authorized scope match target exactly",
+            needs=(
+                decide.Need(
+                    "all accessible objects match",
+                    _prove_all_accessible_verified,
+                    "not all accessible objects verified",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "explicit_absent_evidence",
+            "record explicit AbsentSourceEvidence for unexported upstream objects",
+            needs=(
+                decide.Need(
+                    "absent source evidence recorded",
+                    _prove_explicit_absent_evidence,
+                    "no absent source evidence present",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "discrepancy_divergence_review",
+            "report divergence discrepancy requiring user review or repair before cutover",
+            needs=(
+                decide.Need(
+                    "discrepancy divergence detected",
+                    _prove_discrepancy_divergence_review,
+                    "no discrepancies detected",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "partial_scope_certified",
+            "certify partial export coverage with explicit boundary disclosure",
+            needs=(
+                decide.Need(
+                    "partial scope certified",
+                    _prove_partial_scope_certified,
+                    "partial scope not certified",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_uncovered_omission",
+            "refuse verification when unexported upstream objects lack explicit absent evidence",
+            needs=(
+                decide.Need(
+                    "uncovered omission refused",
+                    _prove_refuse_uncovered_omission,
+                    "uncovered upstream omissions detected",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_honest_coverage(facts: Dict[str, Any]) -> decide.Choice:
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("honest coverage evaluation", honest_coverage_rungs(), fact_obj)
+

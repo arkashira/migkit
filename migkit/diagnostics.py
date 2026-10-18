@@ -32,6 +32,7 @@ import threading
 import time
 import zipfile
 from dataclasses import dataclass, field
+from typing import Dict, List, Optional
 
 HIDDEN = "<removed>"
 #: the last lines of a hop's long files, and the last run logs, carried
@@ -435,3 +436,29 @@ def kept(hop):
         return []
     return list((got or {}).get("probes") or []) if isinstance(
         got, dict) else []
+
+
+def create_support_reproducer_bundle(
+    failure_class: Optional[str] = None,
+    diagnostic_logs: Optional[list] = None,
+    config_snippet: Optional[dict] = None,
+    zip_path: Optional[str] = None,
+):
+    """Builds a bounded, scrubbed support diagnostic reproduction bundle (Row 671: NEED23)."""
+    from .support_reproducer import SupportReproducer, SyntheticFixtureGenerator
+    reproducer = SupportReproducer()
+    fixtures = []
+    if failure_class:
+        gen = SyntheticFixtureGenerator()
+        if failure_class in gen.available_classes():
+            fixtures.append(gen.generate(failure_class))
+    bundle = reproducer.capture_bundle(
+        diagnostic_logs=diagnostic_logs,
+        config_snippet=config_snippet,
+        synthetic_fixtures=fixtures,
+        failure_class=failure_class,
+    )
+    if zip_path:
+        bundle.write_zip(zip_path)
+    return bundle
+

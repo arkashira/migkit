@@ -1,8 +1,12 @@
 import json
+import os
 import zipfile
 from pathlib import Path
 import pytest
+from click.testing import CliRunner
 
+from tests.rung_branches import watched
+from migkit.cli import main
 from migkit.support_reproducer import (
     DiagnosticBundle,
     SupportReproducer,
@@ -15,7 +19,38 @@ from migkit.support_reproducer import (
     SCHEMA_FAILURE_CLASSES,
     DATA_FAILURE_CLASSES,
     PROCESS_FAILURE_CLASSES,
+    get_safe_test_ips,
+    get_max_log_lines,
+    get_max_log_bytes,
+    support_reproducer_rungs,
+    decide_support_reproducer,
+    diagnostic_scrubbing_rungs,
+    decide_diagnostic_scrubbing,
 )
+
+PROVES_RUNGS = [
+    ("support_reproducer", "support_reproducer_rungs", "schema_fault_reproduction", "holds"),
+    ("support_reproducer", "support_reproducer_rungs", "schema_fault_reproduction", "refuses"),
+    ("support_reproducer", "support_reproducer_rungs", "data_integrity_reproduction", "holds"),
+    ("support_reproducer", "support_reproducer_rungs", "data_integrity_reproduction", "refuses"),
+    ("support_reproducer", "support_reproducer_rungs", "process_lifecycle_reproduction", "holds"),
+    ("support_reproducer", "support_reproducer_rungs", "process_lifecycle_reproduction", "refuses"),
+    ("support_reproducer", "support_reproducer_rungs", "offline_sandbox_reproduction", "holds"),
+    ("support_reproducer", "support_reproducer_rungs", "offline_sandbox_reproduction", "refuses"),
+    ("support_reproducer", "support_reproducer_rungs", "refuse_unbounded_unredacted_bundle", "holds"),
+    ("support_reproducer", "support_reproducer_rungs", "refuse_unbounded_unredacted_bundle", "refuses"),
+    ("support_reproducer", "diagnostic_scrubbing_rungs", "secret_credential_scrubbing", "holds"),
+    ("support_reproducer", "diagnostic_scrubbing_rungs", "secret_credential_scrubbing", "refuses"),
+    ("support_reproducer", "diagnostic_scrubbing_rungs", "ip_address_scrubbing", "holds"),
+    ("support_reproducer", "diagnostic_scrubbing_rungs", "ip_address_scrubbing", "refuses"),
+    ("support_reproducer", "diagnostic_scrubbing_rungs", "pii_ssn_email_scrubbing", "holds"),
+    ("support_reproducer", "diagnostic_scrubbing_rungs", "pii_ssn_email_scrubbing", "refuses"),
+    ("support_reproducer", "diagnostic_scrubbing_rungs", "log_size_truncation", "holds"),
+    ("support_reproducer", "diagnostic_scrubbing_rungs", "log_size_truncation", "refuses"),
+    ("support_reproducer", "diagnostic_scrubbing_rungs", "refuse_unscrubbed_exposure", "holds"),
+    ("support_reproducer", "diagnostic_scrubbing_rungs", "refuse_unscrubbed_exposure", "refuses"),
+]
+
 
 
 def test_diagnostic_bundle_creation_and_fields():
@@ -316,4 +351,79 @@ def test_diagnostic_bundle_json_and_dict_roundtrip():
     assert reconstructed.bundle_id == "b123"
     assert reconstructed.failure_class == "schema_drift"
     assert reconstructed.tool_versions == {"migkit": "0.9.0"}
+
+
+def test_support_reproducer_rungs_under_watched():
+    with watched():
+        # support_reproducer_rungs:
+        # 1. schema_fault_reproduction
+        c1 = decide_support_reproducer({"category": "schema"})
+        assert c1.rung.name == "schema_fault_reproduction"
+
+        # 2. data_integrity_reproduction
+        c2 = decide_support_reproducer({"category": "data"})
+        assert c2.rung.name == "data_integrity_reproduction"
+
+        # 3. process_lifecycle_reproduction
+        c3 = decide_support_reproducer({"category": "process"})
+        assert c3.rung.name == "process_lifecycle_reproduction"
+
+        # 4. offline_sandbox_reproduction
+        c4 = decide_support_reproducer({"category": "other", "offline_sandbox": True})
+        assert c4.rung.name == "offline_sandbox_reproduction"
+
+        # 5. refuse_unbounded_unredacted_bundle
+        c5 = decide_support_reproducer({"category": "other", "offline_sandbox": False})
+        assert c5.rung.name == "refuse_unbounded_unredacted_bundle"
+
+        # 6. refuse fallback
+        c6 = decide_support_reproducer({"category": "other", "offline_sandbox": False, "allow_unredacted_or_unbounded": True})
+        assert c6.rung is None
+
+        # diagnostic_scrubbing_rungs:
+        # 1. secret_credential_scrubbing
+        s1 = decide_diagnostic_scrubbing({"scrub_secrets": True})
+        assert s1.rung.name == "secret_credential_scrubbing"
+
+        # 2. ip_address_scrubbing
+        s2 = decide_diagnostic_scrubbing({"scrub_secrets": False, "scrub_ips": True})
+        assert s2.rung.name == "ip_address_scrubbing"
+
+        # 3. pii_ssn_email_scrubbing
+        s3 = decide_diagnostic_scrubbing({"scrub_secrets": False, "scrub_ips": False, "scrub_pii": True})
+        assert s3.rung.name == "pii_ssn_email_scrubbing"
+
+        # 4. log_size_truncation
+        s4 = decide_diagnostic_scrubbing({"scrub_secrets": False, "scrub_ips": False, "scrub_pii": False, "truncate_logs": True})
+        assert s4.rung.name == "log_size_truncation"
+
+        # 5. refuse_unscrubbed_exposure
+        s5 = decide_diagnostic_scrubbing({"scrub_secrets": False, "scrub_ips": False, "scrub_pii": False, "truncate_logs": False})
+        assert s5.rung.name == "refuse_unscrubbed_exposure"
+
+        # 6. refuse fallback
+        s6 = decide_diagnostic_scrubbing({"scrub_secrets": False, "scrub_ips": False, "scrub_pii": False, "truncate_logs": False, "allow_unscrubbed_exposure": True})
+        assert s6.rung is None
+
+
+def test_dynamic_bounds_and_cli_bundle(tmp_path, monkeypatch):
+    monkeypatch.setenv("MIGKIT_SAFE_TEST_IPS", "127.0.0.1, 192.168.10.1")
+    monkeypatch.setenv("MIGKIT_MAX_LOG_LINES", "120")
+    monkeypatch.setenv("MIGKIT_MAX_LOG_BYTES", "4096")
+
+    assert "192.168.10.1" in get_safe_test_ips()
+    assert get_max_log_lines() == 120
+    assert get_max_log_bytes() == 4096
+
+    # Test CLI command diagnostics-bundle
+    runner = CliRunner()
+    zip_dest = str(tmp_path / "test_bundle.zip")
+    res = runner.invoke(main, ["diagnostics-bundle", "--failure-class", "schema_drift", "--out", zip_dest])
+    assert res.exit_code == 0
+    assert "created support diagnostic bundle" in res.output
+    assert Path(zip_dest).exists()
+    with zipfile.ZipFile(zip_dest, "r") as z:
+        names = z.namelist()
+        assert "bundle.json" in names
+
 

@@ -7,9 +7,9 @@ import time
 import zipfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Union
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
-from . import __version__
+from . import __version__, decide
 from .redact import Redactor, scrub
 
 SCHEMA_FAILURE_CLASSES = (
@@ -45,6 +45,39 @@ _SCHEMA_KEY_EXCLUSIONS = {"primary_key", "foreign_key", "partition_key", "sort_k
 SAFE_TEST_IPS = {"127.0.0.1", "10.0.0.1", "0.0.0.0"}
 
 
+def get_safe_test_ips(override: Optional[Iterable[str]] = None) -> Set[str]:
+    if override is not None:
+        return set(override)
+    env = os.environ.get("MIGKIT_SAFE_TEST_IPS")
+    if env:
+        return {s.strip() for s in env.split(",") if s.strip()}
+    return set(SAFE_TEST_IPS)
+
+
+def get_max_log_lines(override: Optional[int] = None) -> int:
+    if override is not None:
+        return override
+    env = os.environ.get("MIGKIT_MAX_LOG_LINES")
+    if env:
+        try:
+            return int(env)
+        except ValueError:
+            pass
+    return 500
+
+
+def get_max_log_bytes(override: Optional[int] = None) -> int:
+    if override is not None:
+        return override
+    env = os.environ.get("MIGKIT_MAX_LOG_BYTES")
+    if env:
+        try:
+            return int(env)
+        except ValueError:
+            pass
+    return 65536
+
+
 @dataclass
 class PrivacyScanReport:
     is_clean: bool
@@ -53,7 +86,7 @@ class PrivacyScanReport:
 
 class PrivacyScanner:
     def __init__(self, safe_ips: Optional[Set[str]] = None):
-        self.safe_ips = set(safe_ips) if safe_ips else set(SAFE_TEST_IPS)
+        self.safe_ips = set(safe_ips) if safe_ips is not None else get_safe_test_ips()
 
     def scan(self, data: Any) -> PrivacyScanReport:
         violations: List[str] = []
@@ -107,183 +140,224 @@ class SyntheticFixture:
         return cls(**data)
 
 
+def _build_unsupported_type_fixture(failure_class: str, **kwargs: Any) -> SyntheticFixture:
+    return SyntheticFixture(
+        failure_class=failure_class,
+        category="schema",
+        schema_definition={
+            "table": "synth_geo",
+            "columns": [
+                {"name": "id", "type": "INTEGER", "primary_key": True},
+                {"name": "geo_polygon", "type": "GEOMETRY_PROPRIETARY", "nullable": True},
+            ],
+        },
+        source_config={"host": "127.0.0.1", "port": 5432, "engine": "postgres"},
+        target_config={"host": "10.0.0.1", "port": 3306, "engine": "mysql"},
+        records=[{"id": 1, "sequence_id": 1, "geo_polygon": "POLYGON((0 0, 0 1, 1 1, 1 0, 0 0))"}],
+        expected_error="unsupported column type: GEOMETRY_PROPRIETARY",
+    )
+
+
+def _build_missing_table_fixture(failure_class: str, **kwargs: Any) -> SyntheticFixture:
+    return SyntheticFixture(
+        failure_class=failure_class,
+        category="schema",
+        schema_definition={
+            "source_tables": ["synth_tbl_a"],
+            "target_tables": [],
+        },
+        source_config={"host": "127.0.0.1", "port": 5432},
+        target_config={"host": "10.0.0.1", "port": 5432},
+        records=[{"id": 1, "sequence_id": 1}],
+        expected_error="target table synth_tbl_a does not exist",
+    )
+
+
+def _build_collation_mismatch_fixture(failure_class: str, **kwargs: Any) -> SyntheticFixture:
+    return SyntheticFixture(
+        failure_class=failure_class,
+        category="schema",
+        schema_definition={
+            "table": "synth_collation",
+            "source_collation": "utf8mb4_bin",
+            "target_collation": "latin1_swedish_ci",
+            "columns": [{"name": "col_str", "type": "VARCHAR(64)"}],
+        },
+        source_config={"host": "127.0.0.1", "port": 3306},
+        target_config={"host": "10.0.0.1", "port": 3306},
+        records=[{"id": 1, "sequence_id": 1, "col_str": "val"}],
+        expected_error="collation mismatch on column col_str: utf8mb4_bin != latin1_swedish_ci",
+    )
+
+
+def _build_foreign_key_cycle_fixture(failure_class: str, **kwargs: Any) -> SyntheticFixture:
+    return SyntheticFixture(
+        failure_class=failure_class,
+        category="schema",
+        schema_definition={
+            "tables": {
+                "synth_t1": {"columns": ["id", "t2_id"], "fks": [{"column": "t2_id", "ref": "synth_t2.id"}]},
+                "synth_t2": {"columns": ["id", "t1_id"], "fks": [{"column": "t1_id", "ref": "synth_t1.id"}]},
+            }
+        },
+        source_config={"host": "127.0.0.1", "port": 5432},
+        target_config={"host": "10.0.0.1", "port": 5432},
+        records=[],
+        expected_error="cyclic foreign key dependency detected: synth_t1 <-> synth_t2",
+    )
+
+
+def _build_schema_drift_fixture(failure_class: str, **kwargs: Any) -> SyntheticFixture:
+    return SyntheticFixture(
+        failure_class=failure_class,
+        category="schema",
+        schema_definition={
+            "table": "synth_order",
+            "source_columns": ["id", "val_a", "val_b"],
+            "target_columns": ["id", "val_a"],
+        },
+        source_config={"host": "127.0.0.1", "port": 5432},
+        target_config={"host": "10.0.0.1", "port": 5432},
+        records=[{"id": 1, "sequence_id": 1, "val_a": "x", "val_b": "y"}],
+        expected_error="schema drift detected: missing column val_b on target",
+    )
+
+
+def _build_duplicate_pk_fixture(failure_class: str, **kwargs: Any) -> SyntheticFixture:
+    return SyntheticFixture(
+        failure_class=failure_class,
+        category="data",
+        schema_definition={
+            "table": "synth_items",
+            "columns": [
+                {"name": "id", "type": "INTEGER", "primary_key": True},
+                {"name": "val", "type": "TEXT"},
+            ],
+        },
+        source_config={"host": "127.0.0.1", "port": 5432},
+        target_config={"host": "10.0.0.1", "port": 5432},
+        records=[
+            {"id": 101, "sequence_id": 1, "val": "first_item"},
+            {"id": 101, "sequence_id": 2, "val": "duplicate_item"},
+        ],
+        expected_error="unique constraint violation: duplicate primary key value (101)",
+    )
+
+
+def _build_not_null_violation_fixture(failure_class: str, **kwargs: Any) -> SyntheticFixture:
+    return SyntheticFixture(
+        failure_class=failure_class,
+        category="data",
+        schema_definition={
+            "table": "synth_strict",
+            "columns": [
+                {"name": "id", "type": "INTEGER", "primary_key": True},
+                {"name": "required_val", "type": "TEXT", "nullable": False},
+            ],
+        },
+        source_config={"host": "127.0.0.1", "port": 5432},
+        target_config={"host": "10.0.0.1", "port": 5432},
+        records=[{"id": 1, "sequence_id": 1, "required_val": None}],
+        expected_error="not null constraint violation on column required_val",
+    )
+
+
+def _build_encoding_error_fixture(failure_class: str, **kwargs: Any) -> SyntheticFixture:
+    return SyntheticFixture(
+        failure_class=failure_class,
+        category="data",
+        schema_definition={
+            "table": "synth_encoding",
+            "columns": [
+                {"name": "id", "type": "INTEGER", "primary_key": True},
+                {"name": "text_val", "type": "TEXT"},
+            ],
+        },
+        source_config={"host": "127.0.0.1", "port": 5432},
+        target_config={"host": "10.0.0.1", "port": 5432},
+        records=[{"id": 1, "sequence_id": 1, "raw_bytes_hex": "ffff0080"}],
+        expected_error="encoding error: invalid byte sequence for character set utf-8",
+    )
+
+
+def _build_overflow_fixture(failure_class: str, **kwargs: Any) -> SyntheticFixture:
+    return SyntheticFixture(
+        failure_class=failure_class,
+        category="data",
+        schema_definition={
+            "table": "synth_small",
+            "columns": [
+                {"name": "id", "type": "INTEGER", "primary_key": True},
+                {"name": "num_val", "type": "SMALLINT"},
+            ],
+        },
+        source_config={"host": "127.0.0.1", "port": 5432},
+        target_config={"host": "10.0.0.1", "port": 5432},
+        records=[{"id": 1, "sequence_id": 1, "num_val": 2147483647}],
+        expected_error="numeric value out of bounds: 2147483647 exceeds smallint range",
+    )
+
+
+def _build_checksum_mismatch_fixture(failure_class: str, **kwargs: Any) -> SyntheticFixture:
+    return SyntheticFixture(
+        failure_class=failure_class,
+        category="data",
+        schema_definition={
+            "table": "synth_verify",
+            "columns": [
+                {"name": "id", "type": "INTEGER", "primary_key": True},
+                {"name": "checksum", "type": "TEXT"},
+            ],
+        },
+        source_config={"host": "127.0.0.1", "port": 5432},
+        target_config={"host": "10.0.0.1", "port": 5432},
+        records=[
+            {"id": 1, "sequence_id": 1, "source_checksum": "a1b2c3d4", "target_checksum": "e5f60718"}
+        ],
+        expected_error="data checksum mismatch for row key id=1",
+    )
+
+
+def _build_process_failure_fixture(failure_class: str, **kwargs: Any) -> SyntheticFixture:
+    return SyntheticFixture(
+        failure_class=failure_class,
+        category="process",
+        schema_definition={"table": "synth_proc"},
+        source_config={"host": "127.0.0.1", "port": 5432},
+        target_config={"host": "10.0.0.1", "port": 5432},
+        records=[],
+        unknown_internals={
+            "status": "unknown",
+            "reason": "waitid: no child processes; provider internals unobservable",
+        },
+        expected_error="process monitor failure: waitid: no child processes",
+    )
+
+
+_FIXTURE_BUILDERS: Dict[str, Any] = {
+    "unsupported_type": _build_unsupported_type_fixture,
+    "missing_table": _build_missing_table_fixture,
+    "collation_mismatch": _build_collation_mismatch_fixture,
+    "foreign_key_cycle": _build_foreign_key_cycle_fixture,
+    "schema_drift": _build_schema_drift_fixture,
+    "duplicate_pk": _build_duplicate_pk_fixture,
+    "not_null_violation": _build_not_null_violation_fixture,
+    "encoding_error": _build_encoding_error_fixture,
+    "overflow": _build_overflow_fixture,
+    "checksum_mismatch": _build_checksum_mismatch_fixture,
+    "waitid_no_child": _build_process_failure_fixture,
+    "opaque_process_exit": _build_process_failure_fixture,
+}
+
+
 class SyntheticFixtureGenerator:
     def available_classes(self) -> List[str]:
         return list(ALL_FAILURE_CLASSES)
 
     def generate(self, failure_class: str, **kwargs: Any) -> SyntheticFixture:
-        if failure_class == "unsupported_type":
-            return SyntheticFixture(
-                failure_class=failure_class,
-                category="schema",
-                schema_definition={
-                    "table": "synth_geo",
-                    "columns": [
-                        {"name": "id", "type": "INTEGER", "primary_key": True},
-                        {"name": "geo_polygon", "type": "GEOMETRY_PROPRIETARY", "nullable": True},
-                    ],
-                },
-                source_config={"host": "127.0.0.1", "port": 5432, "engine": "postgres"},
-                target_config={"host": "10.0.0.1", "port": 3306, "engine": "mysql"},
-                records=[{"id": 1, "sequence_id": 1, "geo_polygon": "POLYGON((0 0, 0 1, 1 1, 1 0, 0 0))"}],
-                expected_error="unsupported column type: GEOMETRY_PROPRIETARY",
-            )
-        elif failure_class == "missing_table":
-            return SyntheticFixture(
-                failure_class=failure_class,
-                category="schema",
-                schema_definition={
-                    "source_tables": ["synth_tbl_a"],
-                    "target_tables": [],
-                },
-                source_config={"host": "127.0.0.1", "port": 5432},
-                target_config={"host": "10.0.0.1", "port": 5432},
-                records=[{"id": 1, "sequence_id": 1}],
-                expected_error="target table synth_tbl_a does not exist",
-            )
-        elif failure_class == "collation_mismatch":
-            return SyntheticFixture(
-                failure_class=failure_class,
-                category="schema",
-                schema_definition={
-                    "table": "synth_collation",
-                    "source_collation": "utf8mb4_bin",
-                    "target_collation": "latin1_swedish_ci",
-                    "columns": [{"name": "col_str", "type": "VARCHAR(64)"}],
-                },
-                source_config={"host": "127.0.0.1", "port": 3306},
-                target_config={"host": "10.0.0.1", "port": 3306},
-                records=[{"id": 1, "sequence_id": 1, "col_str": "val"}],
-                expected_error="collation mismatch on column col_str: utf8mb4_bin != latin1_swedish_ci",
-            )
-        elif failure_class == "foreign_key_cycle":
-            return SyntheticFixture(
-                failure_class=failure_class,
-                category="schema",
-                schema_definition={
-                    "tables": {
-                        "synth_t1": {"columns": ["id", "t2_id"], "fks": [{"column": "t2_id", "ref": "synth_t2.id"}]},
-                        "synth_t2": {"columns": ["id", "t1_id"], "fks": [{"column": "t1_id", "ref": "synth_t1.id"}]},
-                    }
-                },
-                source_config={"host": "127.0.0.1", "port": 5432},
-                target_config={"host": "10.0.0.1", "port": 5432},
-                records=[],
-                expected_error="cyclic foreign key dependency detected: synth_t1 <-> synth_t2",
-            )
-        elif failure_class == "schema_drift":
-            return SyntheticFixture(
-                failure_class=failure_class,
-                category="schema",
-                schema_definition={
-                    "table": "synth_order",
-                    "source_columns": ["id", "val_a", "val_b"],
-                    "target_columns": ["id", "val_a"],
-                },
-                source_config={"host": "127.0.0.1", "port": 5432},
-                target_config={"host": "10.0.0.1", "port": 5432},
-                records=[{"id": 1, "sequence_id": 1, "val_a": "x", "val_b": "y"}],
-                expected_error="schema drift detected: missing column val_b on target",
-            )
-        elif failure_class == "duplicate_pk":
-            return SyntheticFixture(
-                failure_class=failure_class,
-                category="data",
-                schema_definition={
-                    "table": "synth_items",
-                    "columns": [
-                        {"name": "id", "type": "INTEGER", "primary_key": True},
-                        {"name": "val", "type": "TEXT"},
-                    ],
-                },
-                source_config={"host": "127.0.0.1", "port": 5432},
-                target_config={"host": "10.0.0.1", "port": 5432},
-                records=[
-                    {"id": 101, "sequence_id": 1, "val": "first_item"},
-                    {"id": 101, "sequence_id": 2, "val": "duplicate_item"},
-                ],
-                expected_error="unique constraint violation: duplicate primary key value (101)",
-            )
-        elif failure_class == "not_null_violation":
-            return SyntheticFixture(
-                failure_class=failure_class,
-                category="data",
-                schema_definition={
-                    "table": "synth_strict",
-                    "columns": [
-                        {"name": "id", "type": "INTEGER", "primary_key": True},
-                        {"name": "required_val", "type": "TEXT", "nullable": False},
-                    ],
-                },
-                source_config={"host": "127.0.0.1", "port": 5432},
-                target_config={"host": "10.0.0.1", "port": 5432},
-                records=[{"id": 1, "sequence_id": 1, "required_val": None}],
-                expected_error="not null constraint violation on column required_val",
-            )
-        elif failure_class == "encoding_error":
-            return SyntheticFixture(
-                failure_class=failure_class,
-                category="data",
-                schema_definition={
-                    "table": "synth_encoding",
-                    "columns": [
-                        {"name": "id", "type": "INTEGER", "primary_key": True},
-                        {"name": "text_val", "type": "TEXT"},
-                    ],
-                },
-                source_config={"host": "127.0.0.1", "port": 5432},
-                target_config={"host": "10.0.0.1", "port": 5432},
-                records=[{"id": 1, "sequence_id": 1, "raw_bytes_hex": "ffff0080"}],
-                expected_error="encoding error: invalid byte sequence for character set utf-8",
-            )
-        elif failure_class == "overflow":
-            return SyntheticFixture(
-                failure_class=failure_class,
-                category="data",
-                schema_definition={
-                    "table": "synth_small",
-                    "columns": [
-                        {"name": "id", "type": "INTEGER", "primary_key": True},
-                        {"name": "num_val", "type": "SMALLINT"},
-                    ],
-                },
-                source_config={"host": "127.0.0.1", "port": 5432},
-                target_config={"host": "10.0.0.1", "port": 5432},
-                records=[{"id": 1, "sequence_id": 1, "num_val": 2147483647}],
-                expected_error="numeric value out of bounds: 2147483647 exceeds smallint range",
-            )
-        elif failure_class == "checksum_mismatch":
-            return SyntheticFixture(
-                failure_class=failure_class,
-                category="data",
-                schema_definition={
-                    "table": "synth_verify",
-                    "columns": [
-                        {"name": "id", "type": "INTEGER", "primary_key": True},
-                        {"name": "checksum", "type": "TEXT"},
-                    ],
-                },
-                source_config={"host": "127.0.0.1", "port": 5432},
-                target_config={"host": "10.0.0.1", "port": 5432},
-                records=[
-                    {"id": 1, "sequence_id": 1, "source_checksum": "a1b2c3d4", "target_checksum": "e5f60718"}
-                ],
-                expected_error="data checksum mismatch for row key id=1",
-            )
-        elif failure_class in ("waitid_no_child", "opaque_process_exit"):
-            return SyntheticFixture(
-                failure_class=failure_class,
-                category="process",
-                schema_definition={"table": "synth_proc"},
-                source_config={"host": "127.0.0.1", "port": 5432},
-                target_config={"host": "10.0.0.1", "port": 5432},
-                records=[],
-                unknown_internals={
-                    "status": "unknown",
-                    "reason": "waitid: no child processes; provider internals unobservable",
-                },
-                expected_error="process monitor failure: waitid: no child processes",
-            )
+        builder = _FIXTURE_BUILDERS.get(failure_class)
+        if builder is not None:
+            return builder(failure_class, **kwargs)
         raise ValueError(f"unknown failure class: {failure_class}")
 
 
@@ -367,14 +441,14 @@ class SupportReproducer:
         hop: Any = None,
         secrets: Any = (),
         safe_ips: Optional[Set[str]] = None,
-        max_log_lines: int = 500,
-        max_log_bytes: int = 65536,
+        max_log_lines: Optional[int] = None,
+        max_log_bytes: Optional[int] = None,
     ):
         self.hop = hop
         self.secrets = list(secrets or ())
-        self.safe_ips = set(safe_ips) if safe_ips else set(SAFE_TEST_IPS)
-        self.max_log_lines = max_log_lines
-        self.max_log_bytes = max_log_bytes
+        self.safe_ips = set(safe_ips) if safe_ips is not None else get_safe_test_ips()
+        self.max_log_lines = get_max_log_lines(max_log_lines)
+        self.max_log_bytes = get_max_log_bytes(max_log_bytes)
         self._redactor = Redactor(hop=hop, secrets=self.secrets, mask="<redacted>", userinfo="all")
 
     def redact_line(self, line: str) -> str:
@@ -609,3 +683,181 @@ class OfflineReproHarness:
                 or {"status": "unknown", "reason": "opaque process failure"},
             )
         raise ValueError(f"unsupported replay failure class: {fclass}")
+
+
+# Decide ladders for Support Reproducer and Diagnostic Scrubbing
+
+def _prove_schema_fault_reproduction(facts: decide.Facts) -> bool:
+    cat = str(facts.get("category") or "").lower()
+    fclass = str(facts.get("failure_class") or "").lower()
+    return bool((cat == "schema" or fclass in SCHEMA_FAILURE_CLASSES) and not facts.get("refused"))
+
+
+def _prove_data_integrity_reproduction(facts: decide.Facts) -> bool:
+    cat = str(facts.get("category") or "").lower()
+    fclass = str(facts.get("failure_class") or "").lower()
+    return bool((cat == "data" or fclass in DATA_FAILURE_CLASSES) and not facts.get("refused"))
+
+
+def _prove_process_lifecycle_reproduction(facts: decide.Facts) -> bool:
+    cat = str(facts.get("category") or "").lower()
+    fclass = str(facts.get("failure_class") or "").lower()
+    return bool((cat == "process" or fclass in PROCESS_FAILURE_CLASSES) and not facts.get("refused"))
+
+
+def _prove_offline_sandbox_reproduction(facts: decide.Facts) -> bool:
+    return bool(facts.get("offline_sandbox") and not facts.get("refused"))
+
+
+def _prove_refuse_unbounded_unredacted_bundle(facts: decide.Facts) -> bool:
+    return not bool(facts.get("allow_unredacted_or_unbounded"))
+
+
+def support_reproducer_rungs() -> Tuple[decide.Rung, ...]:
+    return (
+        decide.Rung(
+            "schema_fault_reproduction",
+            "generate deterministic synthetic reproduction for schema mismatch or migration drift",
+            needs=(
+                decide.Need(
+                    "schema failure reproduction certified",
+                    _prove_schema_fault_reproduction,
+                    "failure is not classified as schema fault",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "data_integrity_reproduction",
+            "generate deterministic synthetic reproduction for data integrity or constraint fault",
+            needs=(
+                decide.Need(
+                    "data integrity failure reproduction certified",
+                    _prove_data_integrity_reproduction,
+                    "failure is not classified as data integrity fault",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "process_lifecycle_reproduction",
+            "isolate opaque provider worker process death with unobservable internals record",
+            needs=(
+                decide.Need(
+                    "process failure reproduction certified",
+                    _prove_process_lifecycle_reproduction,
+                    "failure is not classified as process lifecycle fault",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "offline_sandbox_reproduction",
+            "execute reproduction harness inside offline in-memory sandbox without engine connectivity",
+            needs=(
+                decide.Need(
+                    "offline sandbox environment certified",
+                    _prove_offline_sandbox_reproduction,
+                    "offline sandbox environment not certified or requested",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_unbounded_unredacted_bundle",
+            "refuse support bundle generation when unredacted secrets or unbounded payloads are present",
+            needs=(
+                decide.Need(
+                    "unredacted or unbounded bundle refused",
+                    _prove_refuse_unbounded_unredacted_bundle,
+                    "unredacted secrets or unbounded payload detected",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_support_reproducer(facts: Dict[str, Any]) -> decide.Choice:
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("support reproducer strategy", support_reproducer_rungs(), fact_obj)
+
+
+def _prove_secret_credential_scrubbing(facts: decide.Facts) -> bool:
+    return bool(facts.get("scrub_secrets") and not facts.get("refused"))
+
+
+def _prove_ip_address_scrubbing(facts: decide.Facts) -> bool:
+    return bool(facts.get("scrub_ips") and not facts.get("refused"))
+
+
+def _prove_pii_ssn_email_scrubbing(facts: decide.Facts) -> bool:
+    return bool(facts.get("scrub_pii") and not facts.get("refused"))
+
+
+def _prove_log_size_truncation(facts: decide.Facts) -> bool:
+    return bool(facts.get("truncate_logs") and not facts.get("refused"))
+
+
+def _prove_refuse_unscrubbed_exposure(facts: decide.Facts) -> bool:
+    return not bool(facts.get("allow_unscrubbed_exposure"))
+
+
+def diagnostic_scrubbing_rungs() -> Tuple[decide.Rung, ...]:
+    return (
+        decide.Rung(
+            "secret_credential_scrubbing",
+            "mask all passwords, tokens, API keys, and connection credentials",
+            needs=(
+                decide.Need(
+                    "secrets and credentials scrubbed",
+                    _prove_secret_credential_scrubbing,
+                    "secrets scrubbing not applied",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "ip_address_scrubbing",
+            "redact non-safe public and private network IP addresses",
+            needs=(
+                decide.Need(
+                    "network IP addresses scrubbed",
+                    _prove_ip_address_scrubbing,
+                    "ip scrubbing not applied",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "pii_ssn_email_scrubbing",
+            "redact customer PII, emails, SSNs, and payment card numbers",
+            needs=(
+                decide.Need(
+                    "pii and personal data scrubbed",
+                    _prove_pii_ssn_email_scrubbing,
+                    "pii scrubbing not applied",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "log_size_truncation",
+            "truncate diagnostic logs within strict line count and byte budgets",
+            needs=(
+                decide.Need(
+                    "log size limits enforced",
+                    _prove_log_size_truncation,
+                    "log truncation not applied",
+                ),
+            ),
+        ),
+        decide.Rung(
+            "refuse_unscrubbed_exposure",
+            "refuse diagnostic export when unscrubbed credentials or private data leak",
+            needs=(
+                decide.Need(
+                    "unscrubbed exposure refused",
+                    _prove_refuse_unscrubbed_exposure,
+                    "unscrubbed credentials or private data present",
+                ),
+            ),
+        ),
+    )
+
+
+def decide_diagnostic_scrubbing(facts: Dict[str, Any]) -> decide.Choice:
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("diagnostic scrubbing strategy", diagnostic_scrubbing_rungs(), fact_obj)

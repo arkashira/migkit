@@ -7780,6 +7780,66 @@ def export_manifest_cmd(hop_name, out_file=None):
         click.echo(rendered)
 
 
+@main.command("diagnostics-bundle")
+@click.option("--failure-class", default=None, help="failure class to reproduce")
+@click.option("--out", "out_file", default="support_bundle.zip", help="path to output zip bundle")
+def diagnostics_bundle_cmd(failure_class=None, out_file="support_bundle.zip"):
+    """Generate bounded, sanitized support diagnostic bundle (Row 671: NEED23)."""
+    from . import diagnostics
+    bundle = diagnostics.create_support_reproducer_bundle(failure_class=failure_class, zip_path=out_file)
+    click.echo(f"created support diagnostic bundle {bundle.bundle_id} at {out_file}")
+
+
+@main.command("verify-partial-access")
+@click.option("--manifest", default=None, help="path to approved export manifest JSON")
+def verify_partial_access_cmd(manifest=None):
+    """Verify partial access export against upstream objects with honest coverage (Row 672: NEED24)."""
+    from . import partial_access
+    scope = partial_access.PartialAccessScope(
+        scope_id="scope_default",
+        source_id="default_source",
+        accessible_objects={"users", "orders"},
+        inaccessible_objects={"secrets"},
+    )
+    if manifest:
+        from pathlib import Path
+        data = json.loads(Path(manifest).read_text(encoding="utf-8"))
+        m = partial_access.ApprovedExportManifest.from_dict(data)
+    else:
+        lineage = partial_access.SourceLineage(
+            source_system="db_source",
+            export_batch_id="batch_01",
+            collected_at=1700000000.0,
+            collector_id="collector_01",
+            extraction_method="api_export",
+        )
+        obj_users = partial_access.ExportObjectManifest.from_records(
+            object_name="users",
+            records=[{"id": i, "name": f"user_{i}"} for i in range(10)],
+            schema_definition={"id": "INT", "name": "TEXT"},
+        )
+        m = partial_access.ApprovedExportManifest(
+            manifest_id="manifest_sample",
+            collector_id="collector_01",
+            scope_id="scope_default",
+            lineage=lineage,
+            objects={"users": obj_users},
+            manifest_signature="valid_sig",
+        )
+    reconciler = partial_access.PartialAccessReconciler(
+        scope=scope,
+        manifest=m,
+        client_ip="127.0.0.1",
+        known_upstream_objects={"users", "orders", "secrets"},
+    )
+    records = [{"id": i, "name": f"user_{i}"} for i in range(10)]
+    verdict = reconciler.reconcile(
+        source_data={"users": records},
+        target_data={"users": records},
+    )
+    click.echo(f"partial access verification verdict={verdict.verdict} exit={verdict.exit_code}: {verdict.summary}")
+
+
 from . import estate  # noqa: E402,F401 - `migkit estate` on main
 
 

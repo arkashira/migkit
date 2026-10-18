@@ -26,7 +26,7 @@ A package imports its own rank and the ranks below it, never one above. A rank o
 
 Outside the rule: `tools` (the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them); `data` (the files migkit ships as resources).
 
-## Upward imports still listed: 428
+## Upward imports still listed: 431
 
 ### (not listed)
 
@@ -52,6 +52,8 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/locks.py:25` execution -> decision (`decide`)
 - `migkit/managed.py:1119` configuration -> decision (`tune`)
 - `migkit/masking.py:323` safety -> conversion (`private_proof`)
+- `migkit/partial_access.py:11` scope -> decision (`decide`)
+- `migkit/partial_access.py:12` scope -> reporting (`verdict`)
 - `migkit/partial_images.py:8` conversion -> workflows (`verifiers`)
 - `migkit/partial_images.py:9` conversion -> decision (`decide`)
 - `migkit/private_proof.py:13` conversion -> decision (`decide`)
@@ -71,6 +73,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/schema_epoch_plan.py:537` conversion -> decision (`decide`)
 - `migkit/snapshot_state.py:7` persistence -> decision (`decide`)
 - `migkit/storedcode/convert.py:356` conversion -> workflows (`conversion_ledger`)
+- `migkit/support_reproducer.py:12` reporting -> decision (`decide`)
 
 ### a brand's confidence is a rung (`decide.brand_confidence`) the configuration reads once the server's signs are in; the rung moves below configuration
 
@@ -465,7 +468,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a report states what the decision engine (`capabilities`) chose; the choice is handed down as a fact
 
-- `migkit/diagnostics.py:107` reporting -> decision (`capabilities`)
+- `migkit/diagnostics.py:108` reporting -> decision (`capabilities`)
 - `migkit/report.py:890` reporting -> decision (`capabilities`)
 
 ### a report states what the decision engine (`decide`) chose; the choice is handed down as a fact

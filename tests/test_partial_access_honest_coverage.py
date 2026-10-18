@@ -1,8 +1,13 @@
 import hashlib
 import hmac
 import json
+import os
+from pathlib import Path
 import pytest
+from click.testing import CliRunner
 
+from tests.rung_branches import watched
+from migkit.cli import main
 from migkit.partial_access import (
     AbsentReason,
     AbsentSourceEvidence,
@@ -23,7 +28,36 @@ from migkit.partial_access import (
     SecurityScopeViolationError,
     SourceLineage,
     UnauthorizedCollectorError,
+    get_default_allowed_networks,
+    partial_access_rungs,
+    decide_partial_access,
+    honest_coverage_rungs,
+    decide_honest_coverage,
 )
+
+PROVES_RUNGS = [
+    ("partial_access", "partial_access_rungs", "authorized_partial_export_scope", "holds"),
+    ("partial_access", "partial_access_rungs", "authorized_partial_export_scope", "refuses"),
+    ("partial_access", "partial_access_rungs", "signature_verified_manifest_bundle", "holds"),
+    ("partial_access", "partial_access_rungs", "signature_verified_manifest_bundle", "refuses"),
+    ("partial_access", "partial_access_rungs", "provenance_chain_lineage_proof", "holds"),
+    ("partial_access", "partial_access_rungs", "provenance_chain_lineage_proof", "refuses"),
+    ("partial_access", "partial_access_rungs", "absent_source_honest_coverage", "holds"),
+    ("partial_access", "partial_access_rungs", "absent_source_honest_coverage", "refuses"),
+    ("partial_access", "partial_access_rungs", "refuse_unauthorized_scope_tampering", "holds"),
+    ("partial_access", "partial_access_rungs", "refuse_unauthorized_scope_tampering", "refuses"),
+    ("partial_access", "honest_coverage_rungs", "all_accessible_verified", "holds"),
+    ("partial_access", "honest_coverage_rungs", "all_accessible_verified", "refuses"),
+    ("partial_access", "honest_coverage_rungs", "explicit_absent_evidence", "holds"),
+    ("partial_access", "honest_coverage_rungs", "explicit_absent_evidence", "refuses"),
+    ("partial_access", "honest_coverage_rungs", "discrepancy_divergence_review", "holds"),
+    ("partial_access", "honest_coverage_rungs", "discrepancy_divergence_review", "refuses"),
+    ("partial_access", "honest_coverage_rungs", "partial_scope_certified", "holds"),
+    ("partial_access", "honest_coverage_rungs", "partial_scope_certified", "refuses"),
+    ("partial_access", "honest_coverage_rungs", "refuse_uncovered_omission", "holds"),
+    ("partial_access", "honest_coverage_rungs", "refuse_uncovered_omission", "refuses"),
+]
+
 
 
 def test_partial_access_scope_network_and_permission_boundaries():
@@ -727,4 +761,71 @@ def test_column_level_restriction_excludes_inaccessible_columns():
     # so users is evaluated as 'same' within scope!
     assert verdict.object_verdicts["users"] == "same"
     assert "users" in verdict.accessible_objects_verified
+
+
+def test_partial_access_rungs_under_watched():
+    with watched():
+        # partial_access_rungs:
+        # 1. authorized_partial_export_scope
+        c1 = decide_partial_access({"authorized_scope": True})
+        assert c1.rung.name == "authorized_partial_export_scope"
+
+        # 2. signature_verified_manifest_bundle
+        c2 = decide_partial_access({"authorized_scope": False, "signature_valid": True, "manifest_complete": True})
+        assert c2.rung.name == "signature_verified_manifest_bundle"
+
+        # 3. provenance_chain_lineage_proof
+        c3 = decide_partial_access({"authorized_scope": False, "signature_valid": False, "provenance_verified": True})
+        assert c3.rung.name == "provenance_chain_lineage_proof"
+
+        # 4. absent_source_honest_coverage
+        c4 = decide_partial_access({"authorized_scope": False, "signature_valid": False, "provenance_verified": False, "honest_coverage": True})
+        assert c4.rung.name == "absent_source_honest_coverage"
+
+        # 5. refuse_unauthorized_scope_tampering
+        c5 = decide_partial_access({"authorized_scope": False, "signature_valid": False, "provenance_verified": False, "honest_coverage": False})
+        assert c5.rung.name == "refuse_unauthorized_scope_tampering"
+
+        # 6. refuse fallback
+        c6 = decide_partial_access({"authorized_scope": False, "signature_valid": False, "provenance_verified": False, "honest_coverage": False, "allow_unauthorized_or_tampered": True})
+        assert c6.rung is None
+
+        # honest_coverage_rungs:
+        # 1. all_accessible_verified
+        h1 = decide_honest_coverage({"all_accessible_ok": True})
+        assert h1.rung.name == "all_accessible_verified"
+
+        # 2. explicit_absent_evidence
+        h2 = decide_honest_coverage({"all_accessible_ok": False, "has_absent_evidence": True})
+        assert h2.rung.name == "explicit_absent_evidence"
+
+        # 3. discrepancy_divergence_review
+        h3 = decide_honest_coverage({"all_accessible_ok": False, "has_absent_evidence": False, "discrepancies_detected": True})
+        assert h3.rung.name == "discrepancy_divergence_review"
+
+        # 4. partial_scope_certified
+        h4 = decide_honest_coverage({"all_accessible_ok": False, "has_absent_evidence": False, "discrepancies_detected": False, "scope_certified": True})
+        assert h4.rung.name == "partial_scope_certified"
+
+        # 5. refuse_uncovered_omission
+        h5 = decide_honest_coverage({"all_accessible_ok": False, "has_absent_evidence": False, "discrepancies_detected": False, "scope_certified": False})
+        assert h5.rung.name == "refuse_uncovered_omission"
+
+        # 6. refuse fallback
+        h6 = decide_honest_coverage({"all_accessible_ok": False, "has_absent_evidence": False, "discrepancies_detected": False, "scope_certified": False, "allow_uncovered_omission": True})
+        assert h6.rung is None
+
+
+def test_dynamic_allowed_networks_and_cli_verify(monkeypatch):
+    monkeypatch.setenv("MIGKIT_ALLOWED_NETWORKS", "127.0.0.1, 10.0.0.2")
+    nets = get_default_allowed_networks()
+    assert "10.0.0.2" in nets
+    assert "127.0.0.1" in nets
+
+    runner = CliRunner()
+    res = runner.invoke(main, ["verify-partial-access"])
+    assert res.exit_code == 0
+    assert "partial access verification verdict=" in res.output
+    assert "exit=3" in res.output or "exit=0" in res.output or "verdict=incomplete" in res.output
+
 
