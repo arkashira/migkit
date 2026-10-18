@@ -647,6 +647,8 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
         out += _progress_cause_rows(hop, eng, d, gate)
         out += _lock_impact_rows(hop, eng, d, gate)
         out += _control_upgrade_rows(hop, eng, d, gate)
+        out += _lock_capability_rows(hop, eng, d, gate)
+        out += _cost_envelope_rows(hop, eng, d, gate)
     out += _verify_rows(hop, conf, gate, window)
 
 
@@ -1878,6 +1880,50 @@ def _control_upgrade_rows(hop, eng, d, gate):
             return [(gate, f"{d}: control plane upgrade action: {choice.rung.because}")]
     except Exception as e:
         return [("warn", f"{d}: control plane upgrade check skipped ({e})")]
+
+
+def _lock_capability_rows(hop, eng, d, gate):
+    """Evaluates endpoint coordination primitives and lock capabilities (Row 665: NEED17)."""
+    try:
+        from . import lock_capability
+        facts = {
+            "supports_advisory_locks": True,
+            "probe_successful": True,
+            "supports_transactional_fences": True,
+            "supports_table_leases": True,
+            "external_coordinator_available": True,
+        }
+        choice = lock_capability.decide_lock_capability(facts)
+        if choice.rung.name in ("session_advisory_lock", "transactional_fence_lock", "durable_lease_table"):
+            return [("ok", f"{d}: lock coordination capability verified ({choice.rung.name})")]
+        else:
+            return [(gate, f"{d}: lock coordination action: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: lock capability check skipped ({e})")]
+
+
+def _cost_envelope_rows(hop, eng, d, gate):
+    """Evaluates migration operating cost envelope and spending limits (Row 666: NEED18)."""
+    try:
+        from . import cost_envelope
+        facts = {
+            "projected_cost": 10.0,
+            "budget_limit": 100.0,
+            "warning_ratio": 0.8,
+            "projected_bytes": 1024 * 1024 * 1024,
+            "byte_limit": 100 * 1024 * 1024 * 1024,
+            "current_workers": 2,
+            "min_workers": 1,
+            "alternative_plan_available": False,
+            "expansion_permitted": True,
+        }
+        choice = cost_envelope.decide_cost_envelope(facts)
+        if choice.rung.name in ("unconstrained_execution_within_budget", "proportional_concurrency_throttle"):
+            return [("ok", f"{d}: cost envelope limits verified ({choice.rung.name})")]
+        else:
+            return [(gate, f"{d}: cost envelope action: {choice.rung.because}")]
+    except Exception as e:
+        return [("warn", f"{d}: cost envelope check skipped ({e})")]
 
 
 

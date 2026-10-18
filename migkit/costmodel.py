@@ -752,6 +752,34 @@ class CostModel:
                 except OSError:
                     pass
 
+    def envelope(self, name, budget_limit=None, unit=None, **kwargs):
+        """Evaluate cost envelope rungs for `name` using `cost_envelope.decide_cost_envelope`."""
+        from migkit import cost_envelope
+        est = self.estimate(name, unit=unit)
+        cost = est.mean if est is not None else 0.0
+        facts = {"projected_cost": cost}
+        if budget_limit is not None:
+            facts["budget_limit"] = budget_limit
+        facts.update(kwargs)
+        return cost_envelope.decide_cost_envelope(facts)
+
+
+def envelope(cost_or_estimate, budget_limit=None, **kwargs):
+    """Evaluate cost envelope rungs for a cost value or Estimate."""
+    from migkit import cost_envelope
+    if isinstance(cost_or_estimate, Estimate):
+        c = cost_or_estimate.mean
+    elif isinstance(cost_or_estimate, (int, float)):
+        c = float(cost_or_estimate)
+    else:
+        c = 0.0
+    facts = {"projected_cost": c}
+    if budget_limit is not None:
+        facts["budget_limit"] = budget_limit
+    facts.update(kwargs)
+    return cost_envelope.decide_cost_envelope(facts)
+
+
 
 #: `bench/smart_decisions.py costs` and `explore`, 2026-09-30: mean regret
 #: in percent (the docstring's table), and a table's 60 ranges on the ways

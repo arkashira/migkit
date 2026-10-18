@@ -3,6 +3,93 @@ import enum
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from . import decide
+
+
+def cost_envelope_rungs() -> Tuple[decide.Rung, ...]:
+    """Decision ladder for cost envelope enforcement and throttle action (Row 666: NEED18)."""
+    return (
+        decide.Rung(
+            "unconstrained_execution_within_budget",
+            "execute migration without throttling when within cost and byte headroom",
+            needs=(
+                decide.Need(
+                    "cost within headroom",
+                    lambda f: f.get("projected_cost", 0.0) <= (f.get("budget_limit", 1e9) * f.get("warning_ratio", 0.8)),
+                    "projected cost exceeds safe headroom boundary",
+                ),
+                decide.Need(
+                    "bytes within headroom",
+                    lambda f: f.get("projected_bytes", 0.0) <= (f.get("byte_limit", 1e18) * f.get("warning_ratio", 0.8)),
+                    "projected bytes exceed safe headroom boundary",
+                ),
+            ),
+            footprint=0,
+            leaves="execute migration unconstrained within allocated envelope",
+        ),
+        decide.Rung(
+            "proportional_concurrency_throttle",
+            "throttle worker concurrency when approaching budget boundary",
+            needs=(
+                decide.Need(
+                    "within hard budget limit",
+                    lambda f: f.get("projected_cost", 0.0) <= f.get("budget_limit", 1e9),
+                    "projected cost exceeds hard budget ceiling",
+                ),
+                decide.Need(
+                    "workers degradable",
+                    lambda f: f.get("current_workers", 1) > f.get("min_workers", 1),
+                    "worker concurrency cannot be degraded further",
+                ),
+            ),
+            footprint=1,
+            leaves="throttle worker concurrency to remain within envelope",
+        ),
+        decide.Rung(
+            "switch_to_cost_optimal_plan",
+            "switch to cost-optimal execution plan to avoid budget overrun",
+            needs=(
+                decide.Need(
+                    "cheaper alternative available",
+                    lambda f: bool(f.get("alternative_plan_available", False)),
+                    "no cheaper alternative plan available",
+                ),
+                decide.Need(
+                    "alternative within budget",
+                    lambda f: f.get("alternative_plan_cost", 1e9) <= f.get("budget_limit", 1e9),
+                    "alternative plan also exceeds budget limit",
+                ),
+            ),
+            footprint=2,
+            leaves="switch to cost-optimal alternative plan",
+        ),
+        decide.Rung(
+            "quarantine_and_await_budget_expansion",
+            "pause execution and await explicit budget expansion approval",
+            needs=(
+                decide.Need(
+                    "expansion permitted",
+                    lambda f: bool(f.get("expansion_permitted", False)),
+                    "budget expansion not permitted",
+                ),
+            ),
+            footprint=3,
+            leaves="quarantine execution and await operator budget expansion",
+        ),
+        decide.Rung(
+            "abort_and_refund_reserved_resources",
+            "abort execution to halt billable spend on budget limit exhaustion",
+            footprint=4,
+            leaves="abort execution to protect cost boundary",
+        ),
+    )
+
+
+def decide_cost_envelope(facts: Dict[str, Any]) -> decide.Choice:
+    """Climb the cost_envelope_rungs ladder."""
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("migration operating cost envelope", cost_envelope_rungs(), fact_obj)
+
 
 class CostEnvelopeError(RuntimeError):
     pass
@@ -89,16 +176,18 @@ class Rate:
     unit: str = ""
     max_age_seconds: Optional[float] = None
     currency: str = "USD"
+    uncertainty_ratio: Optional[float] = None
 
     def __post_init__(self):
         if isinstance(self.dimension, CostDimension):
             self.dimension = self.dimension.value
         if isinstance(self.source, RateSource):
             self.source = self.source.value
+        ratio = self.uncertainty_ratio if self.uncertainty_ratio is not None else 0.10
         if self.min_rate is None:
-            self.min_rate = self.nominal_rate * 0.90
+            self.min_rate = self.nominal_rate * (1.0 - ratio)
         if self.max_rate is None:
-            self.max_rate = self.nominal_rate * 1.10
+            self.max_rate = self.nominal_rate * (1.0 + ratio)
         if self.min_rate > self.nominal_rate:
             self.min_rate = self.nominal_rate
         if self.max_rate < self.nominal_rate:
@@ -107,11 +196,19 @@ class Rate:
     def uncertainty_bounds(self) -> Tuple[float, float, float]:
         return (self.min_rate, self.nominal_rate, self.max_rate)
 
-    def is_stale(self, now: Optional[float] = None, max_age_seconds: Optional[float] = None) -> bool:
+    def is_stale(
+        self,
+        now: Optional[float] = None,
+        max_age_seconds: Optional[float] = None,
+        community_ttl_seconds: Optional[float] = None,
+        default_ttl_seconds: Optional[float] = None,
+    ) -> bool:
         t_now = now if now is not None else time.time()
         max_age = max_age_seconds if max_age_seconds is not None else self.max_age_seconds
         if max_age is None:
-            max_age = 86400.0 * 14.0 if self.source == RateSource.COMMUNITY.value else 86400.0 * 90.0
+            c_ttl = community_ttl_seconds if community_ttl_seconds is not None else (86400.0 * 14.0)
+            d_ttl = default_ttl_seconds if default_ttl_seconds is not None else (86400.0 * 90.0)
+            max_age = c_ttl if self.source == RateSource.COMMUNITY.value else d_ttl
         return (t_now - self.timestamp) > max_age
 
 

@@ -19,10 +19,25 @@ from migkit.cost_envelope import (
     Rate,
     RateRegistry,
     RateSource,
-    StaleRateError,
     compare_targeted_refresh_to_full_reload,
     forecast_cost_envelope,
+    cost_envelope_rungs,
+    decide_cost_envelope,
 )
+import tests.rung_branches
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("cost_envelope", "cost_envelope_rungs", "unconstrained_execution_within_budget", "holds"),
+    ("cost_envelope", "cost_envelope_rungs", "unconstrained_execution_within_budget", "refuses"),
+    ("cost_envelope", "cost_envelope_rungs", "proportional_concurrency_throttle", "holds"),
+    ("cost_envelope", "cost_envelope_rungs", "proportional_concurrency_throttle", "refuses"),
+    ("cost_envelope", "cost_envelope_rungs", "switch_to_cost_optimal_plan", "holds"),
+    ("cost_envelope", "cost_envelope_rungs", "switch_to_cost_optimal_plan", "refuses"),
+    ("cost_envelope", "cost_envelope_rungs", "quarantine_and_await_budget_expansion", "holds"),
+    ("cost_envelope", "cost_envelope_rungs", "quarantine_and_await_budget_expansion", "refuses"),
+    ("cost_envelope", "cost_envelope_rungs", "abort_and_refund_reserved_resources", "holds"),
+]
 
 
 def _sample_rate_registry(now: float = 1700000000.0) -> RateRegistry:
@@ -591,5 +606,78 @@ def test_cli_copy_tables_in_enforces_money_limit_ceiling(tmp_path):
         cli._copy_tables_in(hop, eng, "testdb", tables, chunk=1000, ck={}, workers=1)
     assert "ACTION: move halted at hard limit ceiling" in str(exc_info.value)
     assert "Budget limit" in str(exc_info.value)
+
+
+def test_rate_custom_uncertainty_and_ttl():
+    r = Rate(dimension=CostDimension.EGRESS_BYTES, nominal_rate=1.0, uncertainty_ratio=0.20)
+    assert r.min_rate == 0.8
+    assert r.max_rate == 1.2
+    assert not r.is_stale(now=r.timestamp + 100, default_ttl_seconds=500)
+    assert r.is_stale(now=r.timestamp + 600, default_ttl_seconds=500)
+
+
+def test_cost_envelope_rungs_under_watched():
+    with watched():
+        # 1. unconstrained_execution_within_budget
+        c1 = decide_cost_envelope({
+            "projected_cost": 100.0,
+            "budget_limit": 500.0,
+            "projected_bytes": 1000.0,
+            "byte_limit": 10000.0,
+        })
+        assert c1.rung.name == "unconstrained_execution_within_budget"
+
+        # 2. proportional_concurrency_throttle
+        c2 = decide_cost_envelope({
+            "projected_cost": 450.0,
+            "budget_limit": 500.0,
+            "warning_ratio": 0.8,
+            "current_workers": 4,
+            "min_workers": 1,
+        })
+        assert c2.rung.name == "proportional_concurrency_throttle"
+
+        # 3. switch_to_cost_optimal_plan
+        c3 = decide_cost_envelope({
+            "projected_cost": 600.0,
+            "budget_limit": 500.0,
+            "warning_ratio": 0.8,
+            "current_workers": 1,
+            "min_workers": 1,
+            "alternative_plan_available": True,
+            "alternative_plan_cost": 300.0,
+        })
+        assert c3.rung.name == "switch_to_cost_optimal_plan"
+
+        # 4. quarantine_and_await_budget_expansion
+        c4 = decide_cost_envelope({
+            "projected_cost": 600.0,
+            "budget_limit": 500.0,
+            "warning_ratio": 0.8,
+            "current_workers": 1,
+            "min_workers": 1,
+            "alternative_plan_available": False,
+            "expansion_permitted": True,
+        })
+        assert c4.rung.name == "quarantine_and_await_budget_expansion"
+
+        # 5. abort_and_refund_reserved_resources
+        c5 = decide_cost_envelope({
+            "projected_cost": 600.0,
+            "budget_limit": 500.0,
+            "warning_ratio": 0.8,
+            "current_workers": 1,
+            "min_workers": 1,
+            "alternative_plan_available": False,
+            "expansion_permitted": False,
+        })
+        assert c5.rung.name == "abort_and_refund_reserved_resources"
+
+
+def test_costmodel_envelope_integration():
+    from migkit import costmodel
+    choice = costmodel.envelope(400.0, budget_limit=500.0)
+    assert choice.rung.name == "unconstrained_execution_within_budget"
+
 
 

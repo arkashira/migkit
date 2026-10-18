@@ -6,6 +6,84 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
+from . import decide
+
+
+def lock_capability_rungs() -> Tuple[decide.Rung, ...]:
+    """Decision ladder for endpoint lock and coordination capability (Row 665: NEED17)."""
+    return (
+        decide.Rung(
+            "session_advisory_lock",
+            "use native session-level advisory locks for lightweight coordination",
+            needs=(
+                decide.Need(
+                    "advisory locks supported",
+                    lambda f: bool(f.get("supports_advisory_locks", False)),
+                    "endpoint does not support advisory locks",
+                ),
+                decide.Need(
+                    "probe successful",
+                    lambda f: bool(f.get("probe_successful", True)),
+                    "advisory lock probe failed or was refused",
+                ),
+            ),
+            footprint=0,
+            leaves="use native session advisory lock for mutual exclusion",
+        ),
+        decide.Rung(
+            "transactional_fence_lock",
+            "use transactional table or row locking with explicit timeout fence",
+            needs=(
+                decide.Need(
+                    "transactional fence supported",
+                    lambda f: bool(f.get("supports_transactional_fences", False)),
+                    "endpoint does not support transactional fences",
+                ),
+            ),
+            footprint=1,
+            leaves="use transactional fence locking with statement timeouts",
+        ),
+        decide.Rung(
+            "durable_lease_table",
+            "use durable database lease table with monotonic fence counter",
+            needs=(
+                decide.Need(
+                    "table lease supported",
+                    lambda f: bool(f.get("supports_table_leases", False)),
+                    "endpoint does not support durable lease table creation",
+                ),
+            ),
+            footprint=2,
+            leaves="use durable database lease table for distributed coordination",
+        ),
+        decide.Rung(
+            "external_fenced_lease",
+            "use external storage coordinator with heartbeat lease",
+            needs=(
+                decide.Need(
+                    "external coordinator available",
+                    lambda f: bool(f.get("external_coordinator_available", False)),
+                    "no external storage coordinator configured",
+                ),
+            ),
+            footprint=3,
+            leaves="use external storage coordinator with active heartbeat lease",
+        ),
+        decide.Rung(
+            "refuse_uncoordinated_concurrency",
+            "refuse concurrent operations without verified coordination primitives",
+            footprint=4,
+            leaves="refuse concurrent operations without verified coordination primitives",
+        ),
+    )
+
+
+def decide_lock_capability(facts: Dict[str, Any]) -> decide.Choice:
+    """Climb the lock_capability_rungs ladder."""
+    fact_obj = facts if isinstance(facts, decide.Facts) else decide.Facts(dict(facts))
+    return decide.climb("endpoint lock coordination capability", lock_capability_rungs(), fact_obj)
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -114,8 +192,10 @@ class QueryExecutorAdapter:
                     try:
                         rows = cur.fetchall()
                         return [tuple(r) for r in rows]
-                    except Exception:
-                        return []
+                    except Exception as exc:
+                        if "no results" in str(exc).lower() or type(exc).__name__ in ("ProgrammingError", "OperationalError"):
+                            return []
+                        raise LockCapabilityError(f"cursor fetchall failed: {exc}") from exc
                 return []
             finally:
                 if hasattr(cur, "close"):
@@ -127,8 +207,10 @@ class QueryExecutorAdapter:
                 try:
                     rows = res.fetchall()
                     return [tuple(r) for r in rows]
-                except Exception:
-                    return []
+                except Exception as exc:
+                    if "no results" in str(exc).lower() or type(exc).__name__ in ("ProgrammingError", "OperationalError"):
+                        return []
+                    raise LockCapabilityError(f"execute fetchall failed: {exc}") from exc
             if isinstance(res, list):
                 return [(r if isinstance(r, tuple) else (r,)) for r in res]
             return []
@@ -145,7 +227,7 @@ class LockCapabilityProber:
         endpoint_id: Optional[str] = None,
     ):
         self.executor = QueryExecutorAdapter(executor) if executor is not None else None
-        self.endpoint_id = endpoint_id or "127.0.0.1:5432"
+        self.endpoint_id = endpoint_id or "unspecified_endpoint"
         self._capabilities: Optional[LockCapabilities] = None
 
     def _exec(self, sql: str, params: Optional[Sequence[Any]] = None) -> List[Tuple[Any, ...]]:
@@ -153,9 +235,26 @@ class LockCapabilityProber:
             raise RuntimeError("No executor configured for LockCapabilityProber")
         return self.executor.execute(sql, params)
 
-    def probe_advisory_locks(self) -> CapabilityProbeResult:
+    def probe_advisory_locks(self, engine: str = "postgres") -> CapabilityProbeResult:
         t0 = time.monotonic()
+        eng = str(engine).lower()
         try:
+            if eng in ("mysql", "mariadb"):
+                rows = self._exec("SELECT GET_LOCK('__migkit_probe__', 0);")
+                val = rows[0][0] if rows and len(rows[0]) > 0 else 0
+                if val == 1:
+                    self._exec("SELECT RELEASE_LOCK('__migkit_probe__');")
+                    return CapabilityProbeResult(
+                        name="advisory_locks",
+                        supported=True,
+                        latency_ms=(time.monotonic() - t0) * 1000.0,
+                    )
+                return CapabilityProbeResult(
+                    name="advisory_locks",
+                    supported=False,
+                    latency_ms=(time.monotonic() - t0) * 1000.0,
+                    error="GET_LOCK failed",
+                )
             rows = self._exec(f"SELECT pg_try_advisory_lock({self.PROBE_KEY});")
             val = rows[0][0] if rows and len(rows[0]) > 0 else False
             if bool(val):

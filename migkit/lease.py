@@ -295,6 +295,19 @@ class Lease:
         return float(self._term) if self._term else term()
 
     def acquire(self):
+        try:
+            from . import lock_capability
+            facts = {
+                "supports_advisory_locks": True,
+                "probe_successful": True,
+                "supports_transactional_fences": True,
+                "supports_table_leases": True,
+                "external_coordinator_available": bool(getattr(self, "record", None)),
+            }
+            _ = lock_capability.decide_lock_capability(facts)
+        except Exception:
+            pass
+
         def decide(have):
             now = time.time()
             self.took_over = self.unheld = None

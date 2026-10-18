@@ -13,7 +13,23 @@ from migkit.lock_capability import (
     LockCapabilityProber,
     MissingCoordinationPrimitiveError,
     choose_coordination_lease,
+    lock_capability_rungs,
+    decide_lock_capability,
 )
+import tests.rung_branches
+from tests.rung_branches import watched
+
+PROVES_RUNGS = [
+    ("lock_capability", "lock_capability_rungs", "session_advisory_lock", "holds"),
+    ("lock_capability", "lock_capability_rungs", "session_advisory_lock", "refuses"),
+    ("lock_capability", "lock_capability_rungs", "transactional_fence_lock", "holds"),
+    ("lock_capability", "lock_capability_rungs", "transactional_fence_lock", "refuses"),
+    ("lock_capability", "lock_capability_rungs", "durable_lease_table", "holds"),
+    ("lock_capability", "lock_capability_rungs", "durable_lease_table", "refuses"),
+    ("lock_capability", "lock_capability_rungs", "external_fenced_lease", "holds"),
+    ("lock_capability", "lock_capability_rungs", "external_fenced_lease", "refuses"),
+    ("lock_capability", "lock_capability_rungs", "refuse_uncoordinated_concurrency", "holds"),
+]
 
 
 def test_standard_postgres_prober_discovers_all_primitives():
@@ -293,3 +309,46 @@ def test_graceful_release_and_monotonic_fence_progression():
     assert lease1.fence_token == 1
     with pytest.raises(LeaseLostError):
         lease1.assert_held()
+
+
+def test_lock_capability_rungs_under_watched():
+    with watched():
+        # 1. session_advisory_lock
+        c1 = decide_lock_capability({
+            "supports_advisory_locks": True,
+            "probe_successful": True,
+        })
+        assert c1.rung.name == "session_advisory_lock"
+
+        # 2. transactional_fence_lock
+        c2 = decide_lock_capability({
+            "supports_advisory_locks": False,
+            "supports_transactional_fences": True,
+        })
+        assert c2.rung.name == "transactional_fence_lock"
+
+        # 3. durable_lease_table
+        c3 = decide_lock_capability({
+            "supports_advisory_locks": False,
+            "supports_transactional_fences": False,
+            "supports_table_leases": True,
+        })
+        assert c3.rung.name == "durable_lease_table"
+
+        # 4. external_fenced_lease
+        c4 = decide_lock_capability({
+            "supports_advisory_locks": False,
+            "supports_transactional_fences": False,
+            "supports_table_leases": False,
+            "external_coordinator_available": True,
+        })
+        assert c4.rung.name == "external_fenced_lease"
+
+        # 5. refuse_uncoordinated_concurrency
+        c5 = decide_lock_capability({
+            "supports_advisory_locks": False,
+            "supports_transactional_fences": False,
+            "supports_table_leases": False,
+            "external_coordinator_available": False,
+        })
+        assert c5.rung.name == "refuse_uncoordinated_concurrency"

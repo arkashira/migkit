@@ -95,6 +95,9 @@ re-dispatches it with the finding and the row comes back here when it passes.
 | 662 | 2026-10-18 | PASS | critic (agy, session fda5f478) | 1bebb348 | progress_cause_rungs decide ladder across 5 branches; wired into cutover.py preflight and tailctl.py apply_unit; dynamic endpoint and port diagnostics without hardcoded 5432; PROVES_RUNGS verified under watched(); 22/22 tests green |
 | 663 | 2026-10-18 | PASS | critic (agy, session fda5f478) | faada71c | lock_impact_rungs decide ladder across 5 branches; wired into cutover.py preflight; LockBudget.from_facts dynamic bounds; COMMIT after SET LOCAL transaction execution; PROVES_RUNGS verified under watched(); 28/28 tests green |
 | 664 | 2026-10-18 | PASS | critic (agy, session fda5f478) | faada71c | control_upgrade_rungs decide ladder across 5 branches; wired into cutover.py preflight and upgrade.py run_upgrade; StateMigrator preserves checkpoint invariants without resync; PROVES_RUNGS verified under watched(); 17/17 tests green |
+| 665 | 2026-10-18 | PASS | critic (agy, session fda5f478) | a208936a | lock_capability_rungs decide ladder across 5 branches; wired into cutover.py and lease.py; dynamic endpoint resolution without hardcoded 127.0.0.1:5432; multi-engine advisory lock capability probe (PostgreSQL/MySQL); unswallowed fetch errors; PROVES_RUNGS verified under watched(); 8/8 tests green |
+| 666 | 2026-10-18 | PASS | critic (agy, session fda5f478) | a208936a | cost_envelope_rungs decide ladder across 5 branches; wired into cutover.py and costmodel.py; configurable Rate uncertainty ratio and TTL; dynamic throttle and abort policies through decide ladder; PROVES_RUNGS verified under watched(); 16/16 tests green |
+
 
 
 
