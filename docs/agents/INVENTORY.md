@@ -21,7 +21,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 | engines | 9 | 80 | 128960 | the contract every engine fills and each engine's own adapter |
 | integrations | 9 | 23 | 24368 | the programs, libraries and provider APIs migkit wraps, and the other tools it meets |
 | workflows | 10 | 111 | 151521 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
-| cli | 11 | 4 | 10560 | the command line and the guide that asks for two addresses |
+| cli | 11 | 4 | 10561 | the command line and the guide that asks for two addresses |
 | web | 11 | 30 | 6451 | the web view and its API |
 | tools | - | 13 | 7195 | the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them |
 | data | - | 5 | 10810 | the files migkit ships as resources |
@@ -481,7 +481,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 
 | file | owner | lines | imported by | reaches | wraps | tests |
 |---|---|---|---|---|---|---|
-| `migkit/cli.py` | - | 7866 | 10: engines.base, engines.oracle_pump, estate, ha, integrations (+5) | cli 8, configuration 29, conversion 5, decision 87, engines 23, execution 31, integrations 4, persistence 38, reporting 55, safety 31, scope 4, web 1, workflows 98 | - | 248: conftest.py, cosmos_fake.py, cutover_harness.py (+245) |
+| `migkit/cli.py` | - | 7867 | 10: engines.base, engines.oracle_pump, estate, ha, integrations (+5) | cli 8, configuration 29, conversion 5, decision 87, engines 23, execution 31, integrations 4, persistence 38, reporting 55, safety 31, scope 4, web 1, workflows 98 | - | 248: conftest.py, cosmos_fake.py, cutover_harness.py (+245) |
 | `migkit/estate.py` | - | 365 | 1: cli | cli 1, configuration 3, decision 4, engines 1, integrations 1, reporting 2 | - | 1: the_estate_is_discovered_sized_and_priced |
 | `migkit/guide.py` | - | 905 | 5: cli, init, managed, tools.gen_docs, web.newhop | configuration 19, conversion 1, decision 8, engines 1, integrations 2, persistence 1, reporting 4 | - | 11: drain_to_position_and_the_approval_gate, every_command_ends_in_its_own_words, every_goal_and_mode_is_explained (+8) |
 | `migkit/ui.py` | - | 1424 | 4: cli, tools.gen_docs, web.app, web.views | configuration 7, decision 2, execution 1, persistence 5, reporting 4, web 2, workflows 6 | - | 14: a_tail_ends_its_batches_at_commits_and_says_when, alerts_and_notifications, every_resource_in_one_model (+11) |
