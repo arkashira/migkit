@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# migkit in-repo launcher wrapper
+# Resolves the virtualenv automatically without requiring manual activation.
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [[ -f "$REPO_DIR/.venv/bin/migkit" ]]; then
+  exec "$REPO_DIR/.venv/bin/migkit" "$@"
+elif [[ -f "$HOME/.local/bin/migkit" ]]; then
+  exec "$HOME/.local/bin/migkit" "$@"
+elif command -v migkit >/dev/null 2>&1; then
+  exec migkit "$@"
+else
+  echo "migkit environment not found." >&2
+  echo "Please run: ./install.sh (or ./install.sh --dev)" >&2
+  exit 1
+fi
