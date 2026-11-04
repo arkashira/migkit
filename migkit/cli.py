@@ -2527,7 +2527,7 @@ def _checks_eta(hop, eng, dbs, local_map, timings, finished_at, futs,
         units.append(u)
     return eng.forecast(kind, scope, units=units, history=history,
                         workers=max(1, int(workers or 1)), attempts=True,
-                        instant=os.environ.get("MIGKIT_INSTANT_ETA", "1").lower() in ("1", "true", "yes", "on"))
+                        instant=envkeys.flag("MIGKIT_INSTANT_ETA"))
 
 
 def _collided(hop, eng, dbs):

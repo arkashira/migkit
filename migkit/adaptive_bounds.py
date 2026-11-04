@@ -9,7 +9,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from . import decide
+from . import decide, envkeys
 
 
 class AdaptiveBoundsError(Exception):
@@ -25,15 +25,15 @@ def get_default_worker_bounds(
     start_w: Optional[int] = None,
     max_w: Optional[int] = None,
 ) -> Tuple[int, int, int]:
-    env_min = os.environ.get("MIGKIT_MIN_WORKERS")
-    resolved_min = int(env_min) if env_min else (min_w if min_w is not None else 1)
+    env_min = envkeys.number("MIGKIT_MIN_WORKERS")
+    resolved_min = int(env_min) if env_min is not None else (min_w if min_w is not None else 1)
 
     cpu = os.cpu_count() or 4
-    env_start = os.environ.get("MIGKIT_START_WORKERS")
-    resolved_start = int(env_start) if env_start else (start_w if start_w is not None else min(2, cpu))
+    env_start = envkeys.number("MIGKIT_START_WORKERS")
+    resolved_start = int(env_start) if env_start is not None else (start_w if start_w is not None else min(2, cpu))
 
-    env_max = os.environ.get("MIGKIT_MAX_WORKERS")
-    resolved_max = int(env_max) if env_max else (max_w if max_w is not None else max(8, cpu * 2))
+    env_max = envkeys.number("MIGKIT_MAX_WORKERS")
+    resolved_max = int(env_max) if env_max is not None else (max_w if max_w is not None else max(8, cpu * 2))
 
     return resolved_min, max(resolved_min, resolved_start), max(resolved_start, resolved_max)
 
@@ -43,14 +43,14 @@ def get_default_batch_bounds(
     start_b: Optional[int] = None,
     max_b: Optional[int] = None,
 ) -> Tuple[int, int, int]:
-    env_min = os.environ.get("MIGKIT_MIN_BATCH_SIZE")
-    resolved_min = int(env_min) if env_min else (min_b if min_b is not None else 100)
+    env_min = envkeys.number("MIGKIT_MIN_BATCH_SIZE")
+    resolved_min = int(env_min) if env_min is not None else (min_b if min_b is not None else 100)
 
-    env_start = os.environ.get("MIGKIT_START_BATCH_SIZE")
-    resolved_start = int(env_start) if env_start else (start_b if start_b is not None else 1000)
+    env_start = envkeys.number("MIGKIT_START_BATCH_SIZE")
+    resolved_start = int(env_start) if env_start is not None else (start_b if start_b is not None else 1000)
 
-    env_max = os.environ.get("MIGKIT_MAX_BATCH_SIZE")
-    resolved_max = int(env_max) if env_max else (max_b if max_b is not None else 50000)
+    env_max = envkeys.number("MIGKIT_MAX_BATCH_SIZE")
+    resolved_max = int(env_max) if env_max is not None else (max_b if max_b is not None else 50000)
 
     return resolved_min, max(resolved_min, resolved_start), max(resolved_start, resolved_max)
 

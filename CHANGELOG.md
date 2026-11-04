@@ -5,6 +5,29 @@ cut from `master` and versions are tagged as features stabilize.
 
 ## Unreleased
 
+### Manual & Documentation
+- Official web manual (`docs/index.html` and `docs/site/*.html`) now includes
+  GCP-style inline editable parameters (`.gcp-var` with dotted underline and
+  inline edit icon), per-code-block light/dark theme switching, one-click
+  clipboard copy of the customized command, and interactive CLI command/flag
+  completion generated directly from `cli.main.commands`, `hopkeys.GOALS`, and
+  `hopkeys.MODES`.
+
+### Adaptive Execution & Resilience
+- Declared all 22 adaptive execution, AIMD chunk sizing, instant cold-start
+  ETA, portable manifest format, lineage evidence, partial-access network,
+  rollback pattern, and support bundle environment variables in
+  `migkit.envkeys` (`MIGKIT_MIN_WORKERS`, `MIGKIT_START_WORKERS`,
+  `MIGKIT_MAX_WORKERS`, `MIGKIT_MIN_BATCH_SIZE`, `MIGKIT_START_BATCH_SIZE`,
+  `MIGKIT_MAX_BATCH_SIZE`, `MIGKIT_AIMD_AUTOSIZING`, `MIGKIT_AIMD_MIN_CHUNK`,
+  `MIGKIT_AIMD_MAX_CHUNK`, `MIGKIT_AIMD_MAX_ROW_BYTES`,
+  `MIGKIT_AIMD_MAX_LATENCY`, `MIGKIT_AIMD_MIN_LATENCY`,
+  `MIGKIT_AIMD_EXPAND_FACTOR`, `MIGKIT_INSTANT_ETA`,
+  `MIGKIT_PORTABLE_FORMAT_VERSION`, `MIGKIT_TARGET_ENGINE`,
+  `MIGKIT_TARGET_VERSION`, `MIGKIT_ALLOWED_NETWORKS`,
+  `MIGKIT_EXTRA_UNSAFE_PATTERNS`, `MIGKIT_SAFE_TEST_IPS`,
+  `MIGKIT_MAX_LOG_LINES`, `MIGKIT_MAX_LOG_BYTES`).
+
 ### Verification
 - A difference now says what shape it is, in the first pass, on PostgreSQL
   and MySQL alike. The primary key is hashed alongside the row in the same

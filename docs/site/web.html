@@ -3,15 +3,31 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<script>
+(function(){try{var s=localStorage.getItem("color-scheme");if(s==="light"||s==="dark")document.querySelector('meta[name="color-scheme"]').setAttribute("content",s);}catch(_e){}})();
+</script>
 <title>The web view and the API - migkit 0.2.0</title>
 <meta name="description" content="Several people, each with a role on each hop, signed in by the organisation&#x27;s identity provider; a REST API over the command line&#x27;s own functions.">
 <style>
-:root{--bg:#fbfbfa;--panel:#f2f3f1;--ink:#1d232b;--mut:#5b6573;
+:root{color-scheme:light dark;--bg:#fbfbfa;--panel:#f2f3f1;--ink:#1d232b;--mut:#5b6573;
 --line:#dfe2e6;--acc:#0b63c4;--ok:#1f7a3d;--warn:#9a6700;--no:#b42318;
---code:#f3f4f6;--codeink:#1d232b}
+--code:#f1f3f4;--codeink:#202124;--var:#c51162;--varbg:rgba(197,17,98,.08);
+--varline:#c51162;--popbg:#ffffff;--popink:#1d232b}
 @media (prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#111721;
 --ink:#d6dee8;--mut:#8b98a8;--line:#222c39;--acc:#4aa3ff;--ok:#39b96a;
---warn:#e0a93b;--no:#e5534b;--code:#0a0e14;--codeink:#cbd6e4}}
+--warn:#e0a93b;--no:#e5534b;--code:#161b22;--codeink:#e6edf3;--var:#ff7eb6;
+--varbg:rgba(255,126,182,.12);--varline:#ff7eb6;--popbg:#161b22;--popink:#e6edf3}}
+:root:has(> head > meta[name="color-scheme"][content="light"]){color-scheme:only light;
+--bg:#fbfbfa;--panel:#f2f3f1;--ink:#1d232b;--mut:#5b6573;--line:#dfe2e6;
+--acc:#0b63c4;--ok:#1f7a3d;--warn:#9a6700;--no:#b42318;--code:#f1f3f4;
+--codeink:#202124;--var:#c51162;--varbg:rgba(197,17,98,.08);--varline:#c51162;
+--popbg:#ffffff;--popink:#1d232b}
+:root:has(> head > meta[name="color-scheme"][content="dark"]){color-scheme:only dark;
+--bg:#0d1117;--panel:#111721;--ink:#d6dee8;--mut:#8b98a8;--line:#222c39;
+--acc:#4aa3ff;--ok:#39b96a;--warn:#e0a93b;--no:#e5534b;--code:#161b22;
+--codeink:#e6edf3;--var:#ff7eb6;--varbg:rgba(255,126,182,.12);--varline:#ff7eb6;
+--popbg:#161b22;--popink:#e6edf3}
 *{box-sizing:border-box}
 html{scroll-behavior:smooth}
 body{margin:0;background:var(--bg);color:var(--ink);
@@ -19,31 +35,113 @@ font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,
 Helvetica,Arial,sans-serif}
 a{color:var(--acc);text-decoration:none}
 a:hover{text-decoration:underline}
-code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+code,pre,kbd{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 code{background:var(--code);color:var(--codeink);padding:.1em .35em;
 border-radius:4px;font-size:.9em}
-pre{background:var(--code);border:1px solid var(--line);border-radius:8px;
-padding:14px 16px;overflow:auto;font-size:13px;line-height:1.55}
-pre code{background:none;padding:0}
-.layout{display:flex;max-width:1240px;margin:0 auto}
-nav{position:sticky;top:0;align-self:flex-start;width:250px;height:100vh;
-overflow:auto;padding:26px 16px 40px 22px;border-right:1px solid var(--line)}
-nav .brand{font-weight:700;font-size:19px}
-nav .tag{color:var(--mut);font-size:12px;margin:4px 0 18px}
+.code-wrap{position:relative;margin:14px 0}
+pre{margin:0;background:var(--code);color:var(--codeink);accent-color:var(--acc);
+border:1px solid var(--line);border-radius:8px;padding:16px 84px 16px 18px;
+overflow:auto;font-size:13.5px;line-height:1.65;tab-size:2}
+pre[data-code-theme="dark"]{color-scheme:only dark;--code:#161b22;--codeink:#e6edf3;
+--line:#30363d;--var:#ff7eb6;--varbg:rgba(255,126,182,.14);--varline:#ff7eb6;
+color:var(--codeink);accent-color:#4aa3ff;background:var(--code);border-color:var(--line)}
+pre[data-code-theme="light"]{color-scheme:only light;--code:#f1f3f4;--codeink:#202124;
+--line:#dadce0;--var:#c51162;--varbg:rgba(197,17,98,.08);--varline:#c51162;
+color:var(--codeink);accent-color:#0b63c4;background:var(--code);border-color:var(--line)}
+pre code{background:none;padding:0;color:inherit;font-size:inherit}
+.code-tools{position:absolute;top:8px;right:10px;display:flex;align-items:center;
+gap:4px;z-index:2}
+.code-btn{display:inline-flex;align-items:center;justify-content:center;
+width:30px;height:30px;border:1px solid transparent;border-radius:6px;
+background:transparent;color:var(--codeink);opacity:.72;cursor:pointer;
+padding:0;transition:opacity 120ms ease,background-color 120ms ease,transform 120ms ease}
+.code-btn:hover,.code-btn:focus-visible{opacity:1;background:rgba(127,127,127,.14);
+outline:none}
+.code-btn:active{transform:scale(.96)}
+.code-btn svg{width:17px;height:17px;fill:currentColor;pointer-events:none}
+.code-btn[data-copied="1"]{color:var(--ok);opacity:1}
+.gcp-var{font-style:italic;font-weight:600;color:var(--var);
+border-bottom:1.5px dotted var(--varline);padding:0 2px 1px;border-radius:3px;
+cursor:pointer;display:inline;white-space:nowrap;transition:background-color 120ms ease}
+.gcp-var:hover,.gcp-var:focus-visible{background:var(--varbg);outline:none}
+.gcp-var::after{content:"";display:inline-block;width:12px;height:12px;
+margin-left:4px;vertical-align:-1px;background-color:currentColor;
+-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1.003 1.003 0 0 0 0-1.42l-2.34-2.34a1.003 1.003 0 0 0-1.42 0l-1.83 1.83 3.75 3.75 1.84-1.82z'/%3E%3C/svg%3E") no-repeat center/contain;
+mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1.003 1.003 0 0 0 0-1.42l-2.34-2.34a1.003 1.003 0 0 0-1.42 0l-1.83 1.83 3.75 3.75 1.84-1.82z'/%3E%3C/svg%3E") no-repeat center/contain}
+.cmd-complete-bar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;
+padding:7px 12px;background:var(--panel);border:1px solid var(--line);
+border-top:none;border-radius:0 0 8px 8px;font-size:12px;color:var(--mut)}
+.code-wrap.has-bar pre{border-radius:8px 8px 0 0}
+.cmd-complete-label{font-weight:600;color:var(--ink);margin-right:2px;
+font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px}
+.cmd-chip{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;
+border:1px solid var(--line);border-radius:4px;background:var(--bg);
+color:var(--ink);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+font-size:11.5px;cursor:pointer;user-select:none;transition:border-color 120ms ease,background-color 120ms ease}
+.cmd-chip:hover{border-color:var(--acc);color:var(--acc)}
+.cmd-chip[data-active="1"]{background:var(--acc);border-color:var(--acc);color:#fff}
+.gcp-popover{position:fixed;z-index:9999;min-width:270px;max-width:360px;
+background:var(--popbg);color:var(--popink);border:1px solid var(--line);
+border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.18);padding:10px;
+font-size:12.5px}
+.gcp-popover[hidden]{display:none}
+.gcp-pop-head{display:flex;justify-content:space-between;align-items:center;
+font-weight:600;margin-bottom:6px;color:var(--mut);font-size:11.5px;
+text-transform:uppercase;letter-spacing:.04em}
+.gcp-pop-input{width:100%;padding:6px 8px;border:1px solid var(--line);
+border-radius:5px;background:var(--bg);color:var(--ink);
+font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;
+margin-bottom:6px}
+.gcp-pop-input:focus{outline:2px solid var(--acc);border-color:transparent}
+.gcp-pop-list{max-height:180px;overflow-y:auto;display:flex;flex-direction:column;gap:2px}
+.gcp-pop-opt{display:flex;justify-content:space-between;align-items:baseline;
+gap:8px;padding:5px 7px;border-radius:4px;cursor:pointer;text-align:left;
+border:none;background:transparent;color:var(--popink);width:100%;font-size:12.5px}
+.gcp-pop-opt:hover,.gcp-pop-opt:focus-visible{background:var(--panel);outline:none}
+.gcp-pop-opt code{background:none;padding:0;font-weight:600;color:var(--acc)}
+.gcp-pop-opt span{color:var(--mut);font-size:11.5px;overflow:hidden;
+text-overflow:ellipsis;white-space:nowrap}
+.vars-strip{display:flex;flex-wrap:wrap;align-items:center;gap:10px;
+padding:10px 14px;margin:0 0 22px;background:var(--panel);
+border:1px solid var(--line);border-radius:8px;font-size:12.5px}
+.vars-strip-title{font-weight:600;color:var(--ink);margin-right:4px}
+.vars-field{display:inline-flex;align-items:center;gap:5px;color:var(--mut)}
+.vars-field label{font-weight:500;font-size:12px}
+.vars-field input,.vars-field select{padding:3px 7px;border:1px solid var(--line);
+border-radius:4px;background:var(--bg);color:var(--var);font-style:italic;
+font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+font-size:12px;min-width:90px}
+.vars-reset{margin-left:auto;padding:3px 8px;border:1px solid var(--line);
+border-radius:4px;background:var(--bg);color:var(--mut);font-size:11.5px;cursor:pointer}
+.vars-reset:hover{color:var(--ink);border-color:var(--acc)}
+.layout{display:flex;max-width:1280px;margin:0 auto}
+nav{position:sticky;top:0;align-self:flex-start;width:256px;height:100vh;
+overflow:auto;padding:24px 16px 40px 22px;border-right:1px solid var(--line)}
+nav .brand-row{display:flex;align-items:center;justify-content:space-between;gap:8px}
+nav .brand{font-weight:700;font-size:19px;color:var(--ink);text-decoration:none}
+nav .theme-btn{display:inline-flex;align-items:center;justify-content:center;
+width:28px;height:28px;border:1px solid var(--line);border-radius:6px;
+background:var(--panel);color:var(--ink);cursor:pointer;padding:0}
+nav .theme-btn:hover{border-color:var(--acc);color:var(--acc)}
+nav .theme-btn svg{width:15px;height:15px;fill:currentColor}
+nav .tag{color:var(--mut);font-size:12px;margin:4px 0 14px}
+nav .nav-group{font-size:11px;font-weight:600;text-transform:uppercase;
+letter-spacing:.05em;color:var(--mut);margin:14px 0 4px}
 nav a{display:block;color:var(--mut);padding:3px 0;font-size:13.5px}
 nav a.here{color:var(--ink);font-weight:600}
 nav a.sub{padding-left:12px;font-size:12.5px}
-main{flex:1;min-width:0;padding:34px 40px 120px;max-width:980px}
+main{flex:1;min-width:0;padding:34px 40px 120px;max-width:1000px}
 h1{font-size:30px;margin:.2em 0 .1em}
 h2{font-size:22px;margin:2em 0 .5em;padding-top:.4em;
 border-top:1px solid var(--line)}
 h3{font-size:16px;margin:1.6em 0 .4em}
-.lede{color:var(--mut);font-size:16px;margin:.2em 0 1.4em}
-.rule{background:var(--panel);border-left:3px solid var(--acc);
-border-radius:0 8px 8px 0;padding:12px 16px;margin:18px 0}
+.lede{color:var(--mut);font-size:16px;margin:.2em 0 1.2em}
+.rule{background:var(--panel);border:1px solid var(--line);
+border-radius:8px;padding:12px 16px;margin:18px 0}
 .mut{color:var(--mut);font-size:13px}
 .wide{overflow-x:auto}
-table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13.5px}
+table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13.5px;
+font-variant-numeric:tabular-nums}
 th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;
 vertical-align:top}
 th{background:var(--panel);font-weight:600}
@@ -64,16 +162,22 @@ margin-top:40px;padding-top:16px}
 <body>
 <div class="layout">
 <nav>
-<div class="brand">migkit</div>
+<div class="brand-row">
+<a class="brand" href="index.html">migkit</a>
+<button type="button" class="theme-btn" data-page-theme-toggle aria-label="Toggle color scheme" title="Toggle page color scheme"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 8.69V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12 20 8.69zM12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6c3.31 0 6 2.69 6 6s-2.69 6-6 6z"/></svg></button>
+</div>
 <div class="tag">version 0.2.0</div>
+<div class="nav-group">Getting started</div>
 <a href="index.html">Overview</a>
 <a href="quickstart.html">Quickstart</a>
+<div class="nav-group">Reference</div>
 <a href="engines.html">Engines</a>
 <a href="goals.html">Goals and modes</a>
 <a href="recipes.html">Recipes</a>
 <a href="options.html">Hop options</a>
 <a href="environment.html">Environment</a>
 <a href="commands.html">Commands</a>
+<div class="nav-group">Operations</div>
 <a href="troubleshooting.html">Troubleshooting</a>
 <a href="evidence.html">Evidence</a>
 <a href="web.html" class="here">Web and API</a>
@@ -83,6 +187,7 @@ margin-top:40px;padding-top:16px}
 <a class="sub" href="#api">The API</a>
 <a class="sub" href="#setting-up">Setting it up</a>
 <a href="telemetry.html">Telemetry</a>
+<div class="nav-group">Project</div>
 <a href="contributing.html">Contributing</a>
 <a href="releases.html">Releases</a>
 </nav>
@@ -109,5 +214,452 @@ Source: <a href="https://github.com/arkashira/migkit">github.com/arkashira/migki
 AGPL-3.0-or-later.</footer>
 </main>
 </div>
+<script>
+(function(){
+  var SPEC = {"commands":{"advise":[],"assess":[],"autopilot":[{"b":true,"c":[],"f":"--dry-run","h":"Rehearse migration flight sim and stages without applying live cutover."},{"b":true,"c":[],"f":"--skip-tuning","h":"Skip target hardware parameter tuning profile."},{"b":true,"c":[],"f":"--skip-flight-sim","h":"Skip pre-cutover shadow flight simulator rehearsal."},{"b":true,"c":[],"f":"--auto-approve","h":"Auto-approve verified stages."},{"b":false,"c":[],"f":"--timeout","h":"Overall migration timeout in seconds."}],"change-sheet":[{"b":false,"c":[],"f":"--db","h":"one database of the hop's scope; default all of them."},{"b":false,"c":[],"f":"--back","h":"a step's id: write the run's evidence back to it instead of exporting the plan."},{"b":false,"c":[],"f":"--status","h":"with --back: done, failed, ."},{"b":false,"c":[],"f":"--seconds","h":"with --back: the seconds the step took."},{"b":false,"c":[],"f":"--proof","h":"with --back: what it stands on."},{"b":false,"c":[],"f":"--rows","h":"with --back: rows a phase that wrote into the target wrote."},{"b":false,"c":[],"f":"--unit","h":"with --back: the name of that write, if not the step's id."}],"check":[{"b":false,"c":[],"f":"--db","h":"single database."},{"b":false,"c":[],"f":"--table","h":"single table (schema.table)."},{"b":false,"c":[],"f":"--only","h":"comma list: schema,counts,autoinc,data,deep,params."},{"b":true,"c":[],"f":"--deep","h":"add deep checks: fk orphans, disabled triggers, column drift, matview/grants parity, boundary fr"},{"b":true,"c":[],"f":"--drill","h":"column-level sample diff for one table (needs --db and --table)."},{"b":false,"c":[],"f":"--limit","h":"with --drill: sample rows."},{"b":true,"c":[],"f":"--consistent","h":"checksum every table of a db inside one repeatable-read transaction per side, with the src LSN c"},{"b":false,"c":[],"f":"--workers","h":"parallel databases, default from conf."},{"b":true,"c":[],"f":"--resume","h":"skip checks already ok in last summary."},{"b":false,"c":[],"f":"--exclude","h":"comma list of db or db.schema.table patterns to skip, added to the hop's."},{"b":false,"c":[],"f":"--sample","h":"a quick signal in about this many seconds: random rows read by key on both sides, said as a samp"}],"cutover":[{"b":false,"c":[],"f":"--db","h":"one database of the hop."},{"b":true,"c":[],"f":"--dry-run","h":"run shadow cutover flight simulator."},{"b":true,"c":[],"f":"--go","h":"execute live cutover."}],"diagnostics-bundle":[{"b":false,"c":[],"f":"--failure-class","h":"failure class to reproduce."},{"b":false,"c":[],"f":"--out","h":"path to output zip bundle."}],"doctor":[{"b":true,"c":[],"f":"--install","h":"auto-install every missing external tool via the platform package manager (brew/apt) - get a fre"}],"drain":[{"b":false,"c":[],"f":"--db","h":"one database of the hop."},{"b":false,"c":[],"f":"--to","h":"the position to drain the change tail to, written the way the engine writes it, or `now`."},{"b":false,"c":[],"f":"--wait","h":"seconds the tail may take to reach it."},{"b":true,"c":[],"f":"--go","h":"drain and hold the tail there; default shows the plan."}],"estate":[{"b":false,"c":[],"f":"--account","h":"a provider account's instances, provider:product:region (aws:rds:us-east-1), read through its ow"},{"b":false,"c":[],"f":"--user","h":"who signs in where an address names nobody; the password is MIGKIT_SOURCE_PASSWORD's."},{"b":false,"c":[],"f":"--to","h":"the target engine the moves are sized for (the same engine where not given)."},{"b":false,"c":[],"f":"--cloud","h":"price on this cloud's types only."},{"b":false,"c":[],"f":"--region","h":"price in this region only."}],"export-manifest":[{"b":false,"c":[],"f":"--out","h":"output path for manifest JSON."}],"failback":[{"b":true,"c":[],"f":"--force","h":"Force failback even if past 48h retention window."},{"b":false,"c":[],"f":"--timeout","h":"Failback timeout in seconds."}],"history":[{"b":false,"c":[],"f":"--db","h":""},{"b":false,"c":[],"f":"--show","h":"print one state in detail."}],"init":[{"b":true,"c":[],"f":"--here","h":"write ./conf/hops.yaml in this directory instead of the user config directory."},{"b":true,"c":[],"f":"--force","h":"overwrite an existing file."}],"leftovers":[{"b":false,"c":[],"f":"--db","h":"single database."},{"b":true,"c":[],"f":"--list","h":"say each hold and what would be done, give none back."}],"migrate":[{"b":false,"c":["copy","sync","cutover"],"f":"--goal","h":"copy once, keep in sync, or move and prepare the switch."},{"b":false,"c":[],"f":"--hop","h":"a hop already set up, instead of two addresses."},{"b":true,"c":[],"f":"--go","h":"write; default shows the plan."},{"b":true,"c":[],"f":"--switch","h":"a cutover proved ready switches the applications; without it the switch is asked."},{"b":true,"c":[],"f":"--why","h":"the decisions and evidence of the last run."}],"move":[{"b":false,"c":[],"f":"--db","h":""},{"b":false,"c":[],"f":"--table","h":"schema.table (full mode)."},{"b":false,"c":["full","cdc","full+cdc"],"f":"--mode","h":"full = bulk copy, cdc = follow live changes, full+cdc = initial load plus stream until cutover."},{"b":false,"c":[],"f":"--chunk","h":"rows per resumable chunk, when a resumable copy is used."},{"b":true,"c":[],"f":"--drop","h":"cdc modes: tear down replication."},{"b":true,"c":[],"f":"--go","h":"actually run, default shows the plan."}],"report":[{"b":true,"c":[],"f":"--open","h":"open in browser."},{"b":true,"c":[],"f":"--refresh","h":"render the report again from the last check's answers on disk (no re-check); the answers stay as"},{"b":true,"c":[],"f":"--serve","h":"serve the web view and the API for every hop - signed in, with roles - instead of writing a file"},{"b":true,"c":[],"f":"--metrics","h":"print Prometheus metrics for every hop and exit (the dashboard also exposes them at /metrics)."},{"b":false,"c":[],"f":"--port","h":"with --serve: listen port."}],"rollback":[{"b":false,"c":[],"f":"--db","h":""},{"b":false,"c":[],"f":"--state","h":"state timestamp or tag, default latest."},{"b":true,"c":[],"f":"--apply","h":""}],"schema":[{"b":false,"c":[],"f":"--db","h":"single database."},{"b":true,"c":[],"f":"--convert","h":"transpile source DDL to the target dialect (hetero hops)."},{"b":true,"c":[],"f":"--migration","h":"generate versioned V/U migration files from the live schema diff."},{"b":true,"c":[],"f":"--apply","h":"with --convert: execute the DDL on target."},{"b":false,"c":[],"f":"--out","h":"with --migration: output directory."}],"scope":[{"b":false,"c":[],"f":"--db","h":"single database."}],"secrets":[],"sync":[{"b":false,"c":[],"f":"--db","h":"one database, or all diffed dbs if omitted."},{"b":false,"c":["sequences","rows","schema","all"],"f":"--kind","h":""},{"b":false,"c":["reconcile","verify","seed","stream","migrate"],"f":"--mode","h":"run a whole flow: verify (read-only assurance), seed (initial load, then the check and a repair "},{"b":true,"c":[],"f":"--apply","h":"execute the repair plan, default is dry-run."},{"b":true,"c":[],"f":"--go","h":"checkpointed check+repair sweep with rollback state."},{"b":true,"c":[],"f":"--serve","h":"stream and migrate: run the verify loop forever (VM/service)."},{"b":false,"c":[],"f":"--interval","h":"--serve: seconds between cycles."},{"b":false,"c":["source-wins","keep-target"],"f":"--on-conflict","h":"rows that differ: source-wins overwrites the target (the default, source is truth); keep-target "},{"b":false,"c":[],"f":"--tag","h":"with --go: label this state, e.g."}],"telemetry":[{"b":true,"c":[],"f":"--schema","h":"also print every field an event may have."},{"b":false,"c":[],"f":"--endpoint","h":"the bucket's store, where it is not the default one."}],"users":[{"b":true,"c":[],"f":"--apply","h":"execute on the target (default is dry-run)."},{"b":false,"c":[],"f":"--passwords","h":"yaml file `role: password` for postgres create and for mongo setpw (managed sources lock passwor"}],"verify-partial-access":[{"b":false,"c":[],"f":"--manifest","h":"path to approved export manifest JSON."}],"watch":[{"b":false,"c":[],"f":"--db","h":""},{"b":false,"c":[],"f":"--interval","h":"seconds between samples (default 30, or 300 with --verify)."},{"b":false,"c":[],"f":"--count","h":"samples/cycles then exit, 0 = forever."},{"b":true,"c":[],"f":"--verify","h":"re-run read-only checks each cycle instead of sampling row counts (continuous validation)."},{"b":false,"c":[],"f":"--only","h":"with --verify: the checks each cycle runs (decided from their measured time against the interval"},{"b":true,"c":[],"f":"--delta","h":"with --verify: O(changes) mode - each cycle re-verifies only the rows touched since the last ver"},{"b":true,"c":[],"f":"--teardown","h":"drop the delta slot/position --delta keeps, and exit."}]},"goals":{"archive":"old rows to cheaper storage: the rows each rule picks added to an archive and proved there, then removed from the source only once proved and only where the hop allows it","consolidate":"many databases or tenants into one: each source's rows under a column the hop names, filled with its own value, keys kept apart by the hop's rule, proved source by source","copy":"move the data once and prove every row arrived","cutover":"move, follow the source's changes, prove both equal, and switch with the least downtime - a stream back ready from the moment of the switch","keep-in-sync":"a copy that follows the source for as long as it runs, the application kept off it","rehearse":"the whole path the real run will take - copy, follow, prove, cut over - on a copy or a sample of the source into a target of its own, every phase timed, so the hop it rehearses (rehearses:) is forecast from what it measured","reshard":"N sources onto M targets by one shard function - shards split or merged, a new shard key, a cluster's own distribution - every row placed exactly once, proved, followed until every source and target is cut over at once","split":"one database into many - a service extracted, a database split by region: each part's rows by its rule, every row placed exactly once, proved, and followed until every part is cut over at once","subset":"a copy for testing: the rows chosen and every row they refer to, masked where the hop says, into a staging or developer database, proved row by row","two-way":"both sides written, each side's changes carried to the other","upgrade":"the same engine at a newer version, a higher edition (SQL Server Web to Enterprise), or both, with the least downtime: what the new version or edition changes checked first, then the data moved into it and followed, or a copy of its pages taken to the target where the hop allows it - upgraded there where the version moves - and switched over","verify":"prove two databases hold the same; nothing is written to either"},"modes":{"move:cdc":"the stream of changes started, or resumed from where it stood: the source's log read, the target written change by change","move:cdc --drop":"the cutover: the stream torn down, the target given back to the application where protect_target kept it, and what else happens on each side is what cutover: says (below); run again once a cutover of the hop has flipped, its point of no return","move:full":"one copy of every table the hop carries: the source read, the target written - kept from the application's writes before the first row and again after the last where the hop asks (protect_target): its rights taken, its access policy changed on an answer of yes, or its writes named, the way the target allows","move:full+cdc":"the copy, then the stream from a position taken before the copy began, so nothing changed during it is lost","sync:migrate":"seed, then stream","sync:reconcile":"the last check's differences shown; --apply writes the target to match the source","sync:seed":"the schema aligned, the copy, the differences repaired and a consistent check, one after another","sync:stream":"the stream started, and each cycle's changes compared","sync:verify":"read only: every table compared as of one moment"}};
+  var STORE_KEY = "migkit-manual-vars-v1";
+  var CODE_THEME_KEY = "migkit-code-theme";
+  var DEFAULTS = {
+    hop: "shop",
+    source_host: "db1.example.com",
+    target_host: "db2.example.com",
+    db: "shop",
+    goal: "cutover",
+    mode: "full+cdc"
+  };
+  var META = {
+    hop: {
+      label: "HOP_NAME",
+      hint: "Hop name in conf/hops.yaml",
+      choices: [
+        ["shop", "PostgreSQL cutover hop"],
+        ["orders", "MySQL timed cutover hop"],
+        ["erp", "Oracle -> PostgreSQL hop"],
+        ["crm", "SQL Server -> PostgreSQL hop"],
+        ["billing", "PostgreSQL major upgrade hop"],
+        ["catalog", "MongoDB cutover hop"],
+        ["proof", "Read-only verification hop"],
+        ["staging", "Masked staging subset hop"]
+      ]
+    },
+    source_host: {
+      label: "SOURCE_HOST",
+      hint: "Source database host or endpoint",
+      choices: [
+        ["db1.example.com", "Primary source endpoint"],
+        ["10.0.0.5", "Internal source address"],
+        ["copy.example.com", "Rehearsal source snapshot"]
+      ]
+    },
+    target_host: {
+      label: "TARGET_HOST",
+      hint: "Target database host or endpoint",
+      choices: [
+        ["db2.example.com", "Primary target endpoint"],
+        ["staging.example.com", "Staging target endpoint"],
+        ["db3.example.com", "Rehearsal target endpoint"]
+      ]
+    },
+    db: {
+      label: "DATABASE",
+      hint: "Database or schema name",
+      choices: [
+        ["shop", "Default application database"],
+        ["orders", "Orders database"],
+        ["billing", "Billing database"],
+        ["crm", "CRM database"]
+      ]
+    },
+    goal: {
+      label: "GOAL",
+      hint: "What the hop is for (hopkeys.GOALS)",
+      choices: Object.keys(SPEC.goals || {}).map(function(k){ return [k, SPEC.goals[k]]; })
+    },
+    mode: {
+      label: "MODE",
+      hint: "Execution mode (--mode)",
+      choices: [
+        ["full+cdc", "Snapshot before copy, then copy + change stream"],
+        ["full", "One copy of every table in scope"],
+        ["cdc", "Start or resume the change stream"],
+        ["cdc --drop", "Cut over and tear down the stream"],
+        ["verify", "Read-only consistent comparison"],
+        ["reconcile", "Inspect or repair diffs from last check"],
+        ["seed", "Align schema, copy, repair, and verify"],
+        ["stream", "Follow stream and verify each cycle"],
+        ["migrate", "Run seed, then stream"]
+      ]
+    }
+  };
+
+  function loadVars(){
+    try {
+      var raw = localStorage.getItem(STORE_KEY);
+      if (!raw) return Object.assign({}, DEFAULTS);
+      return Object.assign({}, DEFAULTS, JSON.parse(raw));
+    } catch (_e) {
+      return Object.assign({}, DEFAULTS);
+    }
+  }
+  var STATE = loadVars();
+
+  function saveVars(){
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(STATE)); } catch (_e) {}
+  }
+
+  var THEME_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 8.69V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12 20 8.69zM12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6c3.31 0 6 2.69 6 6s-2.69 6-6 6z"/></svg>';
+  var COPY_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>';
+  var CHECK_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>';
+
+  function esc(s){
+    return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }
+
+  function decorateLine(line){
+    var out = esc(line);
+    out = out.replace(/(postgres|mysql|mongodb|mssql|oracle):\/\/([a-zA-Z0-9_]+)@(db1\.example\.com|db2\.example\.com|db3\.example\.com|copy\.example\.com|staging\.example\.com|10\.0\.0\.5)(:[0-9]+)?\/([a-zA-Z0-9_,-]+)/g,
+      function(_m, scheme, user, host, port, db){
+        var hk = (host === "db1.example.com" || host === "10.0.0.5" || host === "copy.example.com") ? "source_host" : "target_host";
+        return scheme + "://" + user + '@<var class="gcp-var" tabindex="0" role="button" data-k="' + hk + '" data-d="' + host + '">' + host + "</var>" + (port || "") + '/<var class="gcp-var" tabindex="0" role="button" data-k="db" data-d="' + db + '">' + db + "</var>";
+      });
+    out = out.replace(/\b(MIGKIT_GOAL=)(cutover|copy|verify|two-way|keep-in-sync|rehearse|upgrade|subset|consolidate|split|reshard|archive)\b/g,
+      '$1<var class="gcp-var" tabindex="0" role="button" data-k="goal" data-d="$2">$2</var>');
+    out = out.replace(/\b(MIGKIT_HOP=)([a-z][a-z0-9-]*)\b/g,
+      '$1<var class="gcp-var" tabindex="0" role="button" data-k="hop" data-d="$2">$2</var>');
+    out = out.replace(/^(\s*goal:\s*)(cutover|copy|verify|two-way|keep-in-sync|rehearse|upgrade|subset|consolidate|split|reshard|archive)\b/,
+      '$1<var class="gcp-var" tabindex="0" role="button" data-k="goal" data-d="$2">$2</var>');
+    out = out.replace(/^(\s{2})(shop|orders|erp|crm|billing|catalog|proof|orders-moved|staging|shop-rehearsal)(:)\s*$/,
+      '$1<var class="gcp-var" tabindex="0" role="button" data-k="hop" data-d="$2">$2</var>$3');
+    out = out.replace(/(migkit\s+(?:assess|move|check|sync|migrate|cutover|schema|watch|report|history|autopilot|failback|rollback|users|drain|leftovers|scope|change-sheet|advise|export-manifest|diagnostics-bundle)\s+)(HOP|shop|orders|erp|crm|billing|catalog|proof|orders-moved|staging|shop-rehearsal)\b/g,
+      '$1<var class="gcp-var" tabindex="0" role="button" data-k="hop" data-d="$2">$2</var>');
+    out = out.replace(/(--mode\s+)(full\+cdc|cdc\s+--drop|full|cdc|reconcile|verify|seed|stream|migrate)\b/g,
+      '$1<var class="gcp-var" tabindex="0" role="button" data-k="mode" data-d="$2">$2</var>');
+    return out;
+  }
+
+  function syncVarsToDOM(){
+    var vars = document.querySelectorAll(".gcp-var[data-k]");
+    for (var i = 0; i < vars.length; i++) {
+      var el = vars[i];
+      var k = el.getAttribute("data-k");
+      var defVal = el.getAttribute("data-d") || "";
+      if (k && STATE[k]) {
+        if (STATE[k] !== DEFAULTS[k] || defVal === DEFAULTS[k] || defVal === "HOP") {
+          el.textContent = STATE[k];
+        } else {
+          el.textContent = defVal;
+        }
+      }
+    }
+    var inputs = document.querySelectorAll("[data-var-input]");
+    for (var j = 0; j < inputs.length; j++) {
+      var inp = inputs[j];
+      var ik = inp.getAttribute("data-var-input");
+      if (ik && STATE[ik] && inp.value !== STATE[ik]) {
+        inp.value = STATE[ik];
+      }
+    }
+  }
+
+  var pop = null;
+  var activeVar = null;
+
+  function ensurePopover(){
+    if (pop) return pop;
+    pop = document.createElement("div");
+    pop.className = "gcp-popover";
+    pop.hidden = true;
+    pop.innerHTML = '<div class="gcp-pop-head"><span data-pop-title>PARAMETER</span><span>ESC to close</span></div>' +
+      '<input type="text" class="gcp-pop-input" data-pop-in aria-label="Parameter value">' +
+      '<div class="gcp-pop-list" data-pop-list></div>';
+    document.body.appendChild(pop);
+    var inp = pop.querySelector("[data-pop-in]");
+    inp.addEventListener("input", function(){
+      if (!activeVar) return;
+      var k = activeVar.getAttribute("data-k");
+      var val = inp.value.trim() || DEFAULTS[k] || "shop";
+      STATE[k] = val;
+      saveVars();
+      syncVarsToDOM();
+    });
+    inp.addEventListener("keydown", function(e){
+      if (e.key === "Enter" || e.key === "Escape") {
+        e.preventDefault();
+        closePopover();
+      }
+    });
+    document.addEventListener("mousedown", function(e){
+      if (!pop.hidden && !pop.contains(e.target) && (!activeVar || !activeVar.contains(e.target))) {
+        closePopover();
+      }
+    });
+    return pop;
+  }
+
+  function openPopover(target){
+    var p = ensurePopover();
+    activeVar = target;
+    var k = target.getAttribute("data-k");
+    var meta = META[k] || { label: k.toUpperCase(), choices: [] };
+    p.querySelector("[data-pop-title]").textContent = meta.label + (meta.hint ? " - " + meta.hint : "");
+    var inp = p.querySelector("[data-pop-in]");
+    inp.value = target.textContent;
+    var list = p.querySelector("[data-pop-list]");
+    list.innerHTML = "";
+    (meta.choices || []).forEach(function(pair){
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "gcp-pop-opt";
+      btn.innerHTML = "<code>" + esc(pair[0]) + "</code><span>" + esc(pair[1] || "") + "</span>";
+      btn.addEventListener("click", function(){
+        STATE[k] = pair[0];
+        saveVars();
+        syncVarsToDOM();
+        closePopover();
+      });
+      list.appendChild(btn);
+    });
+    p.hidden = false;
+    var rect = target.getBoundingClientRect();
+    var top = Math.min(window.innerHeight - 260, rect.bottom + 6);
+    var left = Math.min(window.innerWidth - 340, Math.max(12, rect.left));
+    p.style.top = Math.max(12, top) + "px";
+    p.style.left = left + "px";
+    inp.focus();
+    inp.select();
+  }
+
+  function closePopover(){
+    if (pop) pop.hidden = true;
+    activeVar = null;
+  }
+
+  function detectPrimaryCommand(text){
+    var lines = text.split("\n");
+    for (var i = 0; i < lines.length; i++) {
+      var m = lines[i].match(/(?:^|\s)migkit\s+([a-z][a-z-]*)\b/);
+      if (m && SPEC.commands && SPEC.commands[m[1]]) {
+        return { cmd: m[1], lineIndex: i };
+      }
+    }
+    return null;
+  }
+
+  function attachCompletionBar(wrap, pre, codeEl, info){
+    var opts = SPEC.commands[info.cmd] || [];
+    if (!opts.length) return;
+    wrap.classList.add("has-bar");
+    var bar = document.createElement("div");
+    bar.className = "cmd-complete-bar";
+    var lbl = document.createElement("span");
+    lbl.className = "cmd-complete-label";
+    lbl.textContent = "Complete migkit " + info.cmd + ":";
+    bar.appendChild(lbl);
+
+    var shownOpts = opts.slice(0, 8);
+    shownOpts.forEach(function(opt){
+      var chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "cmd-chip";
+      chip.title = opt.h || opt.f;
+      var flagText = opt.f;
+      if (!opt.b && opt.c && opt.c.length) {
+        flagText = opt.f + " " + opt.c[0];
+      } else if (!opt.b) {
+        flagText = opt.f + " ...";
+      }
+      chip.textContent = flagText;
+      var present = new RegExp("(?:^|\\s)" + opt.f.replace(/-/g, "\\-") + "(?:\\s|$)").test(codeEl.textContent);
+      if (present) chip.setAttribute("data-active", "1");
+
+      chip.addEventListener("click", function(){
+        var active = chip.getAttribute("data-active") === "1";
+        var token = opt.b ? opt.f : (opt.c && opt.c.length ? opt.f + " " + opt.c[0] : opt.f + " " + (STATE.db || "shop"));
+        var targetSpan = codeEl.querySelector('[data-extra-flag="' + opt.f + '"]');
+        if (active) {
+          if (targetSpan) targetSpan.remove();
+          chip.removeAttribute("data-active");
+        } else {
+          if (!targetSpan) {
+            targetSpan = document.createElement("span");
+            targetSpan.setAttribute("data-extra-flag", opt.f);
+            targetSpan.textContent = " " + token;
+            codeEl.appendChild(targetSpan);
+          }
+          chip.setAttribute("data-active", "1");
+        }
+      });
+      bar.appendChild(chip);
+    });
+    wrap.appendChild(bar);
+  }
+
+  function applySavedCodeTheme(pre){
+    try {
+      var saved = localStorage.getItem(CODE_THEME_KEY);
+      if (saved === "dark" || saved === "light") {
+        pre.setAttribute("data-code-theme", saved);
+      }
+    } catch (_e) {}
+  }
+
+  function enhanceCodeBlocks(){
+    var pres = document.querySelectorAll("main pre");
+    var hasVarsOnPage = false;
+    for (var i = 0; i < pres.length; i++) {
+      (function(pre){
+        var code = pre.querySelector("code");
+        if (!code) return;
+        var raw = code.textContent || "";
+        var decorated = raw.split("\n").map(decorateLine).join("\n");
+        if (decorated.indexOf("gcp-var") !== -1) {
+          code.innerHTML = decorated;
+          hasVarsOnPage = true;
+        }
+        var wrap = document.createElement("div");
+        wrap.className = "code-wrap";
+        pre.parentNode.insertBefore(wrap, pre);
+        wrap.appendChild(pre);
+        applySavedCodeTheme(pre);
+
+        var tools = document.createElement("div");
+        tools.className = "code-tools";
+
+        var themeBtn = document.createElement("button");
+        themeBtn.type = "button";
+        themeBtn.className = "code-btn";
+        themeBtn.setAttribute("aria-label", "Toggle code block theme");
+        themeBtn.title = "Toggle dark/light code block";
+        themeBtn.innerHTML = THEME_SVG;
+        themeBtn.addEventListener("click", function(){
+          var cur = pre.getAttribute("data-code-theme");
+          var isSysDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+          var meta = document.querySelector('meta[name="color-scheme"]');
+          var docScheme = meta ? meta.getAttribute("content") : "";
+          var effectiveDark = cur ? cur === "dark" : (docScheme === "dark" || (docScheme !== "light" && isSysDark));
+          var next = effectiveDark ? "light" : "dark";
+          var allPres = document.querySelectorAll("main pre");
+          for (var k = 0; k < allPres.length; k++) {
+            allPres[k].setAttribute("data-code-theme", next);
+          }
+          try { localStorage.setItem(CODE_THEME_KEY, next); } catch (_e) {}
+        });
+
+        var copyBtn = document.createElement("button");
+        copyBtn.type = "button";
+        copyBtn.className = "code-btn";
+        copyBtn.setAttribute("aria-label", "Copy command to clipboard");
+        copyBtn.title = "Copy to clipboard";
+        copyBtn.innerHTML = COPY_SVG;
+        copyBtn.addEventListener("click", function(){
+          var text = (code.textContent || "").trim();
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text);
+          }
+          copyBtn.setAttribute("data-copied", "1");
+          copyBtn.innerHTML = CHECK_SVG;
+          setTimeout(function(){
+            copyBtn.removeAttribute("data-copied");
+            copyBtn.innerHTML = COPY_SVG;
+          }, 1400);
+        });
+
+        tools.appendChild(themeBtn);
+        tools.appendChild(copyBtn);
+        wrap.appendChild(tools);
+
+        var info = detectPrimaryCommand(raw);
+        if (info) {
+          attachCompletionBar(wrap, pre, code, info);
+        }
+      })(pres[i]);
+    }
+
+    document.addEventListener("click", function(e){
+      var v = e.target.closest ? e.target.closest(".gcp-var") : null;
+      if (v) {
+        e.preventDefault();
+        openPopover(v);
+      }
+    });
+    document.addEventListener("keydown", function(e){
+      var v = e.target.closest ? e.target.closest(".gcp-var") : null;
+      if (v && (e.key === "Enter" || e.key === " ")) {
+        e.preventDefault();
+        openPopover(v);
+      }
+    });
+
+    if (hasVarsOnPage) {
+      insertVarsStrip();
+    }
+    syncVarsToDOM();
+  }
+
+  function insertVarsStrip(){
+    var lede = document.querySelector("main .lede");
+    if (!lede) return;
+    var strip = document.createElement("div");
+    strip.className = "vars-strip";
+    strip.innerHTML = '<span class="vars-strip-title">Interactive parameters:</span>' +
+      '<span class="vars-field"><label for="v-hop">hop</label><input id="v-hop" data-var-input="hop" type="text"></span>' +
+      '<span class="vars-field"><label for="v-src">source</label><input id="v-src" data-var-input="source_host" type="text"></span>' +
+      '<span class="vars-field"><label for="v-dst">target</label><input id="v-dst" data-var-input="target_host" type="text"></span>' +
+      '<span class="vars-field"><label for="v-goal">goal</label><select id="v-goal" data-var-input="goal">' +
+      Object.keys(SPEC.goals || {}).map(function(g){ return '<option value="' + esc(g) + '">' + esc(g) + "</option>"; }).join("") +
+      "</select></span>" +
+      '<span class="vars-field"><label for="v-mode">mode</label><select id="v-mode" data-var-input="mode">' +
+      META.mode.choices.map(function(c){ return '<option value="' + esc(c[0]) + '">' + esc(c[0]) + "</option>"; }).join("") +
+      "</select></span>" +
+      '<button type="button" class="vars-reset" data-var-reset>Reset</button>';
+    lede.parentNode.insertBefore(strip, lede.nextSibling);
+    var inputs = strip.querySelectorAll("[data-var-input]");
+    for (var i = 0; i < inputs.length; i++) {
+      inputs[i].addEventListener("input", function(e){
+        var k = e.target.getAttribute("data-var-input");
+        STATE[k] = e.target.value.trim() || DEFAULTS[k];
+        saveVars();
+        syncVarsToDOM();
+      });
+      inputs[i].addEventListener("change", function(e){
+        var k = e.target.getAttribute("data-var-input");
+        STATE[k] = e.target.value.trim() || DEFAULTS[k];
+        saveVars();
+        syncVarsToDOM();
+      });
+    }
+    strip.querySelector("[data-var-reset]").addEventListener("click", function(){
+      STATE = Object.assign({}, DEFAULTS);
+      saveVars();
+      syncVarsToDOM();
+    });
+  }
+
+  function wirePageThemeButton(){
+    var btn = document.querySelector("[data-page-theme-toggle]");
+    if (!btn) return;
+    btn.addEventListener("click", function(){
+      var meta = document.querySelector('meta[name="color-scheme"]');
+      if (!meta) return;
+      var cur = meta.getAttribute("content");
+      var sysDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+      var isDark = cur === "dark" || (cur !== "light" && sysDark);
+      var next = isDark ? "light" : "dark";
+      meta.setAttribute("content", next);
+      try { localStorage.setItem("color-scheme", next); } catch (_e) {}
+    });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", function(){
+      wirePageThemeButton();
+      enhanceCodeBlocks();
+    });
+  } else {
+    wirePageThemeButton();
+    enhanceCodeBlocks();
+  }
+})();
+</script>
 </body>
 </html>

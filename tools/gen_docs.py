@@ -186,12 +186,24 @@ def _md_inline(text, base):
 # ---- rendering --------------------------------------------------------------
 
 CSS = """
-:root{--bg:#fbfbfa;--panel:#f2f3f1;--ink:#1d232b;--mut:#5b6573;
+:root{color-scheme:light dark;--bg:#fbfbfa;--panel:#f2f3f1;--ink:#1d232b;--mut:#5b6573;
 --line:#dfe2e6;--acc:#0b63c4;--ok:#1f7a3d;--warn:#9a6700;--no:#b42318;
---code:#f3f4f6;--codeink:#1d232b}
+--code:#f1f3f4;--codeink:#202124;--var:#c51162;--varbg:rgba(197,17,98,.08);
+--varline:#c51162;--popbg:#ffffff;--popink:#1d232b}
 @media (prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#111721;
 --ink:#d6dee8;--mut:#8b98a8;--line:#222c39;--acc:#4aa3ff;--ok:#39b96a;
---warn:#e0a93b;--no:#e5534b;--code:#0a0e14;--codeink:#cbd6e4}}
+--warn:#e0a93b;--no:#e5534b;--code:#161b22;--codeink:#e6edf3;--var:#ff7eb6;
+--varbg:rgba(255,126,182,.12);--varline:#ff7eb6;--popbg:#161b22;--popink:#e6edf3}}
+:root:has(> head > meta[name="color-scheme"][content="light"]){color-scheme:only light;
+--bg:#fbfbfa;--panel:#f2f3f1;--ink:#1d232b;--mut:#5b6573;--line:#dfe2e6;
+--acc:#0b63c4;--ok:#1f7a3d;--warn:#9a6700;--no:#b42318;--code:#f1f3f4;
+--codeink:#202124;--var:#c51162;--varbg:rgba(197,17,98,.08);--varline:#c51162;
+--popbg:#ffffff;--popink:#1d232b}
+:root:has(> head > meta[name="color-scheme"][content="dark"]){color-scheme:only dark;
+--bg:#0d1117;--panel:#111721;--ink:#d6dee8;--mut:#8b98a8;--line:#222c39;
+--acc:#4aa3ff;--ok:#39b96a;--warn:#e0a93b;--no:#e5534b;--code:#161b22;
+--codeink:#e6edf3;--var:#ff7eb6;--varbg:rgba(255,126,182,.12);--varline:#ff7eb6;
+--popbg:#161b22;--popink:#e6edf3}
 *{box-sizing:border-box}
 html{scroll-behavior:smooth}
 body{margin:0;background:var(--bg);color:var(--ink);
@@ -199,31 +211,113 @@ font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,
 Helvetica,Arial,sans-serif}
 a{color:var(--acc);text-decoration:none}
 a:hover{text-decoration:underline}
-code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+code,pre,kbd{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 code{background:var(--code);color:var(--codeink);padding:.1em .35em;
 border-radius:4px;font-size:.9em}
-pre{background:var(--code);border:1px solid var(--line);border-radius:8px;
-padding:14px 16px;overflow:auto;font-size:13px;line-height:1.55}
-pre code{background:none;padding:0}
-.layout{display:flex;max-width:1240px;margin:0 auto}
-nav{position:sticky;top:0;align-self:flex-start;width:250px;height:100vh;
-overflow:auto;padding:26px 16px 40px 22px;border-right:1px solid var(--line)}
-nav .brand{font-weight:700;font-size:19px}
-nav .tag{color:var(--mut);font-size:12px;margin:4px 0 18px}
+.code-wrap{position:relative;margin:14px 0}
+pre{margin:0;background:var(--code);color:var(--codeink);accent-color:var(--acc);
+border:1px solid var(--line);border-radius:8px;padding:16px 84px 16px 18px;
+overflow:auto;font-size:13.5px;line-height:1.65;tab-size:2}
+pre[data-code-theme="dark"]{color-scheme:only dark;--code:#161b22;--codeink:#e6edf3;
+--line:#30363d;--var:#ff7eb6;--varbg:rgba(255,126,182,.14);--varline:#ff7eb6;
+color:var(--codeink);accent-color:#4aa3ff;background:var(--code);border-color:var(--line)}
+pre[data-code-theme="light"]{color-scheme:only light;--code:#f1f3f4;--codeink:#202124;
+--line:#dadce0;--var:#c51162;--varbg:rgba(197,17,98,.08);--varline:#c51162;
+color:var(--codeink);accent-color:#0b63c4;background:var(--code);border-color:var(--line)}
+pre code{background:none;padding:0;color:inherit;font-size:inherit}
+.code-tools{position:absolute;top:8px;right:10px;display:flex;align-items:center;
+gap:4px;z-index:2}
+.code-btn{display:inline-flex;align-items:center;justify-content:center;
+width:30px;height:30px;border:1px solid transparent;border-radius:6px;
+background:transparent;color:var(--codeink);opacity:.72;cursor:pointer;
+padding:0;transition:opacity 120ms ease,background-color 120ms ease,transform 120ms ease}
+.code-btn:hover,.code-btn:focus-visible{opacity:1;background:rgba(127,127,127,.14);
+outline:none}
+.code-btn:active{transform:scale(.96)}
+.code-btn svg{width:17px;height:17px;fill:currentColor;pointer-events:none}
+.code-btn[data-copied="1"]{color:var(--ok);opacity:1}
+.gcp-var{font-style:italic;font-weight:600;color:var(--var);
+border-bottom:1.5px dotted var(--varline);padding:0 2px 1px;border-radius:3px;
+cursor:pointer;display:inline;white-space:nowrap;transition:background-color 120ms ease}
+.gcp-var:hover,.gcp-var:focus-visible{background:var(--varbg);outline:none}
+.gcp-var::after{content:"";display:inline-block;width:12px;height:12px;
+margin-left:4px;vertical-align:-1px;background-color:currentColor;
+-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1.003 1.003 0 0 0 0-1.42l-2.34-2.34a1.003 1.003 0 0 0-1.42 0l-1.83 1.83 3.75 3.75 1.84-1.82z'/%3E%3C/svg%3E") no-repeat center/contain;
+mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1.003 1.003 0 0 0 0-1.42l-2.34-2.34a1.003 1.003 0 0 0-1.42 0l-1.83 1.83 3.75 3.75 1.84-1.82z'/%3E%3C/svg%3E") no-repeat center/contain}
+.cmd-complete-bar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;
+padding:7px 12px;background:var(--panel);border:1px solid var(--line);
+border-top:none;border-radius:0 0 8px 8px;font-size:12px;color:var(--mut)}
+.code-wrap.has-bar pre{border-radius:8px 8px 0 0}
+.cmd-complete-label{font-weight:600;color:var(--ink);margin-right:2px;
+font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px}
+.cmd-chip{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;
+border:1px solid var(--line);border-radius:4px;background:var(--bg);
+color:var(--ink);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+font-size:11.5px;cursor:pointer;user-select:none;transition:border-color 120ms ease,background-color 120ms ease}
+.cmd-chip:hover{border-color:var(--acc);color:var(--acc)}
+.cmd-chip[data-active="1"]{background:var(--acc);border-color:var(--acc);color:#fff}
+.gcp-popover{position:fixed;z-index:9999;min-width:270px;max-width:360px;
+background:var(--popbg);color:var(--popink);border:1px solid var(--line);
+border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.18);padding:10px;
+font-size:12.5px}
+.gcp-popover[hidden]{display:none}
+.gcp-pop-head{display:flex;justify-content:space-between;align-items:center;
+font-weight:600;margin-bottom:6px;color:var(--mut);font-size:11.5px;
+text-transform:uppercase;letter-spacing:.04em}
+.gcp-pop-input{width:100%;padding:6px 8px;border:1px solid var(--line);
+border-radius:5px;background:var(--bg);color:var(--ink);
+font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;
+margin-bottom:6px}
+.gcp-pop-input:focus{outline:2px solid var(--acc);border-color:transparent}
+.gcp-pop-list{max-height:180px;overflow-y:auto;display:flex;flex-direction:column;gap:2px}
+.gcp-pop-opt{display:flex;justify-content:space-between;align-items:baseline;
+gap:8px;padding:5px 7px;border-radius:4px;cursor:pointer;text-align:left;
+border:none;background:transparent;color:var(--popink);width:100%;font-size:12.5px}
+.gcp-pop-opt:hover,.gcp-pop-opt:focus-visible{background:var(--panel);outline:none}
+.gcp-pop-opt code{background:none;padding:0;font-weight:600;color:var(--acc)}
+.gcp-pop-opt span{color:var(--mut);font-size:11.5px;overflow:hidden;
+text-overflow:ellipsis;white-space:nowrap}
+.vars-strip{display:flex;flex-wrap:wrap;align-items:center;gap:10px;
+padding:10px 14px;margin:0 0 22px;background:var(--panel);
+border:1px solid var(--line);border-radius:8px;font-size:12.5px}
+.vars-strip-title{font-weight:600;color:var(--ink);margin-right:4px}
+.vars-field{display:inline-flex;align-items:center;gap:5px;color:var(--mut)}
+.vars-field label{font-weight:500;font-size:12px}
+.vars-field input,.vars-field select{padding:3px 7px;border:1px solid var(--line);
+border-radius:4px;background:var(--bg);color:var(--var);font-style:italic;
+font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+font-size:12px;min-width:90px}
+.vars-reset{margin-left:auto;padding:3px 8px;border:1px solid var(--line);
+border-radius:4px;background:var(--bg);color:var(--mut);font-size:11.5px;cursor:pointer}
+.vars-reset:hover{color:var(--ink);border-color:var(--acc)}
+.layout{display:flex;max-width:1280px;margin:0 auto}
+nav{position:sticky;top:0;align-self:flex-start;width:256px;height:100vh;
+overflow:auto;padding:24px 16px 40px 22px;border-right:1px solid var(--line)}
+nav .brand-row{display:flex;align-items:center;justify-content:space-between;gap:8px}
+nav .brand{font-weight:700;font-size:19px;color:var(--ink);text-decoration:none}
+nav .theme-btn{display:inline-flex;align-items:center;justify-content:center;
+width:28px;height:28px;border:1px solid var(--line);border-radius:6px;
+background:var(--panel);color:var(--ink);cursor:pointer;padding:0}
+nav .theme-btn:hover{border-color:var(--acc);color:var(--acc)}
+nav .theme-btn svg{width:15px;height:15px;fill:currentColor}
+nav .tag{color:var(--mut);font-size:12px;margin:4px 0 14px}
+nav .nav-group{font-size:11px;font-weight:600;text-transform:uppercase;
+letter-spacing:.05em;color:var(--mut);margin:14px 0 4px}
 nav a{display:block;color:var(--mut);padding:3px 0;font-size:13.5px}
 nav a.here{color:var(--ink);font-weight:600}
 nav a.sub{padding-left:12px;font-size:12.5px}
-main{flex:1;min-width:0;padding:34px 40px 120px;max-width:980px}
+main{flex:1;min-width:0;padding:34px 40px 120px;max-width:1000px}
 h1{font-size:30px;margin:.2em 0 .1em}
 h2{font-size:22px;margin:2em 0 .5em;padding-top:.4em;
 border-top:1px solid var(--line)}
 h3{font-size:16px;margin:1.6em 0 .4em}
-.lede{color:var(--mut);font-size:16px;margin:.2em 0 1.4em}
-.rule{background:var(--panel);border-left:3px solid var(--acc);
-border-radius:0 8px 8px 0;padding:12px 16px;margin:18px 0}
+.lede{color:var(--mut);font-size:16px;margin:.2em 0 1.2em}
+.rule{background:var(--panel);border:1px solid var(--line);
+border-radius:8px;padding:12px 16px;margin:18px 0}
 .mut{color:var(--mut);font-size:13px}
 .wide{overflow-x:auto}
-table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13.5px}
+table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13.5px;
+font-variant-numeric:tabular-nums}
 th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;
 vertical-align:top}
 th{background:var(--panel);font-weight:600}
@@ -315,12 +409,504 @@ def markdown(blocks, base=""):
     return "\n\n".join(_block_md(b, base) for b in blocks)
 
 
+_NAV_GROUPS = {
+    "index": "Getting started",
+    "engines": "Reference",
+    "troubleshooting": "Operations",
+    "contributing": "Project",
+}
+
+
+def _interactive_spec_json():
+    """JSON specification of CLI commands, options, goals and modes for
+    interactive command completion and GCP-style editable variables."""
+    import json
+
+    from migkit import hopkeys
+    spec = {
+        "goals": {g: v["what"] for g, v in hopkeys.GOALS.items()},
+        "modes": {f"{c}:{m}": w for (c, m), w in hopkeys.MODES.items()},
+        "commands": {},
+    }
+    for name, cmd in commands():
+        opts = []
+        for p in cmd.params:
+            if getattr(p, "opts", None) and p.param_type_name == "option":
+                flag = max(p.opts, key=len)
+                if names_a_program(flag):
+                    continue
+                help_txt = _first_sentence(p.help or "") if p.help else ""
+                if names_a_program(help_txt):
+                    help_txt = ""
+                choices = list(getattr(p.type, "choices", ()) or ())
+                opts.append({
+                    "f": flag,
+                    "b": bool(getattr(p, "is_flag", False)),
+                    "c": choices,
+                    "h": help_txt[:96],
+                })
+        spec["commands"][name] = opts
+    return _once("interactive_spec", lambda: json.dumps(
+        spec, separators=(",", ":"), sort_keys=True))
+
+
+INTERACTIVE_JS = r"""
+(function(){
+  var SPEC = __CLI_SPEC_JSON__;
+  var STORE_KEY = "migkit-manual-vars-v1";
+  var CODE_THEME_KEY = "migkit-code-theme";
+  var DEFAULTS = {
+    hop: "shop",
+    source_host: "db1.example.com",
+    target_host: "db2.example.com",
+    db: "shop",
+    goal: "cutover",
+    mode: "full+cdc"
+  };
+  var META = {
+    hop: {
+      label: "HOP_NAME",
+      hint: "Hop name in conf/hops.yaml",
+      choices: [
+        ["shop", "PostgreSQL cutover hop"],
+        ["orders", "MySQL timed cutover hop"],
+        ["erp", "Oracle -> PostgreSQL hop"],
+        ["crm", "SQL Server -> PostgreSQL hop"],
+        ["billing", "PostgreSQL major upgrade hop"],
+        ["catalog", "MongoDB cutover hop"],
+        ["proof", "Read-only verification hop"],
+        ["staging", "Masked staging subset hop"]
+      ]
+    },
+    source_host: {
+      label: "SOURCE_HOST",
+      hint: "Source database host or endpoint",
+      choices: [
+        ["db1.example.com", "Primary source endpoint"],
+        ["10.0.0.5", "Internal source address"],
+        ["copy.example.com", "Rehearsal source snapshot"]
+      ]
+    },
+    target_host: {
+      label: "TARGET_HOST",
+      hint: "Target database host or endpoint",
+      choices: [
+        ["db2.example.com", "Primary target endpoint"],
+        ["staging.example.com", "Staging target endpoint"],
+        ["db3.example.com", "Rehearsal target endpoint"]
+      ]
+    },
+    db: {
+      label: "DATABASE",
+      hint: "Database or schema name",
+      choices: [
+        ["shop", "Default application database"],
+        ["orders", "Orders database"],
+        ["billing", "Billing database"],
+        ["crm", "CRM database"]
+      ]
+    },
+    goal: {
+      label: "GOAL",
+      hint: "What the hop is for (hopkeys.GOALS)",
+      choices: Object.keys(SPEC.goals || {}).map(function(k){ return [k, SPEC.goals[k]]; })
+    },
+    mode: {
+      label: "MODE",
+      hint: "Execution mode (--mode)",
+      choices: [
+        ["full+cdc", "Snapshot before copy, then copy + change stream"],
+        ["full", "One copy of every table in scope"],
+        ["cdc", "Start or resume the change stream"],
+        ["cdc --drop", "Cut over and tear down the stream"],
+        ["verify", "Read-only consistent comparison"],
+        ["reconcile", "Inspect or repair diffs from last check"],
+        ["seed", "Align schema, copy, repair, and verify"],
+        ["stream", "Follow stream and verify each cycle"],
+        ["migrate", "Run seed, then stream"]
+      ]
+    }
+  };
+
+  function loadVars(){
+    try {
+      var raw = localStorage.getItem(STORE_KEY);
+      if (!raw) return Object.assign({}, DEFAULTS);
+      return Object.assign({}, DEFAULTS, JSON.parse(raw));
+    } catch (_e) {
+      return Object.assign({}, DEFAULTS);
+    }
+  }
+  var STATE = loadVars();
+
+  function saveVars(){
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(STATE)); } catch (_e) {}
+  }
+
+  var THEME_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 8.69V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12 20 8.69zM12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6c3.31 0 6 2.69 6 6s-2.69 6-6 6z"/></svg>';
+  var COPY_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>';
+  var CHECK_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>';
+
+  function esc(s){
+    return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }
+
+  function decorateLine(line){
+    var out = esc(line);
+    out = out.replace(/(postgres|mysql|mongodb|mssql|oracle):\/\/([a-zA-Z0-9_]+)@(db1\.example\.com|db2\.example\.com|db3\.example\.com|copy\.example\.com|staging\.example\.com|10\.0\.0\.5)(:[0-9]+)?\/([a-zA-Z0-9_,-]+)/g,
+      function(_m, scheme, user, host, port, db){
+        var hk = (host === "db1.example.com" || host === "10.0.0.5" || host === "copy.example.com") ? "source_host" : "target_host";
+        return scheme + "://" + user + '@<var class="gcp-var" tabindex="0" role="button" data-k="' + hk + '" data-d="' + host + '">' + host + "</var>" + (port || "") + '/<var class="gcp-var" tabindex="0" role="button" data-k="db" data-d="' + db + '">' + db + "</var>";
+      });
+    out = out.replace(/\b(MIGKIT_GOAL=)(cutover|copy|verify|two-way|keep-in-sync|rehearse|upgrade|subset|consolidate|split|reshard|archive)\b/g,
+      '$1<var class="gcp-var" tabindex="0" role="button" data-k="goal" data-d="$2">$2</var>');
+    out = out.replace(/\b(MIGKIT_HOP=)([a-z][a-z0-9-]*)\b/g,
+      '$1<var class="gcp-var" tabindex="0" role="button" data-k="hop" data-d="$2">$2</var>');
+    out = out.replace(/^(\s*goal:\s*)(cutover|copy|verify|two-way|keep-in-sync|rehearse|upgrade|subset|consolidate|split|reshard|archive)\b/,
+      '$1<var class="gcp-var" tabindex="0" role="button" data-k="goal" data-d="$2">$2</var>');
+    out = out.replace(/^(\s{2})(shop|orders|erp|crm|billing|catalog|proof|orders-moved|staging|shop-rehearsal)(:)\s*$/,
+      '$1<var class="gcp-var" tabindex="0" role="button" data-k="hop" data-d="$2">$2</var>$3');
+    out = out.replace(/(migkit\s+(?:assess|move|check|sync|migrate|cutover|schema|watch|report|history|autopilot|failback|rollback|users|drain|leftovers|scope|change-sheet|advise|export-manifest|diagnostics-bundle)\s+)(HOP|shop|orders|erp|crm|billing|catalog|proof|orders-moved|staging|shop-rehearsal)\b/g,
+      '$1<var class="gcp-var" tabindex="0" role="button" data-k="hop" data-d="$2">$2</var>');
+    out = out.replace(/(--mode\s+)(full\+cdc|cdc\s+--drop|full|cdc|reconcile|verify|seed|stream|migrate)\b/g,
+      '$1<var class="gcp-var" tabindex="0" role="button" data-k="mode" data-d="$2">$2</var>');
+    return out;
+  }
+
+  function syncVarsToDOM(){
+    var vars = document.querySelectorAll(".gcp-var[data-k]");
+    for (var i = 0; i < vars.length; i++) {
+      var el = vars[i];
+      var k = el.getAttribute("data-k");
+      var defVal = el.getAttribute("data-d") || "";
+      if (k && STATE[k]) {
+        if (STATE[k] !== DEFAULTS[k] || defVal === DEFAULTS[k] || defVal === "HOP") {
+          el.textContent = STATE[k];
+        } else {
+          el.textContent = defVal;
+        }
+      }
+    }
+    var inputs = document.querySelectorAll("[data-var-input]");
+    for (var j = 0; j < inputs.length; j++) {
+      var inp = inputs[j];
+      var ik = inp.getAttribute("data-var-input");
+      if (ik && STATE[ik] && inp.value !== STATE[ik]) {
+        inp.value = STATE[ik];
+      }
+    }
+  }
+
+  var pop = null;
+  var activeVar = null;
+
+  function ensurePopover(){
+    if (pop) return pop;
+    pop = document.createElement("div");
+    pop.className = "gcp-popover";
+    pop.hidden = true;
+    pop.innerHTML = '<div class="gcp-pop-head"><span data-pop-title>PARAMETER</span><span>ESC to close</span></div>' +
+      '<input type="text" class="gcp-pop-input" data-pop-in aria-label="Parameter value">' +
+      '<div class="gcp-pop-list" data-pop-list></div>';
+    document.body.appendChild(pop);
+    var inp = pop.querySelector("[data-pop-in]");
+    inp.addEventListener("input", function(){
+      if (!activeVar) return;
+      var k = activeVar.getAttribute("data-k");
+      var val = inp.value.trim() || DEFAULTS[k] || "shop";
+      STATE[k] = val;
+      saveVars();
+      syncVarsToDOM();
+    });
+    inp.addEventListener("keydown", function(e){
+      if (e.key === "Enter" || e.key === "Escape") {
+        e.preventDefault();
+        closePopover();
+      }
+    });
+    document.addEventListener("mousedown", function(e){
+      if (!pop.hidden && !pop.contains(e.target) && (!activeVar || !activeVar.contains(e.target))) {
+        closePopover();
+      }
+    });
+    return pop;
+  }
+
+  function openPopover(target){
+    var p = ensurePopover();
+    activeVar = target;
+    var k = target.getAttribute("data-k");
+    var meta = META[k] || { label: k.toUpperCase(), choices: [] };
+    p.querySelector("[data-pop-title]").textContent = meta.label + (meta.hint ? " - " + meta.hint : "");
+    var inp = p.querySelector("[data-pop-in]");
+    inp.value = target.textContent;
+    var list = p.querySelector("[data-pop-list]");
+    list.innerHTML = "";
+    (meta.choices || []).forEach(function(pair){
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "gcp-pop-opt";
+      btn.innerHTML = "<code>" + esc(pair[0]) + "</code><span>" + esc(pair[1] || "") + "</span>";
+      btn.addEventListener("click", function(){
+        STATE[k] = pair[0];
+        saveVars();
+        syncVarsToDOM();
+        closePopover();
+      });
+      list.appendChild(btn);
+    });
+    p.hidden = false;
+    var rect = target.getBoundingClientRect();
+    var top = Math.min(window.innerHeight - 260, rect.bottom + 6);
+    var left = Math.min(window.innerWidth - 340, Math.max(12, rect.left));
+    p.style.top = Math.max(12, top) + "px";
+    p.style.left = left + "px";
+    inp.focus();
+    inp.select();
+  }
+
+  function closePopover(){
+    if (pop) pop.hidden = true;
+    activeVar = null;
+  }
+
+  function detectPrimaryCommand(text){
+    var lines = text.split("\n");
+    for (var i = 0; i < lines.length; i++) {
+      var m = lines[i].match(/(?:^|\s)migkit\s+([a-z][a-z-]*)\b/);
+      if (m && SPEC.commands && SPEC.commands[m[1]]) {
+        return { cmd: m[1], lineIndex: i };
+      }
+    }
+    return null;
+  }
+
+  function attachCompletionBar(wrap, pre, codeEl, info){
+    var opts = SPEC.commands[info.cmd] || [];
+    if (!opts.length) return;
+    wrap.classList.add("has-bar");
+    var bar = document.createElement("div");
+    bar.className = "cmd-complete-bar";
+    var lbl = document.createElement("span");
+    lbl.className = "cmd-complete-label";
+    lbl.textContent = "Complete migkit " + info.cmd + ":";
+    bar.appendChild(lbl);
+
+    var shownOpts = opts.slice(0, 8);
+    shownOpts.forEach(function(opt){
+      var chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "cmd-chip";
+      chip.title = opt.h || opt.f;
+      var flagText = opt.f;
+      if (!opt.b && opt.c && opt.c.length) {
+        flagText = opt.f + " " + opt.c[0];
+      } else if (!opt.b) {
+        flagText = opt.f + " ...";
+      }
+      chip.textContent = flagText;
+      var present = new RegExp("(?:^|\\s)" + opt.f.replace(/-/g, "\\-") + "(?:\\s|$)").test(codeEl.textContent);
+      if (present) chip.setAttribute("data-active", "1");
+
+      chip.addEventListener("click", function(){
+        var active = chip.getAttribute("data-active") === "1";
+        var token = opt.b ? opt.f : (opt.c && opt.c.length ? opt.f + " " + opt.c[0] : opt.f + " " + (STATE.db || "shop"));
+        var targetSpan = codeEl.querySelector('[data-extra-flag="' + opt.f + '"]');
+        if (active) {
+          if (targetSpan) targetSpan.remove();
+          chip.removeAttribute("data-active");
+        } else {
+          if (!targetSpan) {
+            targetSpan = document.createElement("span");
+            targetSpan.setAttribute("data-extra-flag", opt.f);
+            targetSpan.textContent = " " + token;
+            codeEl.appendChild(targetSpan);
+          }
+          chip.setAttribute("data-active", "1");
+        }
+      });
+      bar.appendChild(chip);
+    });
+    wrap.appendChild(bar);
+  }
+
+  function applySavedCodeTheme(pre){
+    try {
+      var saved = localStorage.getItem(CODE_THEME_KEY);
+      if (saved === "dark" || saved === "light") {
+        pre.setAttribute("data-code-theme", saved);
+      }
+    } catch (_e) {}
+  }
+
+  function enhanceCodeBlocks(){
+    var pres = document.querySelectorAll("main pre");
+    var hasVarsOnPage = false;
+    for (var i = 0; i < pres.length; i++) {
+      (function(pre){
+        var code = pre.querySelector("code");
+        if (!code) return;
+        var raw = code.textContent || "";
+        var decorated = raw.split("\n").map(decorateLine).join("\n");
+        if (decorated.indexOf("gcp-var") !== -1) {
+          code.innerHTML = decorated;
+          hasVarsOnPage = true;
+        }
+        var wrap = document.createElement("div");
+        wrap.className = "code-wrap";
+        pre.parentNode.insertBefore(wrap, pre);
+        wrap.appendChild(pre);
+        applySavedCodeTheme(pre);
+
+        var tools = document.createElement("div");
+        tools.className = "code-tools";
+
+        var themeBtn = document.createElement("button");
+        themeBtn.type = "button";
+        themeBtn.className = "code-btn";
+        themeBtn.setAttribute("aria-label", "Toggle code block theme");
+        themeBtn.title = "Toggle dark/light code block";
+        themeBtn.innerHTML = THEME_SVG;
+        themeBtn.addEventListener("click", function(){
+          var cur = pre.getAttribute("data-code-theme");
+          var isSysDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+          var meta = document.querySelector('meta[name="color-scheme"]');
+          var docScheme = meta ? meta.getAttribute("content") : "";
+          var effectiveDark = cur ? cur === "dark" : (docScheme === "dark" || (docScheme !== "light" && isSysDark));
+          var next = effectiveDark ? "light" : "dark";
+          var allPres = document.querySelectorAll("main pre");
+          for (var k = 0; k < allPres.length; k++) {
+            allPres[k].setAttribute("data-code-theme", next);
+          }
+          try { localStorage.setItem(CODE_THEME_KEY, next); } catch (_e) {}
+        });
+
+        var copyBtn = document.createElement("button");
+        copyBtn.type = "button";
+        copyBtn.className = "code-btn";
+        copyBtn.setAttribute("aria-label", "Copy command to clipboard");
+        copyBtn.title = "Copy to clipboard";
+        copyBtn.innerHTML = COPY_SVG;
+        copyBtn.addEventListener("click", function(){
+          var text = (code.textContent || "").trim();
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text);
+          }
+          copyBtn.setAttribute("data-copied", "1");
+          copyBtn.innerHTML = CHECK_SVG;
+          setTimeout(function(){
+            copyBtn.removeAttribute("data-copied");
+            copyBtn.innerHTML = COPY_SVG;
+          }, 1400);
+        });
+
+        tools.appendChild(themeBtn);
+        tools.appendChild(copyBtn);
+        wrap.appendChild(tools);
+
+        var info = detectPrimaryCommand(raw);
+        if (info) {
+          attachCompletionBar(wrap, pre, code, info);
+        }
+      })(pres[i]);
+    }
+
+    document.addEventListener("click", function(e){
+      var v = e.target.closest ? e.target.closest(".gcp-var") : null;
+      if (v) {
+        e.preventDefault();
+        openPopover(v);
+      }
+    });
+    document.addEventListener("keydown", function(e){
+      var v = e.target.closest ? e.target.closest(".gcp-var") : null;
+      if (v && (e.key === "Enter" || e.key === " ")) {
+        e.preventDefault();
+        openPopover(v);
+      }
+    });
+
+    if (hasVarsOnPage) {
+      insertVarsStrip();
+    }
+    syncVarsToDOM();
+  }
+
+  function insertVarsStrip(){
+    var lede = document.querySelector("main .lede");
+    if (!lede) return;
+    var strip = document.createElement("div");
+    strip.className = "vars-strip";
+    strip.innerHTML = '<span class="vars-strip-title">Interactive parameters:</span>' +
+      '<span class="vars-field"><label for="v-hop">hop</label><input id="v-hop" data-var-input="hop" type="text"></span>' +
+      '<span class="vars-field"><label for="v-src">source</label><input id="v-src" data-var-input="source_host" type="text"></span>' +
+      '<span class="vars-field"><label for="v-dst">target</label><input id="v-dst" data-var-input="target_host" type="text"></span>' +
+      '<span class="vars-field"><label for="v-goal">goal</label><select id="v-goal" data-var-input="goal">' +
+      Object.keys(SPEC.goals || {}).map(function(g){ return '<option value="' + esc(g) + '">' + esc(g) + "</option>"; }).join("") +
+      "</select></span>" +
+      '<span class="vars-field"><label for="v-mode">mode</label><select id="v-mode" data-var-input="mode">' +
+      META.mode.choices.map(function(c){ return '<option value="' + esc(c[0]) + '">' + esc(c[0]) + "</option>"; }).join("") +
+      "</select></span>" +
+      '<button type="button" class="vars-reset" data-var-reset>Reset</button>';
+    lede.parentNode.insertBefore(strip, lede.nextSibling);
+    var inputs = strip.querySelectorAll("[data-var-input]");
+    for (var i = 0; i < inputs.length; i++) {
+      inputs[i].addEventListener("input", function(e){
+        var k = e.target.getAttribute("data-var-input");
+        STATE[k] = e.target.value.trim() || DEFAULTS[k];
+        saveVars();
+        syncVarsToDOM();
+      });
+      inputs[i].addEventListener("change", function(e){
+        var k = e.target.getAttribute("data-var-input");
+        STATE[k] = e.target.value.trim() || DEFAULTS[k];
+        saveVars();
+        syncVarsToDOM();
+      });
+    }
+    strip.querySelector("[data-var-reset]").addEventListener("click", function(){
+      STATE = Object.assign({}, DEFAULTS);
+      saveVars();
+      syncVarsToDOM();
+    });
+  }
+
+  function wirePageThemeButton(){
+    var btn = document.querySelector("[data-page-theme-toggle]");
+    if (!btn) return;
+    btn.addEventListener("click", function(){
+      var meta = document.querySelector('meta[name="color-scheme"]');
+      if (!meta) return;
+      var cur = meta.getAttribute("content");
+      var sysDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+      var isDark = cur === "dark" || (cur !== "light" && sysDark);
+      var next = isDark ? "light" : "dark";
+      meta.setAttribute("content", next);
+      try { localStorage.setItem("color-scheme", next); } catch (_e) {}
+    });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", function(){
+      wirePageThemeButton();
+      enhanceCodeBlocks();
+    });
+  } else {
+    wirePageThemeButton();
+    enhanceCodeBlocks();
+  }
+})();
+""".strip()
+
+
 def page_html(page, pages, prefix=""):
     """One page of the site; `prefix` is where the other pages are from
     it (`site/` for the copy of the front page at the root)."""
     from migkit import __version__
     nav = []
     for p in pages:
+        if p.slug in _NAV_GROUPS:
+            nav.append(f'<div class="nav-group">{_esc(_NAV_GROUPS[p.slug])}</div>')
         here = p.slug == page.slug
         mark = ' class="here"' if here else ""
         nav.append(f'<a href="{prefix}{p.slug}.html"{mark}>'
@@ -331,11 +917,16 @@ def page_html(page, pages, prefix=""):
                     for b in page.blocks if isinstance(b, H) and b.level == 2]
     body = "\n".join(_block_html(b, prefix) for b in page.blocks)
     named = "The manual" if page.slug == "index" else page.title
+    script = INTERACTIVE_JS.replace("__CLI_SPEC_JSON__", _interactive_spec_json())
     return f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<script>
+(function(){{try{{var s=localStorage.getItem("color-scheme");if(s==="light"||s==="dark")document.querySelector('meta[name="color-scheme"]').setAttribute("content",s);}}catch(_e){{}}}})();
+</script>
 <title>{_esc(named)} - migkit {__version__}</title>
 <meta name="description" content="{html.escape(str(page.description))}">
 <style>
@@ -345,7 +936,10 @@ def page_html(page, pages, prefix=""):
 <body>
 <div class="layout">
 <nav>
-<div class="brand">migkit</div>
+<div class="brand-row">
+<a class="brand" href="{prefix}index.html">migkit</a>
+<button type="button" class="theme-btn" data-page-theme-toggle aria-label="Toggle color scheme" title="Toggle page color scheme"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 8.69V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12 20 8.69zM12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6c3.31 0 6 2.69 6 6s-2.69 6-6 6z"/></svg></button>
+</div>
 <div class="tag">version {__version__}</div>
 {chr(10).join(nav)}
 </nav>
@@ -359,6 +953,9 @@ Source: <a href="{SOURCE}">{SOURCE[len("https://"):]}</a>.
 AGPL-3.0-or-later.</footer>
 </main>
 </div>
+<script>
+{script}
+</script>
 </body>
 </html>
 """
@@ -1497,6 +2094,40 @@ def page_index():
     from migkit import hopkeys
     names, matrix = _engine_rows()
     shown = [n for n in names if n not in ("hetero", "generic")]
+    hop_yaml = (
+        "hops:\n"
+        "  shop:\n"
+        "    goal: cutover\n"
+        "    source: postgres://app@db1.example.com:5432/shop?sslmode=verify-full\n"
+        "    target: postgres://app@db2.example.com:5432/shop?sslmode=verify-full"
+    )
+    cutover_cmds = (
+        "migkit assess shop\n"
+        "migkit move shop --mode full+cdc --go\n"
+        "migkit check shop\n"
+        "migkit move shop --mode cdc --drop --go"
+    )
+    corruption_rows = [
+        ["Truncated large text / JSON / LOB", "`check` (server-side length + digest projection)", "Target silently clips values at column or driver buffer ceiling"],
+        ["Float / NaN / `-0.0` drift", "`check --deep`", "`NaN != NaN` or `-0.0` vs `0.0` after cross-engine cast"],
+        ["Timezone shift on `TIMESTAMP`", "`check`", "Session timezone differed during load (`+07:00` stored as `UTC`)"],
+        ["TRAILING space strip (`CHAR` -> `VARCHAR`)", "`check`", "Oracle/MySQL pad vs PostgreSQL strip"],
+        ["NULL vs `''` (Oracle empty string)", "`check`", "Oracle treats `''` as `NULL`; target stores both"],
+        ["Case-folded collation duplicate", "`check --schema` + `check`", "`ci` collation on target merges two distinct source keys"],
+        ["Sequence / `AUTO_INCREMENT` behind max(id)", "`check --sequences` / `cutover`", "First `INSERT` after cutover fails with duplicate key"],
+        ["Orphaned foreign-key rows (copied without snapshot)", "`check --consistent`", "Parent/child tables read at different points in time"],
+        ["Missing `NOT VALID` constraint validation", "`check --schema`", "Constraint created for load speed was never validated"],
+        ["Trigger firing during bulk load", "`move` / `cutover`", "Audit or billing trigger duplicates rows as data arrives"],
+        ["Replication lag mistaken for diff", "`check --delta` (lag-aware)", "Checker flags rows that are still in flight"],
+    ]
+    compare_rows = [
+        ["Cross-engine schema conversion (`schema`)", "Yes (all SQL dialects)", "Separate conversion tool", "No", "No", "No"],
+        ["Snapshot-consistent bulk + change stream (`move --mode full+cdc`)", "Yes", "Yes", "Yes (connector setup)", "No", "No"],
+        ["Fenced cutover + sequence bump + target guard (`cutover`)", "Yes (single command)", "Manual", "Manual", "No", "No"],
+        ["All-column hash + exact diff localization (`check`)", "Yes (adaptive Merkle + keyset)", "Optional / slow", "No", "Yes", "Yes (licensed)"],
+        ["Deterministic repair with reversible SQL (`sync --mode reconcile --apply`)", "Yes + `rollback`", "No", "No", "MySQL only, no undo", "Yes"],
+        ["Runs locally from a single CLI without cloud lock-in", "Yes", "Cloud-only", "JVM + cluster", "Perl + MySQL", "Enterprise server"],
+    ]
     blocks = [
         Pills([f"[{title(n)}](engines.html#engine-{n})" for n in shown]
               + ["any two of them as a pair",
@@ -1509,12 +2140,37 @@ def page_index():
         H("Five minutes", "start"),
         Pre("\n".join(c for _, cmds, _ in quickstart_steps() for c in cmds
                       if not c.startswith("MIGKIT_"))),
-        P("Each step, and what it does on each side:"
+        P("Click any highlighted parameter (`shop`, `db1.example.com`,"
+          " `full+cdc`) or use the completion chips below a command block"
+          " to customize values inline before copying. Full walkthrough:"
           " [the quickstart](quickstart.html)."),
-        H("What a hop is for", "goals"),
+        H("Configure a hop", "configure"),
+        P("A hop in `conf/hops.yaml` needs only its two addresses and what"
+          " it is for (`goal`). Passwords are kept by `migkit init` in the"
+          " system keychain or `env:MIGKIT_<HOP>_<SIDE>_PASSWORD`, never in"
+          " the file:"),
+        Pre(hop_yaml),
+        H("What a hop is for (Goals)", "goals"),
         Table(["Goal", "What it is for"],
               [[f"[`{g}`](goals.html#goal-{g})", Said(v["what"])]
                for g, v in hopkeys.GOALS.items()]),
+        H("Execution modes (`--mode`)", "modes"),
+        P("Every move or synchronization mode shows its plan first and"
+          " writes nothing until `--go` or `--apply`:"),
+        modes_table(),
+        H("Cutover runbook", "cutover-runbook"),
+        P("From readiness check to fenced switchover in four commands:"),
+        Pre(cutover_cmds),
+        H("Silent-corruption classes detected", "corruption"),
+        P("Row counts (`SELECT COUNT(*)`) pass on every one of these failure"
+          " modes. `migkit check` catches all 11 before cutover:"),
+        Table(["Silent corruption class", "Caught by", "How it happens"],
+              corruption_rows),
+        H("How it compares", "compare"),
+        Table(["Capability", "migkit", "Cloud migration service",
+               "Change-capture connector", "Table-sync script",
+               "Enterprise verifier"],
+              compare_rows, wide=True),
         H("The manual", "manual"),
         UL(["[Quickstart](quickstart.html): install, two addresses, assess,"
             " move, check, cut over",
@@ -1530,6 +2186,10 @@ def page_index():
             "[Troubleshooting](troubleshooting.html): every refusal, in"
             " migkit's words",
             "[Evidence](evidence.html): what the evidence export holds",
+            "[Web and API](web.html): the multi-user web view, roles, SSO"
+            " and REST API",
+            "[Telemetry](telemetry.html): local-only product telemetry and"
+            " privacy guarantees",
             "[Contributing](contributing.html): where each kind of thing"
             " lives in the source",
             "[Releases](releases.html): each release's changes"]),

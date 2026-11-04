@@ -1090,33 +1090,27 @@ class Memory:
 
 
 def get_default_aimd_min_chunk() -> int:
-    val = os.environ.get("MIGKIT_AIMD_MIN_CHUNK")
-    return int(val) if val else 100
+    return int(envkeys.number("MIGKIT_AIMD_MIN_CHUNK"))
 
 
 def get_default_aimd_max_chunk() -> int:
-    val = os.environ.get("MIGKIT_AIMD_MAX_CHUNK")
-    return int(val) if val else 50000
+    return int(envkeys.number("MIGKIT_AIMD_MAX_CHUNK"))
 
 
 def get_default_aimd_max_row_bytes() -> int:
-    val = os.environ.get("MIGKIT_AIMD_MAX_ROW_BYTES")
-    return int(val) if val else 64 * 1024
+    return int(envkeys.number("MIGKIT_AIMD_MAX_ROW_BYTES"))
 
 
 def get_default_aimd_max_latency() -> float:
-    val = os.environ.get("MIGKIT_AIMD_MAX_LATENCY")
-    return float(val) if val else 5.0
+    return float(envkeys.number("MIGKIT_AIMD_MAX_LATENCY"))
 
 
 def get_default_aimd_min_latency() -> float:
-    val = os.environ.get("MIGKIT_AIMD_MIN_LATENCY")
-    return float(val) if val else 1.0
+    return float(envkeys.number("MIGKIT_AIMD_MIN_LATENCY"))
 
 
 def get_default_aimd_expand_factor() -> float:
-    val = os.environ.get("MIGKIT_AIMD_EXPAND_FACTOR")
-    return float(val) if val else 1.5
+    return float(envkeys.number("MIGKIT_AIMD_EXPAND_FACTOR"))
 
 
 def aimd_adjust_chunk(chunk, latency=0.0, row_bytes=0, memory_healthy=True,

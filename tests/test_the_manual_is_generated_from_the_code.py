@@ -365,3 +365,16 @@ def test_the_check_says_behind_with_its_own_exit_code(monkeypatch, capsys):
     monkeypatch.setattr(gen_docs, "outputs", lambda: {
         "README.md": (ROOT / "README.md").read_text()})
     assert gen_docs.main(["--check"]) == 0
+
+
+def test_every_html_page_includes_gcp_style_interactive_completion(pages):
+    """Every HTML manual page embeds the GCP-style inline variable editor,
+    code-block theme switch, copy button, and live CLI completion spec."""
+    for path, text in pages.items():
+        if not path.endswith(".html"):
+            continue
+        assert ".gcp-var" in text, path
+        assert "cmd-complete-bar" in text, path
+        assert "Toggle code block theme" in text, path
+        assert "Copy command to clipboard" in text, path
+        assert '"full+cdc"' in text, path

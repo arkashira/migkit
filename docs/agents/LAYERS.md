@@ -50,7 +50,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/exit_portability.py:16` configuration -> persistence (`checkpoint`)
 - `migkit/exit_portability.py:17` configuration -> decision (`decide`)
 - `migkit/exit_portability.py:18` configuration -> persistence (`durable`)
-- `migkit/exit_portability.py:19` configuration -> scope (`resume_scope`)
+- `migkit/exit_portability.py:20` configuration -> scope (`resume_scope`)
 - `migkit/grants.py:7` conversion -> decision (`decide`)
 - `migkit/identity_semantics.py:8` conversion -> decision (`decide`)
 - `migkit/init.py:1` configuration -> cli (`guide`)

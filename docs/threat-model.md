@@ -172,8 +172,9 @@ the only forwarded headers read. The one exception is `MIGKIT_WEB_PLAIN=on`, whi
   script and style only (no inline code), no framing, nothing cached.
 * `/metrics`: a scraper with `MIGKIT_METRICS_TOKEN`, or a person signed
   in, their own hops.
-* Not covered: an encrypted SAML assertion, a signed authentication
-  request, single logout.
+* Not covered: a signed SAML authentication request, single logout
+  (encrypted SAML assertions are supported and enforced when
+  `MIGKIT_WEB_SAML_ENCRYPTED=on`).
 
 (`test_web_*.py`)
 

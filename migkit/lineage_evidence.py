@@ -4,15 +4,15 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from . import decide
+from . import decide, envkeys
 
 
 def get_default_target_engine() -> str:
-    return os.environ.get("MIGKIT_TARGET_ENGINE", "postgres")
+    return envkeys.text("MIGKIT_TARGET_ENGINE")
 
 
 def get_default_target_version() -> str:
-    return os.environ.get("MIGKIT_TARGET_VERSION", "15.0")
+    return envkeys.text("MIGKIT_TARGET_VERSION")
 
 
 

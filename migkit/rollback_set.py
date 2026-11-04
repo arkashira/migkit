@@ -52,13 +52,10 @@ _UNSAFE_PATTERNS = [
 
 def resolve_unsafe_patterns(extra_patterns: Optional[Iterable[Any]] = None) -> List[re.Pattern]:
     """Resolve unsafe pattern matchers dynamically without hardcoded literal limits."""
+    from . import envkeys
     patterns = list(_UNSAFE_PATTERNS)
-    env_pats = os.environ.get("MIGKIT_EXTRA_UNSAFE_PATTERNS")
-    if env_pats:
-        for p in env_pats.split(","):
-            p_clean = p.strip()
-            if p_clean:
-                patterns.append(re.compile(p_clean, re.IGNORECASE))
+    for p_clean in envkeys.items("MIGKIT_EXTRA_UNSAFE_PATTERNS"):
+        patterns.append(re.compile(p_clean, re.IGNORECASE))
     if extra_patterns:
         for p in extra_patterns:
             if isinstance(p, str):

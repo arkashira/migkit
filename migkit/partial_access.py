@@ -8,16 +8,16 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-from . import decide
+from . import decide, envkeys
 from .verdict import VERDICTS
 
 
 def get_default_allowed_networks(override: Optional[Iterable[str]] = None) -> Set[str]:
     if override is not None:
         return set(override)
-    env = os.environ.get("MIGKIT_ALLOWED_NETWORKS")
+    env = envkeys.items("MIGKIT_ALLOWED_NETWORKS")
     if env:
-        return {s.strip() for s in env.split(",") if s.strip()}
+        return set(env)
     return {"127.0.0.1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "::1"}
 
 

@@ -468,8 +468,7 @@ class Rate:
         self.value = float(rows_per_second)
         self.samples = 0
         if aimd is None:
-            env_val = os.environ.get("MIGKIT_AIMD_AUTOSIZING", "").lower()
-            aimd = env_val in ("1", "true", "yes", "on")
+            aimd = envkeys.flag("MIGKIT_AIMD_AUTOSIZING")
         self.aimd = bool(aimd)
         self.sizer = AIMDChunkSizer(initial=initial_chunk) if self.aimd else None
 

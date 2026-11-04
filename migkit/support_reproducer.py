@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
-from . import __version__, decide
+from . import __version__, decide, envkeys
 from .redact import Redactor, scrub
 
 SCHEMA_FAILURE_CLASSES = (
@@ -48,34 +48,28 @@ SAFE_TEST_IPS = {"127.0.0.1", "10.0.0.1", "0.0.0.0"}
 def get_safe_test_ips(override: Optional[Iterable[str]] = None) -> Set[str]:
     if override is not None:
         return set(override)
-    env = os.environ.get("MIGKIT_SAFE_TEST_IPS")
+    env = envkeys.items("MIGKIT_SAFE_TEST_IPS")
     if env:
-        return {s.strip() for s in env.split(",") if s.strip()}
+        return set(env)
     return set(SAFE_TEST_IPS)
 
 
 def get_max_log_lines(override: Optional[int] = None) -> int:
     if override is not None:
         return override
-    env = os.environ.get("MIGKIT_MAX_LOG_LINES")
-    if env:
-        try:
-            return int(env)
-        except ValueError:
-            pass
-    return 500
+    try:
+        return int(envkeys.number("MIGKIT_MAX_LOG_LINES"))
+    except envkeys.Bad:
+        return 500
 
 
 def get_max_log_bytes(override: Optional[int] = None) -> int:
     if override is not None:
         return override
-    env = os.environ.get("MIGKIT_MAX_LOG_BYTES")
-    if env:
-        try:
-            return int(env)
-        except ValueError:
-            pass
-    return 65536
+    try:
+        return int(envkeys.number("MIGKIT_MAX_LOG_BYTES"))
+    except envkeys.Bad:
+        return 65536
 
 
 @dataclass

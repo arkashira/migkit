@@ -715,7 +715,7 @@ def forecast(units, kind="move", scope="", workers=None, health=(),
     measured, a stall."""
     from .decide import Facts, climb
     if instant is None:
-        instant = (os.environ.get("MIGKIT_INSTANT_ETA", "1").lower() in ("1", "true", "yes", "on"))
+        instant = envkeys.flag("MIGKIT_INSTANT_ETA")
     else:
         instant = bool(instant)
     now = time.time() if now is None else float(now)

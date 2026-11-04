@@ -16,6 +16,7 @@ except ImportError:
 from . import checkpoint as cp_mod
 from . import decide
 from . import durable
+from . import envkeys
 from .resume_scope import ResumeScope, ScopedCheckpoint
 
 DEFAULT_FORMAT_VERSION = 1
@@ -27,7 +28,7 @@ def get_format_version(override: Optional[int] = None) -> int:
     """Return dynamic format version without fixed hardcoded literal."""
     if override is not None:
         return max(1, int(override))
-    return int(os.environ.get("MIGKIT_PORTABLE_FORMAT_VERSION", FORMAT_VERSION))
+    return int(envkeys.number("MIGKIT_PORTABLE_FORMAT_VERSION", default=FORMAT_VERSION))
 
 
 def _prove_standard_neutral_json_manifest(facts: decide.Facts) -> bool:
