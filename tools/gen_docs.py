@@ -1281,6 +1281,75 @@ def modes_table():
                       for c, m in hopkeys.MODES])
 
 
+def verification_layers_blocks():
+    """How `check`, `deep`, `delta` and the fused `scan` plan differ, and
+    the commands for a verification-only (`goal: verify`) knowledge share."""
+    rows = [
+        ["`check` (Full battery)",
+         "`migkit check shop`",
+         "O(all rows) in resumable key ranges",
+         "Runs `schema`, `counts`, `autoinc` (sequences), `data` (injective per-row hash + adaptive Merkle / key-range drilldown), `deep`, and `params`. Row counts ride inside the checksum query so tables are not scanned twice.",
+         "Post-load certification, pre-cutover sign-off, or standalone database audit (`goal: verify`)."],
+        ["`deep` (Semantic & catalog audit)",
+         "`migkit check shop --deep` or `migkit check shop --only deep`",
+         "O(1 fused scan) + catalog queries",
+         "Audits 20+ silent failure classes beyond row hashes: `NULL` vs `''`, float/NaN precision drift, charset/double-encoding, timezone shift, unvalidated (`NOT VALID` / `NOT ENFORCED`) constraints, invalid indexes, disabled triggers, FK orphans, RLS, matviews, grants, and ownership.",
+         "Catching subtle cross-engine or dialect/collation corruption that row counts and naive checksums miss."],
+        ["`scan` (Fused aggregate read plan)",
+         "Automatic inside `migkit check shop` (`scanplan`)",
+         "1 pass per key range (up to 512 expressions/read)",
+         "Instead of scanning a billion-row table once per column for each deep/value check, `scanplan` fuses every aggregate expression (`SUM`, `MIN`, `MAX`, digest) into one shared range scan per side, falling back to isolated column reads only if an expression fails.",
+         "Always active automatically during `check` and `deep` to keep database I/O and wall-clock time flat."],
+        ["`delta` (Change-driven continuous verify)",
+         "`migkit watch shop --verify --delta` or `migkit sync shop --mode stream`",
+         "O(changed rows since last mark)",
+         "Reads the source change stream (WAL slot, binlog, oplog, SCN/redo, or change table) and re-verifies only the primary keys touched since the last verified checkpoint. Distinguishes in-flight replication lag from real drift and announces `SAFE TO CUT OVER` only when diffs=0, source is quiet, and lag=0.",
+         "Continuous live verification on multi-terabyte tables during CDC streaming right up to the cutover second."],
+        ["`sample` (Time-bounded quick probe)",
+         "`migkit check shop --sample 10`",
+         "O(seconds budgeted)",
+         "Sizes and reads random keys on both sides within the given time budget (e.g. 10 seconds). Reports `different` immediately if any sampled row mismatches, or `incomplete` (never a false `same`) until full `check` runs.",
+         "Fast smoke check in seconds before running the full table scan."],
+        ["`drill` (Column-by-column row diff)",
+         "`migkit check shop --db shop --table public.orders --drill`",
+         "O(limit rows)",
+         "Pinpoints the exact primary keys and specific columns that differ inside one table, masking values with keyed HMAC-SHA256 when `mask` is configured.",
+         "Inspecting exact row/column differences before running `migkit sync shop --apply`."],
+    ]
+    verify_cmds = (
+        "# 1. Full read-only verification (schema + counts + sequences + data + deep + params)\n"
+        "migkit check shop\n"
+        "\n"
+        "# 2. Consistent snapshot verification across tables + deep semantic checks\n"
+        "migkit check shop --consistent --deep\n"
+        "\n"
+        "# 3. Run only specific check layers (e.g. deep audit or data checksums only)\n"
+        "migkit check shop --only deep\n"
+        "migkit check shop --only schema,counts,data\n"
+        "\n"
+        "# 4. Continuous O(changes) delta verification while the source is live\n"
+        "migkit watch shop --verify --delta\n"
+        "\n"
+        "# 5. Drill into one table's differing columns, or export the signed evidence bundle\n"
+        "migkit check shop --db shop --table public.orders --drill\n"
+        "migkit report shop"
+    )
+    return [
+        H("Verification modes: `check` vs `deep` vs `delta` vs `scan`",
+          "verification-modes"),
+        P("Every verification mode is 100% read-only on both source and"
+          " target, throttles itself automatically when server load or"
+          " replication lag rises, and writes `verdict.json`, `summary.json`"
+          " and `report.html`:"),
+        Table(["Layer / Mode", "Command", "Cost / Complexity",
+               "What it verifies", "When to use"],
+              rows, wide=True),
+        P("Ready-to-run verification commands (click any highlighted"
+          " parameter to customize inline):"),
+        Pre(verify_cmds),
+    ]
+
+
 def cutover_blocks():
     from migkit import hopkeys
     c = hopkeys.CUTOVER
@@ -1324,6 +1393,7 @@ def page_goals():
         modes_table(),
         P("Without `--go` (or `--apply`) every one of them only shows its"
           " plan, starting with what each side will see."),
+    ] + verification_layers_blocks() + [
         H("The cutover, on or off", "cutover"),
     ] + cutover_blocks() + [
         H("Limits the move keeps to", "limits"),
@@ -2158,6 +2228,7 @@ def page_index():
         P("Every move or synchronization mode shows its plan first and"
           " writes nothing until `--go` or `--apply`:"),
         modes_table(),
+    ] + verification_layers_blocks() + [
         H("Cutover runbook", "cutover-runbook"),
         P("From readiness check to fenced switchover in four commands:"),
         Pre(cutover_cmds),
