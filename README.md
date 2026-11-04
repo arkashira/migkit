@@ -18,7 +18,7 @@ movement itself.
 A successful copy is not the end of a migration. I want to check what arrived,
 what was left out and whether the target is ready for the application.
 
-[Usage reference](https://migkit.axentx.cloud/) | [Changelog](CHANGELOG.md)
+[Usage reference](https://arkashira.github.io/migkit/) | [Changelog](CHANGELOG.md)
 
 ## Table of contents
 
@@ -66,7 +66,7 @@ shows findings from migrations that had already been reported as consistent.
 
 The available checks, copy methods and recovery options depend on the engine,
 permissions and installed components. `migkit doctor` reports what is available
-on your machine. The [usage reference](https://migkit.axentx.cloud/) covers the
+on your machine. The [usage reference](https://arkashira.github.io/migkit/) covers the
 individual workflows and limitations.
 
 ## Quickstart
@@ -256,7 +256,7 @@ engine produced it.
 ## Supported engines
 
 <!-- gen_docs: engines -->
-64 engines, any two of them as a pair; migkit's own decision engine finds the fastest, exact, consistent way for each source -> target pair. What each can do, cell by cell, is on [the engines page](https://migkit.axentx.cloud/site/engines.html).
+64 engines, any two of them as a pair; migkit's own decision engine finds the fastest, exact, consistent way for each source -> target pair. What each can do, cell by cell, is on [the engines page](docs/site/engines.html).
 
 | Role | Engines |
 |---|---|
