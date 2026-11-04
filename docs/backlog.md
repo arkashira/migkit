@@ -12225,7 +12225,7 @@ Status discipline: OPEN extension/verification work; code presence, a vendor cap
 
 ### RCH18.conversion-ledger — Keep submitted, parsed, converted and executed scope distinct
 
-**REVIEW (2026-10-17; migkit/conversion_ledger.py lifecycle scope accounting, explicit debt registry, complete denominators, critical routine gate; tests/test_conversion_ledger_scope_accounting.py 12/12 green) — P1; research-derived extension; size M; index row 626.**
+**DONE (2026-10-17; migkit/conversion_ledger.py lifecycle scope accounting, explicit debt registry, complete denominators, critical routine gate; tests/test_conversion_ledger_scope_accounting.py 12/12 green) — P1; research-derived extension; size M; index row 626.**
 
 Existing parent/dependencies: SMART-N7, existing storedcode PROVES. Code surfaces: storedcode, capabilities, verdict.
 
@@ -12239,7 +12239,7 @@ Status discipline: OPEN extension/verification work; code presence, a vendor cap
 
 ### RCH19.ai-proof-loop — Propose with AI and accept only independent executable evidence
 
-**REVIEW (2026-10-17; migkit/ai_proof_loop.py bounded candidate synthesis, isolated sandbox execution, delta debugging minimization, mutation kill rate; tests/test_ai_proof_loop_executable_evidence.py 22/22 green) — P1; research-derived extension; size L; index row 627.**
+**DONE (2026-10-17; migkit/ai_proof_loop.py bounded candidate synthesis, isolated sandbox execution, delta debugging minimization, mutation kill rate; tests/test_ai_proof_loop_executable_evidence.py 22/22 green) — P1; research-derived extension; size L; index row 627.**
 
 Existing parent/dependencies: SMART-N10, existing storedcode proof/mutation. Code surfaces: storedcode/translate, prove, mutants.
 
@@ -12253,7 +12253,7 @@ Status discipline: OPEN extension/verification work; code presence, a vendor cap
 
 ### RCH20.rule-generalization — Learn conversion rules without propagating a one-off wrong fix
 
-**REVIEW (2026-10-17; migkit/rule_generalization.py narrowly scoped rewrite rules, shadow application against withheld families, conflict resolution, rollback; tests/test_rule_generalization_narrow_scoping.py 19/19 green) — P2; research-derived extension; size M; index row 628.**
+**DONE (2026-10-17; migkit/rule_generalization.py narrowly scoped rewrite rules, shadow application against withheld families, conflict resolution, rollback; tests/test_rule_generalization_narrow_scoping.py 19/19 green) — P2; research-derived extension; size M; index row 628.**
 
 Existing parent/dependencies: SMART-N3, SMART-N19 equivalent proof pipeline. Code surfaces: storedcode/learn, translate, inputs.
 
@@ -12267,7 +12267,7 @@ Status discipline: OPEN extension/verification work; code presence, a vendor cap
 
 ### RCH21.dynamic-sql — Trace dynamic SQL and external application dependencies
 
-**REVIEW (2026-10-17; migkit/dynamic_sql_tracer.py bounded AST constant propagation, multi-source ORM and job dependency tracking, schema contract wave gate; tests/test_dynamic_sql_trace_app_dependencies.py 18/18 green) — P1; research-derived extension; size L; index row 629.**
+**DONE (2026-10-17; migkit/dynamic_sql_tracer.py bounded AST constant propagation, multi-source ORM and job dependency tracking, schema contract wave gate; tests/test_dynamic_sql_trace_app_dependencies.py 18/18 green) — P1; research-derived extension; size L; index row 629.**
 
 Existing parent/dependencies: SMART-N12, SMART-N18. Code surfaces: storedcode/appscan, inputs, guide.
 
@@ -12281,7 +12281,7 @@ Status discipline: OPEN extension/verification work; code presence, a vendor cap
 
 ### RCH22.etl-bi-waves — Plan database, ETL and report migration waves together
 
-**REVIEW (2026-10-17; migkit/etl_bi_waves.py registered ETL/BI parsers, topological wave prerequisites, whole-workload readiness gate, Merkle diffing; tests/test_etl_bi_wave_planner.py 15/15 green) — P2; research-derived extension; size L; index row 630.**
+**DONE (2026-10-17; migkit/etl_bi_waves.py registered ETL/BI parsers, topological wave prerequisites, whole-workload readiness gate, Merkle diffing; tests/test_etl_bi_wave_planner.py 15/15 green) — P2; research-derived extension; size L; index row 630.**
 
 Existing parent/dependencies: SMART-N13, SMART-N18. Code surfaces: planner, storedcode, scope.
 
@@ -12295,7 +12295,7 @@ Status discipline: OPEN extension/verification work; code presence, a vendor cap
 
 ### RCH23.query-regression — Gate app readiness on behavioral and performance envelopes
 
-**REVIEW (2026-10-17; migkit/query_regression.py representative workload sandbox, cold-cache isolation, collation behavioral gate, priced index remediation; tests/test_query_regression_performance_envelope.py 11/11 green) — P1; research-derived extension; size L; index row 631.**
+**DONE (2026-10-17; migkit/query_regression.py representative workload sandbox, cold-cache isolation, collation behavioral gate, priced index remediation; tests/test_query_regression_performance_envelope.py 11/11 green) — P1; research-derived extension; size L; index row 631.**
 
 Existing parent/dependencies: SUPER.query-guard, SMART-N18. Code surfaces: storedcode/bench, model, readiness.
 
@@ -12309,7 +12309,7 @@ Status discipline: OPEN extension/verification work; code presence, a vendor cap
 
 ### RCH24.principal-migration — Migrate security semantics without indiscriminate grant copying
 
-**REVIEW (2026-10-17; migkit/principal_migration.py security semantics modeling, provider account exclusion, silent migrator ownership remediation, sequence/RLS reconciliation; tests/test_principal_security_migration.py 15/15 green) — P1; research-derived extension; size M; index row 632.**
+**DONE (2026-10-17; migkit/principal_migration.py security semantics modeling, provider account exclusion, silent migrator ownership remediation, sequence/RLS reconciliation; tests/test_principal_security_migration.py 15/15 green) — P1; research-derived extension; size M; index row 632.**
 
 Existing parent/dependencies: SMART-N12, existing privilege checks. Code surfaces: users, ownership, managed, guide.
 
@@ -12323,7 +12323,7 @@ Status discipline: OPEN extension/verification work; code presence, a vendor cap
 
 ### RCH25.target-tuning-contract — Treat ingest tuning as a temporary durability contract
 
-**REVIEW 2026-10-17 — P1; research-derived extension; size M; index row 633.**
+**DONE 2026-10-17 — P1; research-derived extension; size M; index row 633.**
 
 Existing parent/dependencies: AUTO.target-tune, AUTO.deferred-index. Code surfaces: tune, indexes, managed, guarantees.
 
@@ -12337,7 +12337,7 @@ Status discipline: Implemented in `migkit/target_tuning_contract.py` and verifie
 
 ### RCH26.history-contract — Distinguish current-state migration from complete change history
 
-**REVIEW 2026-10-17 — P1; research-derived extension; size M; index row 634.**
+**DONE 2026-10-17 — P1; research-derived extension; size M; index row 634.**
 
 Existing parent/dependencies: SMART-N1, SMART-N7. Code surfaces: scope, tailtables, verdict.
 
@@ -12351,7 +12351,7 @@ Status discipline: Implemented in `migkit/history_contract.py` and verified in `
 
 ### RCH27.stream-metadata — Move event consumers and schemas with stream bytes
 
-**REVIEW 2026-10-17 — P1; research-derived extension; size L; index row 635.**
+**DONE 2026-10-17 — P1; research-derived extension; size L; index row 635.**
 
 Existing parent/dependencies: SMART-N12, SMART-N13 traffic. Code surfaces: engines/kafka, topology, cutover.
 
@@ -12365,7 +12365,7 @@ Status discipline: Implemented in `migkit/stream_metadata.py` and verified in `t
 
 ### RCH28.document-model — Verify normalized-to-document transformations after updates
 
-**REVIEW 2026-10-17 — P1; research-derived extension; size L; index row 636.**
+**DONE 2026-10-17 — P1; research-derived extension; size L; index row 636.**
 
 Existing parent/dependencies: RCH17, SMART-N14. Code surfaces: engines/hetero, canon, transforms.
 
@@ -12379,7 +12379,7 @@ Status discipline: Implemented in `migkit/document_model.py` and verified in `te
 
 ### RCH29.cache-semantics — Preserve expiry and eviction behavior across cache migrations
 
-**REVIEW 2026-10-17 — P1; research-derived extension; size M; index row 637.**
+**DONE 2026-10-17 — P1; research-derived extension; size M; index row 637.**
 
 Existing parent/dependencies: existing Redis ladders, SMART-N14. Code surfaces: engines/redis, decide, cutover.
 
@@ -12393,7 +12393,7 @@ Status discipline: Implemented in `migkit/cache_semantics.py` and verified in `t
 
 ### RCH30.shard-ddl — Coordinate sharded schema evolution with explicit convergence
 
-**REVIEW 2026-10-17 — P1; research-derived extension; size L; index row 638.**
+**DONE 2026-10-17 — P1; research-derived extension; size L; index row 638.**
 
 Existing parent/dependencies: SMART-N23, existing reshard. Code surfaces: reshard, schema_guard, topology.
 
@@ -12407,7 +12407,7 @@ Status discipline: Implemented in `migkit/shard_ddl.py` and verified in `tests/t
 
 ### RCH31.placement-advice — Connect assessment to measured target topology and sizing
 
-**REVIEW 2026-10-17 — P2; research-derived extension; size L; index row 639.**
+**DONE 2026-10-17 — P2; research-derived extension; size L; index row 639.**
 
 Existing parent/dependencies: SMART-N6, SMART-N18. Code surfaces: machine, model, managed, scenarios.
 
@@ -12421,7 +12421,7 @@ Status discipline: Implemented in `migkit/placement_advice.py` and verified in `
 
 ### RCH32.connector-capability — Model schema drift and limitations per connector version
 
-**REVIEW 2026-10-17 — P1; research-derived extension; size M; index row 640.**
+**DONE 2026-10-17 — P1; research-derived extension; size M; index row 640.**
 
 Existing parent/dependencies: SMART-N9, RCH09. Code surfaces: capabilities, tools, guide.
 
@@ -12435,7 +12435,7 @@ Status discipline: Implemented and verified by the module and test named in the 
 
 ### RCH33.agent-control — Expose resumable constrained migration operations to agents
 
-**REVIEW 2026-10-17 — P1; research-derived extension; size M; index row 641.**
+**DONE 2026-10-17 — P1; research-derived extension; size M; index row 641.**
 
 Existing parent/dependencies: SMART-N11, existing tooluse. Code surfaces: tooluse, session, autonomous.
 
@@ -12449,7 +12449,7 @@ Status discipline: Implemented and verified by the module and test named in the 
 
 ### RCH34.release-intelligence — Keep support and competitor knowledge versioned and falsifiable
 
-**REVIEW 2026-10-17 — P2; research-derived extension; size M; index row 642.**
+**DONE 2026-10-17 — P2; research-derived extension; size M; index row 642.**
 
 Existing parent/dependencies: SMART-N9, source registry. Code surfaces: tools, capabilities, research metadata.
 
@@ -12463,7 +12463,7 @@ Status discipline: Implemented and verified by the module and test named in the 
 
 ### RCH35.incumbent-switch — Include transition and rollback costs when replanning
 
-**REVIEW 2026-10-17 — P1; research-derived extension; size M; index row 643.**
+**DONE 2026-10-17 — P1; research-derived extension; size M; index row 643.**
 
 Existing parent/dependencies: SMART-N5, SMART-N24. Code surfaces: decide, jointplan, costmodel.
 
@@ -12477,7 +12477,7 @@ Status discipline: Implemented and verified by the module and test named in the 
 
 ### RCH36.verify-method — Select validation methods by what each can actually prove
 
-**REVIEW 2026-10-17 — P1; research-derived extension; size M; index row 644.**
+**DONE 2026-10-17 — P1; research-derived extension; size M; index row 644.**
 
 Existing parent/dependencies: SMART-N7, existing second readers. Code surfaces: verifiers, scanplan, decide.
 
@@ -12491,7 +12491,7 @@ Status discipline: Implemented and verified by the module and test named in the 
 
 ### RCH37.failure-budget — Allocate recovery effort by progress and deadline value
 
-**REVIEW 2026-10-17 — P1; research-derived extension; size M; index row 645.**
+**DONE 2026-10-17 — P1; research-derived extension; size M; index row 645.**
 
 Existing parent/dependencies: SMART-N15, SMART-N21. Code surfaces: faults, attempts, autonomous.
 
@@ -12505,7 +12505,7 @@ Status discipline: Implemented and verified by the module and test named in the 
 
 ### RCH38.storage-protocol — Validate warehouse and lakehouse commit semantics
 
-**REVIEW 2026-10-17 — P1; research-derived extension; size L; index row 646.**
+**DONE 2026-10-17 — P1; research-derived extension; size L; index row 646.**
 
 Existing parent/dependencies: SMART-N6, existing warehouse feed. Code surfaces: ship, engines/warehouse, durable.
 
@@ -12519,7 +12519,7 @@ Status discipline: Implemented and verified by the module and test named in the 
 
 ### RCH39.anti-corruption — Test the verifier against its own blind spots
 
-**REVIEW 2026-10-17 — P1; research-derived extension; size L; index row 647.**
+**DONE 2026-10-17 — P1; research-derived extension; size L; index row 647.**
 
 Existing parent/dependencies: SMART-N10, existing mutation infrastructure. Code surfaces: canon, storedcode/mutants, tests.
 
@@ -13007,7 +13007,7 @@ Status: DONE (2026-10-17; tests/test_demand_benchmark_fault_scenarios.py 12/12 g
 
 ### FIELD-OPS01.universal-durable-resume — Universal typed durable resume across all phases down to range/cursor level
 
-**OPEN — P0; operations/scale; size L; index row 677.**
+**DONE — P0; operations/scale; size L; index row 677.**
 
 Parent/dependencies and code: `migkit/cli.py`, `migkit/durable.py`, `migkit/state.py`.
 
