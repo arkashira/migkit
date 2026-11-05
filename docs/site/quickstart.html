@@ -115,6 +115,31 @@ font-size:12px;min-width:90px}
 .vars-reset{margin-left:auto;padding:3px 8px;border:1px solid var(--line);
 border-radius:4px;background:var(--bg);color:var(--mut);font-size:11.5px;cursor:pointer}
 .vars-reset:hover{color:var(--ink);border-color:var(--acc)}
+.hop-gen{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px;margin:24px 0}
+.hop-gen-head{display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:16px}
+.hop-gen-title{font-size:17px;font-weight:700;color:var(--ink);margin:0 0 4px}
+.hop-gen-sub{font-size:13px;color:var(--mut);margin:0}
+.hop-common-bar{display:flex;flex-wrap:wrap;align-items:center;gap:14px;padding:12px 14px;background:var(--bg);border:1px solid var(--line);border-radius:8px;margin-bottom:16px}
+.hop-gen-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
+@media(max-width:760px){.hop-gen-grid{grid-template-columns:1fr}}
+.hop-box{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:14px}
+.hop-box-title{font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--acc);margin:0 0 12px;display:flex;align-items:center;gap:6px}
+.hop-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:8px}
+.hop-field{display:flex;flex-direction:column;gap:4px;margin-bottom:6px}
+.hop-field label{font-size:11.5px;font-weight:600;color:var(--mut)}
+.hop-field input,.hop-field select{padding:6px 9px;border:1px solid var(--line);border-radius:5px;background:var(--panel);color:var(--ink);font-size:13px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.hop-field input:focus,.hop-field select:focus{outline:2px solid var(--acc);border-color:transparent}
+.hop-out-wrap{position:relative;margin-top:14px}
+.hop-out-tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:-1px}
+.hop-tab-btn{padding:7px 14px;font-size:12.5px;font-weight:600;border:1px solid transparent;border-bottom:none;border-radius:6px 6px 0 0;background:transparent;color:var(--mut);cursor:pointer;transition:color 120ms ease}
+.hop-tab-btn.active{background:var(--code);color:var(--ink);border-color:var(--line)}
+.hop-code-box{position:relative}
+.hop-code-box pre{margin:0;border-radius:0 0 8px 8px;padding:14px 16px;background:var(--code);color:var(--codeink);font-size:13px;line-height:1.55;overflow-x:auto}
+.hop-code-box pre code{background:none;padding:0;color:inherit}
+.hop-copy-bar{display:flex;justify-content:flex-end;gap:8px;margin-top:8px}
+.hop-copy-btn{display:inline-flex;align-items:center;gap:6px;padding:7px 16px;font-size:12.5px;font-weight:600;background:var(--acc);color:#fff;border:none;border-radius:6px;cursor:pointer;transition:opacity 120ms ease,transform 120ms ease}
+.hop-copy-btn:hover{opacity:.9}
+.hop-copy-btn:active{transform:scale(.97)}
 .layout{display:flex;max-width:1280px;margin:0 auto}
 nav{position:sticky;top:0;align-self:flex-start;width:256px;height:100vh;
 overflow:auto;padding:24px 16px 40px 22px;border-right:1px solid var(--line)}
@@ -238,6 +263,166 @@ migkit doctor --install</code></pre>
 <pre><code>migkit init
 MIGKIT_SOURCE=postgres://app@db1.example.com/shop MIGKIT_TARGET=postgres://app@db2.example.com/shop MIGKIT_GOAL=cutover MIGKIT_HOP=shop migkit init</code></pre>
 <p>Set up a hop: in a terminal, asks for the two addresses and the passwords, connects, says what it found and what it will do, and writes the hop.</p>
+<div class="hop-gen" id="hop-generator">
+  <div class="hop-gen-head">
+    <div>
+      <h3 class="hop-gen-title">Interactive Hop Config Generator</h3>
+      <p class="hop-gen-sub">Select your engines and addresses to generate your <code>conf/hops.yaml</code> snippet and companion commands instantly.</p>
+    </div>
+  </div>
+
+  <div class="hop-common-bar">
+    <div class="hop-field" style="flex:1;min-width:140px">
+      <label for="hg-name">Hop identifier</label>
+      <input id="hg-name" type="text" value="shop" placeholder="e.g. shop">
+    </div>
+    <div class="hop-field" style="flex:1;min-width:180px">
+      <label for="hg-goal">Goal (what it is for)</label>
+      <select id="hg-goal">
+        <option value="cutover" selected>cutover (least downtime switch)</option>
+        <option value="copy">copy (snapshot bulk migration)</option>
+        <option value="verify">verify (read-only equality proof)</option>
+        <option value="keep-in-sync">keep-in-sync (continuous replication)</option>
+        <option value="upgrade">upgrade (major engine version)</option>
+        <option value="two-way">two-way (active-active replication)</option>
+        <option value="subset">subset (masked staging clone)</option>
+        <option value="rehearse">rehearse (dry-run outage forecast)</option>
+      </select>
+    </div>
+    <div class="hop-field" style="width:130px">
+      <label for="hg-budget">Outage budget (s)</label>
+      <input id="hg-budget" type="number" value="30" min="5" max="3600">
+    </div>
+    <div class="hop-field" style="justify-content:center;padding-top:16px">
+      <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+        <input id="hg-protect" type="checkbox" checked> protect_target
+      </label>
+    </div>
+  </div>
+
+  <div class="hop-gen-grid">
+    <!-- Source Column -->
+    <div class="hop-box">
+      <h4 class="hop-box-title">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 4.02 2 6.5v11C2 19.98 6.48 22 12 22s10-2.02 10-4.5v-11C22 4.02 17.52 2 12 2zm0 2c4.42 0 8 1.34 8 2.5S16.42 9 12 9s-8-1.34-8-2.5S7.58 4 12 4zm0 16c-4.42 0-8-1.34-8-2.5V16c1.86 1.25 4.79 2 8 2s6.14-.75 8-2v1.5c0 1.16-3.58 2.5-8 2.5zm0-5c-4.42 0-8-1.34-8-2.5V11c1.86 1.25 4.79 2 8 2s6.14-.75 8-2v1.5c0 1.16-3.58 2.5-8 2.5z"/></svg>
+        Source Database
+      </h4>
+      <div class="hop-row">
+        <div class="hop-field">
+          <label for="hg-src-engine">Engine</label>
+          <select id="hg-src-engine">
+            <option value="postgres" data-port="5432" selected>PostgreSQL</option>
+            <option value="mysql" data-port="3306">MySQL</option>
+            <option value="mariadb" data-port="3306">MariaDB</option>
+            <option value="oracle" data-port="1521">Oracle Database</option>
+            <option value="mssql" data-port="1433">SQL Server</option>
+            <option value="mongodb" data-port="27017">MongoDB</option>
+            <option value="clickhouse" data-port="8123">ClickHouse</option>
+            <option value="cockroach" data-port="26257">CockroachDB</option>
+            <option value="tidb" data-port="4000">TiDB</option>
+            <option value="cassandra" data-port="9042">Cassandra</option>
+            <option value="redis" data-port="6379">Redis</option>
+            <option value="snowflake" data-port="443">Snowflake</option>
+            <option value="bigquery" data-port="443">BigQuery</option>
+          </select>
+        </div>
+        <div class="hop-field">
+          <label for="hg-src-host">Host</label>
+          <input id="hg-src-host" type="text" value="db1.example.com">
+        </div>
+      </div>
+      <div class="hop-row">
+        <div class="hop-field">
+          <label for="hg-src-port">Port</label>
+          <input id="hg-src-port" type="number" value="5432">
+        </div>
+        <div class="hop-field">
+          <label for="hg-src-db">Database / Schema</label>
+          <input id="hg-src-db" type="text" value="shop">
+        </div>
+      </div>
+      <div class="hop-row">
+        <div class="hop-field">
+          <label for="hg-src-user">User</label>
+          <input id="hg-src-user" type="text" value="app">
+        </div>
+        <div class="hop-field">
+          <label for="hg-src-params">SSL / Parameters</label>
+          <input id="hg-src-params" type="text" value="sslmode=verify-full">
+        </div>
+      </div>
+    </div>
+
+    <!-- Target Column -->
+    <div class="hop-box">
+      <h4 class="hop-box-title">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 4.02 2 6.5v11C2 19.98 6.48 22 12 22s10-2.02 10-4.5v-11C22 4.02 17.52 2 12 2zm0 2c4.42 0 8 1.34 8 2.5S16.42 9 12 9s-8-1.34-8-2.5S7.58 4 12 4zm0 16c-4.42 0-8-1.34-8-2.5V16c1.86 1.25 4.79 2 8 2s6.14-.75 8-2v1.5c0 1.16-3.58 2.5-8 2.5zm0-5c-4.42 0-8-1.34-8-2.5V11c1.86 1.25 4.79 2 8 2s6.14-.75 8-2v1.5c0 1.16-3.58 2.5-8 2.5z"/></svg>
+        Target Database
+      </h4>
+      <div class="hop-row">
+        <div class="hop-field">
+          <label for="hg-dst-engine">Engine</label>
+          <select id="hg-dst-engine">
+            <option value="postgres" data-port="5432" selected>PostgreSQL</option>
+            <option value="mysql" data-port="3306">MySQL</option>
+            <option value="mariadb" data-port="3306">MariaDB</option>
+            <option value="oracle" data-port="1521">Oracle Database</option>
+            <option value="mssql" data-port="1433">SQL Server</option>
+            <option value="mongodb" data-port="27017">MongoDB</option>
+            <option value="clickhouse" data-port="8123">ClickHouse</option>
+            <option value="cockroach" data-port="26257">CockroachDB</option>
+            <option value="tidb" data-port="4000">TiDB</option>
+            <option value="cassandra" data-port="9042">Cassandra</option>
+            <option value="redis" data-port="6379">Redis</option>
+            <option value="snowflake" data-port="443">Snowflake</option>
+            <option value="bigquery" data-port="443">BigQuery</option>
+          </select>
+        </div>
+        <div class="hop-field">
+          <label for="hg-dst-host">Host</label>
+          <input id="hg-dst-host" type="text" value="db2.example.com">
+        </div>
+      </div>
+      <div class="hop-row">
+        <div class="hop-field">
+          <label for="hg-dst-port">Port</label>
+          <input id="hg-dst-port" type="number" value="5432">
+        </div>
+        <div class="hop-field">
+          <label for="hg-dst-db">Database / Schema</label>
+          <input id="hg-dst-db" type="text" value="shop">
+        </div>
+      </div>
+      <div class="hop-row">
+        <div class="hop-field">
+          <label for="hg-dst-user">User</label>
+          <input id="hg-dst-user" type="text" value="app">
+        </div>
+        <div class="hop-field">
+          <label for="hg-dst-params">SSL / Parameters</label>
+          <input id="hg-dst-params" type="text" value="sslmode=verify-full">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="hop-out-wrap">
+    <div class="hop-out-tabs">
+      <button type="button" class="hop-tab-btn active" data-tab="yaml">conf/hops.yaml</button>
+      <button type="button" class="hop-tab-btn" data-tab="cli">CLI init command</button>
+      <button type="button" class="hop-tab-btn" data-tab="runbook">Runbook sequence</button>
+    </div>
+    <div class="hop-code-box">
+      <pre><code id="hg-output"></code></pre>
+    </div>
+    <div class="hop-copy-bar">
+      <button type="button" class="hop-copy-btn" id="hg-copy-btn">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+        <span id="hg-copy-text">Copy to clipboard</span>
+      </button>
+    </div>
+  </div>
+</div>
 <p>In a terminal, <code>init</code> asks, and nothing else:</p>
 <ul><li>Where is the data now? An address like postgres://app@db1:5432/shop, or a task file from another tool</li><li>Where should it go? An address like mysql://app@db2/shop</li><li>Keep the passwords in this machine's keychain (k), or read them from environment variables (e)?</li></ul>
 <p>Without one it reads the addresses from <code>MIGKIT_SOURCE</code> and <code>MIGKIT_TARGET</code>, and the passwords from <code>MIGKIT_SOURCE_PASSWORD</code> and <code>MIGKIT_TARGET_PASSWORD</code>. It connects, says what it found, proposes what the hop is for, and writes the hop.</p>
@@ -682,6 +867,134 @@ AGPL-3.0-or-later.</footer>
     });
   }
 
+  function wireHopGenerator(){
+    var root = document.getElementById("hop-generator");
+    if (!root) return;
+
+    var nameInput = document.getElementById("hg-name");
+    var goalSelect = document.getElementById("hg-goal");
+    var budgetInput = document.getElementById("hg-budget");
+    var protectCheck = document.getElementById("hg-protect");
+
+    var srcEngine = document.getElementById("hg-src-engine");
+    var srcHost = document.getElementById("hg-src-host");
+    var srcPort = document.getElementById("hg-src-port");
+    var srcDb = document.getElementById("hg-src-db");
+    var srcUser = document.getElementById("hg-src-user");
+    var srcParams = document.getElementById("hg-src-params");
+
+    var dstEngine = document.getElementById("hg-dst-engine");
+    var dstHost = document.getElementById("hg-dst-host");
+    var dstPort = document.getElementById("hg-dst-port");
+    var dstDb = document.getElementById("hg-dst-db");
+    var dstUser = document.getElementById("hg-dst-user");
+    var dstParams = document.getElementById("hg-dst-params");
+
+    var output = document.getElementById("hg-output");
+    var copyBtn = document.getElementById("hg-copy-btn");
+    var copyText = document.getElementById("hg-copy-text");
+    var tabs = root.querySelectorAll(".hop-tab-btn");
+    var activeTab = "yaml";
+
+    function updatePort(select, portInput){
+      var opt = select.options[select.selectedIndex];
+      if (opt && opt.getAttribute("data-port")) {
+        portInput.value = opt.getAttribute("data-port");
+      }
+    }
+
+    srcEngine.addEventListener("change", function(){ updatePort(srcEngine, srcPort); render(); });
+    dstEngine.addEventListener("change", function(){ updatePort(dstEngine, dstPort); render(); });
+
+    function buildUrl(engine, user, host, port, db, params){
+      var u = engine.value.trim() + "://";
+      if (user.value.trim()) u += user.value.trim() + "@";
+      u += (host.value.trim() || "localhost");
+      if (port.value.trim()) u += ":" + port.value.trim();
+      u += "/" + (db.value.trim() || "app");
+      if (params.value.trim()) u += "?" + params.value.trim();
+      return u;
+    }
+
+    function render(){
+      var hop = nameInput.value.trim() || "shop";
+      var goal = goalSelect.value;
+      var budget = parseInt(budgetInput.value, 10) || 30;
+      var protect = protectCheck.checked;
+
+      var srcUrl = buildUrl(srcEngine, srcUser, srcHost, srcPort, srcDb, srcParams);
+      var dstUrl = buildUrl(dstEngine, dstUser, dstHost, dstPort, dstDb, dstParams);
+
+      var content = "";
+      if (activeTab === "yaml") {
+        content = "hops:\n" +
+                  "  " + hop + ":\n" +
+                  "    goal: " + goal + "\n" +
+                  "    source: " + srcUrl + "\n" +
+                  "    target: " + dstUrl;
+        if (goal === "cutover") {
+          content += "\n    options:\n" +
+                     "      cutover:\n" +
+                     "        budget: " + budget + "\n" +
+                     "      limits:\n" +
+                     "        outage: " + budget + "\n" +
+                     "      protect_target: " + (protect ? "true" : "false");
+        } else if (goal === "copy" || goal === "keep-in-sync" || goal === "two-way" || goal === "upgrade") {
+          content += "\n    options:\n" +
+                     "      protect_target: " + (protect ? "true" : "false");
+        }
+      } else if (activeTab === "cli") {
+        content = 'MIGKIT_SOURCE="' + srcUrl + '" \\\n' +
+                  'MIGKIT_TARGET="' + dstUrl + '" \\\n' +
+                  'MIGKIT_GOAL="' + goal + '" \\\n' +
+                  'MIGKIT_HOP="' + hop + '" \\\n' +
+                  'migkit init';
+      } else if (activeTab === "runbook") {
+        content = "# 1. Assess compatibility before writing\n" +
+                  "migkit assess " + hop + "\n\n" +
+                  "# 2. Start initial table snapshot + continuous CDC replication\n" +
+                  "migkit sync " + hop + " --mode migrate --go\n\n" +
+                  "# 3. Prove consistency (row hash + deep semantic catalog audit)\n" +
+                  "migkit check " + hop + " --deep\n\n" +
+                  "# 4. Atomic zero-downtime cutover with armed reverse stream\n" +
+                  "migkit move " + hop + " --mode cdc --drop --go";
+      }
+      output.textContent = content;
+
+      STATE.hop = hop;
+      STATE.source_host = srcHost.value.trim() || DEFAULTS.source_host;
+      STATE.target_host = dstHost.value.trim() || DEFAULTS.target_host;
+      STATE.db = srcDb.value.trim() || DEFAULTS.db;
+      STATE.goal = goal;
+      saveVars();
+      syncVarsToDOM();
+    }
+
+    var allInputs = root.querySelectorAll("input, select");
+    for (var i = 0; i < allInputs.length; i++) {
+      allInputs[i].addEventListener("input", render);
+      allInputs[i].addEventListener("change", render);
+    }
+
+    for (var t = 0; t < tabs.length; t++) {
+      tabs[t].addEventListener("click", function(e){
+        for (var j = 0; j < tabs.length; j++) tabs[j].classList.remove("active");
+        e.target.classList.add("active");
+        activeTab = e.target.getAttribute("data-tab");
+        render();
+      });
+    }
+
+    copyBtn.addEventListener("click", function(){
+      navigator.clipboard.writeText(output.textContent).then(function(){
+        copyText.textContent = "Copied!";
+        setTimeout(function(){ copyText.textContent = "Copy to clipboard"; }, 2000);
+      });
+    });
+
+    render();
+  }
+
   function wirePageThemeButton(){
     var btn = document.querySelector("[data-page-theme-toggle]");
     if (!btn) return;
@@ -701,10 +1014,12 @@ AGPL-3.0-or-later.</footer>
     document.addEventListener("DOMContentLoaded", function(){
       wirePageThemeButton();
       enhanceCodeBlocks();
+      wireHopGenerator();
     });
   } else {
     wirePageThemeButton();
     enhanceCodeBlocks();
+    wireHopGenerator();
   }
 })();
 </script>
