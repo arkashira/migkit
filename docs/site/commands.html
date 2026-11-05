@@ -129,8 +129,11 @@ nav .nav-group{font-size:11px;font-weight:600;text-transform:uppercase;
 letter-spacing:.05em;color:var(--mut);margin:14px 0 4px}
 nav a{display:block;color:var(--mut);padding:3px 0;font-size:13.5px}
 nav a.here{color:var(--ink);font-weight:600}
-nav a.sub{padding-left:12px;font-size:12.5px}
+nav a.sub{padding-left:12px;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:218px;line-height:1.4;padding-top:2px;padding-bottom:2px}
+nav a.sub:hover{color:var(--ink);text-decoration:none}
 main{flex:1;min-width:0;padding:34px 40px 120px;max-width:1000px}
+ul,ol{padding-left:22px;margin:10px 0}
+li{margin-bottom:6px;line-height:1.6}
 h1{font-size:30px;margin:.2em 0 .1em}
 h2{font-size:22px;margin:2em 0 .5em;padding-top:.4em;
 border-top:1px solid var(--line)}
