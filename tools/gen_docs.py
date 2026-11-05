@@ -108,8 +108,9 @@ class Pre:
 
 
 class UL:
-    def __init__(self, items, ordered=False):
+    def __init__(self, items, ordered=False, cls="", cat="", area=""):
         self.items, self.ordered = list(items), ordered
+        self.cls, self.cat, self.area = cls, cat, area
 
 
 class Cell:
@@ -361,6 +362,51 @@ border-radius:4px;background:var(--bg);color:var(--mut);font-size:11.5px;cursor:
 .hop-copy-btn{display:inline-flex;align-items:center;gap:6px;padding:7px 16px;font-size:12.5px;font-weight:600;background:var(--acc);color:#fff;border:none;border-radius:6px;cursor:pointer;transition:opacity 120ms ease,transform 120ms ease}
 .hop-copy-btn:hover{opacity:.9}
 .hop-copy-btn:active{transform:scale(.97)}
+.trouble-header-widget{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px;margin:20px 0 28px}
+.trouble-search-box{display:flex;flex-direction:column;gap:10px}
+.trouble-search-input-wrap{position:relative;display:flex;align-items:center}
+.trouble-search-icon{position:absolute;left:14px;color:var(--mut);pointer-events:none}
+.trouble-search-input-wrap input{width:100%;padding:11px 72px 11px 42px;border:1.5px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);font-size:14px;transition:border-color 120ms ease,box-shadow 120ms ease}
+.trouble-search-input-wrap input:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px rgba(11,99,196,.15)}
+.trouble-search-shortcut{position:absolute;right:38px;padding:2px 6px;border:1px solid var(--line);border-radius:4px;background:var(--panel);color:var(--mut);font-size:11px;font-family:ui-monospace,monospace;pointer-events:none}
+.trouble-clear-btn{position:absolute;right:10px;display:none;align-items:center;justify-content:center;width:24px;height:24px;border:none;background:transparent;color:var(--mut);font-size:18px;cursor:pointer;border-radius:4px;padding:0;line-height:1}
+.trouble-clear-btn:hover{color:var(--ink);background:rgba(127,127,127,.14)}
+.trouble-actions-bar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;font-size:13px;color:var(--mut)}
+.trouble-counter-label strong{color:var(--ink);font-variant-numeric:tabular-nums}
+.trouble-btn-group{display:flex;gap:6px}
+.trouble-action-btn{padding:4px 10px;font-size:12px;font-weight:600;border:1px solid var(--line);border-radius:5px;background:var(--bg);color:var(--ink);cursor:pointer;transition:background-color 120ms ease,border-color 120ms ease}
+.trouble-action-btn:hover{background:var(--panel);border-color:var(--acc);color:var(--acc)}
+.trouble-filter-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
+.trouble-filter-title{font-size:12px;font-weight:600;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
+.trouble-chips{display:flex;flex-wrap:wrap;gap:6px}
+.trouble-chip{padding:4px 11px;font-size:12px;font-weight:500;border:1px solid var(--line);border-radius:20px;background:var(--bg);color:var(--mut);cursor:pointer;transition:all 120ms ease}
+.trouble-chip:hover{color:var(--ink);border-color:var(--acc)}
+.trouble-chip.active{background:var(--acc);color:#fff;border-color:var(--acc);font-weight:600}
+.trouble-jump-bar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-top:12px}
+.trouble-jump-bar label{font-size:12px;font-weight:600;color:var(--mut)}
+.trouble-jump-select{padding:5px 10px;font-size:12.5px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);cursor:pointer}
+.trouble-jump-select:focus{outline:2px solid var(--acc);border-color:transparent}
+.trouble-no-results{padding:30px 20px;text-align:center;background:var(--panel);border:1px dashed var(--line);border-radius:8px;margin:20px 0}
+.trouble-no-results .no-res-title{font-size:15px;font-weight:600;color:var(--ink);margin-bottom:6px}
+.trouble-no-results .no-res-desc{font-size:13px;color:var(--mut)}
+.trouble-accordion-header{display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;gap:10px;transition:color 120ms ease}
+.trouble-accordion-header:hover{color:var(--acc)}
+.trouble-h2-text{flex:1}
+.trouble-h2-badge{font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;padding:2px 8px;border-radius:12px;background:var(--panel);border:1px solid var(--line);color:var(--mut)}
+.trouble-h2-chevron{transition:transform 180ms ease;color:var(--mut);flex-shrink:0}
+.trouble-accordion-header[aria-expanded="false"] .trouble-h2-chevron{transform:rotate(-90deg)}
+.trouble-jump-highlight{animation:troublePulse 1.2s ease}
+@keyframes troublePulse{0%,100%{background-color:transparent}30%{background-color:rgba(11,99,196,.18)}}
+ul.trouble-list{list-style:none;padding:0;margin:12px 0 28px;display:flex;flex-direction:column;gap:8px}
+.trouble-card{position:relative;background:var(--bg);border:1px solid var(--line);border-left:3.5px solid var(--no);border-radius:6px;padding:12px 16px;transition:border-color 120ms ease,background-color 120ms ease,transform 120ms ease}
+.trouble-card:hover{border-color:var(--line);border-left-color:var(--acc);background:var(--panel)}
+.trouble-card-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.trouble-badge{display:inline-flex;align-items:center;font-size:10.5px;font-weight:700;letter-spacing:.06em;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;padding:2px 7px;border-radius:3px;background:rgba(229,83,75,.09);color:var(--no);border:1px solid rgba(229,83,75,.22)}
+.trouble-copy-btn{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:500;padding:3px 8px;border:1px solid var(--line);border-radius:4px;background:var(--panel);color:var(--mut);cursor:pointer;transition:all 120ms ease}
+.trouble-copy-btn:hover{color:var(--ink);border-color:var(--acc)}
+.trouble-copy-btn.copied{color:var(--ok);border-color:var(--ok);background:rgba(31,122,61,.08)}
+.trouble-body{font-size:14px;line-height:1.6;color:var(--ink);word-break:break-word}
+.trouble-ph{font-style:italic;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--var);background:var(--varbg);padding:1px 5px;border-radius:3px;font-size:.9em;border:1px solid rgba(197,17,98,.2)}
 .layout{display:flex;max-width:1280px;margin:0 auto}
 nav{position:sticky;top:0;align-self:flex-start;width:256px;height:100vh;
 overflow:auto;padding:24px 16px 40px 22px;border-right:1px solid var(--line)}
@@ -426,8 +472,27 @@ def _block_html(b, prefix):
         return f"<pre><code>{_esc(b.text)}</code></pre>"
     if isinstance(b, UL):
         tag = "ol" if b.ordered else "ul"
+        if getattr(b, "cls", "") == "trouble-list":
+            cat_attr = f' data-cat="{b.cat}"' if getattr(b, "cat", "") else ""
+            area_attr = f' data-area="{b.area}"' if getattr(b, "area", "") else ""
+            items = []
+            for i in b.items:
+                content = inline(i, prefix)
+                items.append(
+                    f'<li class="trouble-card">'
+                    f'<div class="trouble-card-top">'
+                    f'<span class="trouble-badge">REFUSAL</span>'
+                    f'<button type="button" class="trouble-copy-btn" title="Copy refusal" aria-label="Copy refusal text">'
+                    f'<svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z" fill="currentColor"/></svg>'
+                    f'<span>Copy</span></button>'
+                    f'</div>'
+                    f'<div class="trouble-body">{content}</div>'
+                    f'</li>'
+                )
+            return f'<ul class="trouble-list"{cat_attr}{area_attr}>{"".join(items)}</ul>'
+        cls = f' class="{b.cls}"' if getattr(b, "cls", "") else ""
         items = "".join(f"<li>{inline(i, prefix)}</li>" for i in b.items)
-        return f"<{tag}>{items}</{tag}>"
+        return f"<{tag}{cls}>{items}</{tag}>"
     if isinstance(b, Pills):
         return "<p>" + "".join(f'<span class="pill">{inline(i, prefix)}'
                                "</span>" for i in b.items) + "</p>"
@@ -1093,16 +1158,253 @@ INTERACTIVE_JS = r"""
     });
   }
 
+  function wireTroubleshooting(){
+    var root = document.getElementById("trouble-widget");
+    if (!root) return;
+    var searchInput = document.getElementById("trouble-search-input");
+    var clearBtn = document.getElementById("trouble-clear-btn");
+    var counter = document.getElementById("trouble-counter");
+    var noResults = document.getElementById("trouble-no-results");
+    var expandAllBtn = document.getElementById("trouble-expand-all");
+    var collapseAllBtn = document.getElementById("trouble-collapse-all");
+    var jumpSelect = document.getElementById("trouble-jump-select");
+    var chipBtns = Array.prototype.slice.call(document.querySelectorAll("#trouble-chips .trouble-chip"));
+    var uls = Array.prototype.slice.call(document.querySelectorAll("ul.trouble-list"));
+
+    var sections = [];
+    var totalCardsCount = 0;
+
+    uls.forEach(function(ul){
+      var h2 = ul.previousElementSibling;
+      while (h2 && h2.tagName !== "H2") {
+        h2 = h2.previousElementSibling;
+      }
+      var cards = Array.prototype.slice.call(ul.querySelectorAll(".trouble-card"));
+      totalCardsCount += cards.length;
+      var cat = ul.getAttribute("data-cat") || "all";
+      var areaId = ul.getAttribute("data-area") || (h2 ? h2.id : "");
+
+      if (h2) {
+        var h2Text = h2.innerHTML;
+        h2.innerHTML = '<span class="trouble-h2-text">' + h2Text + '</span><span class="trouble-h2-badge">' + cards.length + '</span><svg class="trouble-h2-chevron" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z" fill="currentColor"/></svg>';
+        h2.classList.add("trouble-accordion-header");
+        h2.setAttribute("role", "button");
+        h2.setAttribute("tabindex", "0");
+        h2.setAttribute("aria-expanded", "true");
+
+        var toggleSection = function(){
+          var isExpanded = h2.getAttribute("aria-expanded") === "true";
+          var nextState = !isExpanded;
+          h2.setAttribute("aria-expanded", nextState ? "true" : "false");
+          ul.style.display = nextState ? "" : "none";
+        };
+
+        h2.addEventListener("click", toggleSection);
+        h2.addEventListener("keydown", function(e){
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            toggleSection();
+          }
+        });
+      }
+
+      var cardData = cards.map(function(card){
+        var body = card.querySelector(".trouble-body");
+        var text = (body ? body.textContent : "").toLowerCase();
+        if (body) {
+          body.innerHTML = body.innerHTML.replace(/&lt;\.\.\.&gt;/g, '<span class="trouble-ph">&lt;...&gt;</span>');
+        }
+        return { el: card, text: text, body: body };
+      });
+
+      sections.push({
+        h2: h2,
+        ul: ul,
+        cat: cat,
+        areaId: areaId,
+        cards: cardData,
+        countBadge: h2 ? h2.querySelector(".trouble-h2-badge") : null
+      });
+    });
+
+    var activeFilter = "all";
+
+    function applyFilter(){
+      var q = (searchInput.value || "").trim().toLowerCase();
+      var terms = q ? q.split(/\s+/).filter(Boolean) : [];
+      var matchedCards = 0;
+      var matchedSections = 0;
+
+      sections.forEach(function(sec){
+        var catMatch = (activeFilter === "all" || sec.cat === activeFilter || activeFilter === "engines" && (sec.cat === "engines"));
+        if (!catMatch) {
+          if (sec.h2) sec.h2.style.display = "none";
+          sec.ul.style.display = "none";
+          return;
+        }
+
+        var secMatchedCards = 0;
+        sec.cards.forEach(function(c){
+          var matchesQuery = true;
+          if (terms.length > 0) {
+            for (var i = 0; i < terms.length; i++) {
+              if (c.text.indexOf(terms[i]) === -1) {
+                matchesQuery = false;
+                break;
+              }
+            }
+          }
+          if (matchesQuery) {
+            c.el.style.display = "";
+            secMatchedCards++;
+          } else {
+            c.el.style.display = "none";
+          }
+        });
+
+        if (secMatchedCards > 0) {
+          if (sec.h2) {
+            sec.h2.style.display = "";
+            sec.h2.setAttribute("aria-expanded", "true");
+          }
+          sec.ul.style.display = "";
+          if (sec.countBadge) {
+            sec.countBadge.textContent = terms.length > 0 ? secMatchedCards + " / " + sec.cards.length : sec.cards.length;
+          }
+          matchedCards += secMatchedCards;
+          matchedSections++;
+        } else {
+          if (sec.h2) sec.h2.style.display = "none";
+          sec.ul.style.display = "none";
+        }
+      });
+
+      if (counter) {
+        counter.innerHTML = 'Showing <strong>' + matchedCards.toLocaleString() + '</strong> of ' + totalCardsCount.toLocaleString() + ' refusals in <strong>' + matchedSections + '</strong> areas';
+      }
+      if (noResults) {
+        noResults.style.display = (matchedCards === 0) ? "block" : "none";
+      }
+      if (clearBtn) {
+        clearBtn.style.display = q ? "inline-flex" : "none";
+      }
+    }
+
+    searchInput.addEventListener("input", applyFilter);
+
+    clearBtn.addEventListener("click", function(){
+      searchInput.value = "";
+      applyFilter();
+      searchInput.focus();
+    });
+
+    document.addEventListener("keydown", function(e){
+      if (e.key === "/" && document.activeElement !== searchInput && !["INPUT","TEXTAREA","SELECT"].includes((document.activeElement||{}).tagName)) {
+        e.preventDefault();
+        searchInput.focus();
+      }
+      if (e.key === "Escape" && document.activeElement === searchInput) {
+        if (searchInput.value) {
+          searchInput.value = "";
+          applyFilter();
+        } else {
+          searchInput.blur();
+        }
+      }
+    });
+
+    chipBtns.forEach(function(chip){
+      chip.addEventListener("click", function(){
+        chipBtns.forEach(function(c){
+          c.classList.remove("active");
+          c.setAttribute("aria-checked", "false");
+        });
+        chip.classList.add("active");
+        chip.setAttribute("aria-checked", "true");
+        activeFilter = chip.getAttribute("data-filter") || "all";
+        applyFilter();
+      });
+    });
+
+    expandAllBtn.addEventListener("click", function(){
+      sections.forEach(function(sec){
+        if (sec.h2 && sec.h2.style.display !== "none") {
+          sec.h2.setAttribute("aria-expanded", "true");
+          sec.ul.style.display = "";
+        }
+      });
+    });
+
+    collapseAllBtn.addEventListener("click", function(){
+      sections.forEach(function(sec){
+        if (sec.h2 && sec.h2.style.display !== "none") {
+          sec.h2.setAttribute("aria-expanded", "false");
+          sec.ul.style.display = "none";
+        }
+      });
+    });
+
+    jumpSelect.addEventListener("change", function(){
+      var val = jumpSelect.value;
+      if (!val) return;
+      var targetH2 = document.getElementById(val);
+      if (targetH2) {
+        if (targetH2.style.display === "none") {
+          activeFilter = "all";
+          chipBtns.forEach(function(c){
+            c.classList.toggle("active", c.getAttribute("data-filter") === "all");
+            c.setAttribute("aria-checked", c.getAttribute("data-filter") === "all" ? "true" : "false");
+          });
+          searchInput.value = "";
+          applyFilter();
+        }
+        targetH2.setAttribute("aria-expanded", "true");
+        var nextUl = targetH2.nextElementSibling;
+        while (nextUl && nextUl.tagName !== "UL") {
+          nextUl = nextUl.nextElementSibling;
+        }
+        if (nextUl) nextUl.style.display = "";
+        targetH2.scrollIntoView({ behavior: "smooth", block: "start" });
+        targetH2.classList.add("trouble-jump-highlight");
+        setTimeout(function(){ targetH2.classList.remove("trouble-jump-highlight"); }, 1500);
+      }
+      jumpSelect.value = "";
+    });
+
+    document.querySelectorAll(".trouble-copy-btn").forEach(function(btn){
+      btn.addEventListener("click", function(e){
+        e.stopPropagation();
+        var card = btn.closest(".trouble-card");
+        if (!card) return;
+        var body = card.querySelector(".trouble-body");
+        if (!body) return;
+        var text = body.textContent || "";
+        navigator.clipboard.writeText(text).then(function(){
+          var span = btn.querySelector("span");
+          var prev = span ? span.textContent : "";
+          if (span) span.textContent = "Copied!";
+          btn.classList.add("copied");
+          setTimeout(function(){
+            if (span) span.textContent = prev;
+            btn.classList.remove("copied");
+          }, 1500);
+        });
+      });
+    });
+  }
+
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", function(){
       wirePageThemeButton();
       enhanceCodeBlocks();
       wireHopGenerator();
+      wireTroubleshooting();
     });
   } else {
     wirePageThemeButton();
     enhanceCodeBlocks();
     wireHopGenerator();
+    wireTroubleshooting();
   }
 })();
 """.strip()
@@ -1905,14 +2207,92 @@ def page_web():
                 " command line's own functions.", blocks)
 
 
-def page_troubleshooting():
-    blocks = [P("Every refusal migkit can stop with, read from where the code"
-                " raises it: search this page for the words you saw. The"
-                " parts filled in at run time are shown as `<...>`. Each"
-                " message says what to do.")]
-    groups = refusals_by_area()
+def trouble_category(heading, index):
+    if index in (0, 10, 11):
+        return "config"
+    if index in (2, 3, 6, 8):
+        return "data"
+    if index == 4:
+        return "cdc"
+    if index == 5:
+        return "check"
+    if index == 7:
+        return "cutover"
+    if index in (1, 9, 12, 13):
+        return "ops"
+    if 14 <= index <= 66:
+        return "engines"
+    return "all"
+
+
+def trouble_filter_block(groups):
+    total = sum(len(t) for _, t in groups)
+    options = []
     for i, (heading, texts) in enumerate(groups):
-        blocks += [H(heading, f"area-{i}"), UL(Said(t) for t in texts)]
+        cat = trouble_category(heading, i)
+        options.append(f'<option value="area-{i}" data-cat="{cat}">{html.escape(heading)} ({len(texts)})</option>')
+    options_html = "\n".join(options)
+    html_content = f"""<div class="trouble-header-widget" id="trouble-widget">
+  <div class="trouble-search-box">
+    <div class="trouble-search-input-wrap">
+      <svg class="trouble-search-icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+        <path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" fill="currentColor"/>
+      </svg>
+      <input type="search" id="trouble-search-input" placeholder="Search {total:,} refusal messages, keywords, or parameters (e.g. password, timeout, sslmode)..." autocomplete="off" spellcheck="false" aria-label="Search refusal messages">
+      <kbd class="trouble-search-shortcut" title="Press / to focus">/</kbd>
+      <button type="button" id="trouble-clear-btn" class="trouble-clear-btn" aria-label="Clear search" title="Clear search">&times;</button>
+    </div>
+    <div class="trouble-actions-bar">
+      <div class="trouble-counter-label" id="trouble-counter">Showing <strong>{total:,}</strong> of {total:,} refusals in <strong>{len(groups)}</strong> areas</div>
+      <div class="trouble-btn-group">
+        <button type="button" class="trouble-action-btn" id="trouble-expand-all" title="Expand all sections">Expand all</button>
+        <button type="button" class="trouble-action-btn" id="trouble-collapse-all" title="Collapse all sections">Collapse all</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="trouble-filter-bar">
+    <span class="trouble-filter-title">Category:</span>
+    <div class="trouble-chips" id="trouble-chips" role="radiogroup" aria-label="Category filter">
+      <button type="button" class="trouble-chip active" data-filter="all" role="radio" aria-checked="true">All ({total:,})</button>
+      <button type="button" class="trouble-chip" data-filter="config" role="radio" aria-checked="false">Config &amp; Init</button>
+      <button type="button" class="trouble-chip" data-filter="engines" role="radio" aria-checked="false">Engines &amp; Drivers</button>
+      <button type="button" class="trouble-chip" data-filter="data" role="radio" aria-checked="false">Moving Data</button>
+      <button type="button" class="trouble-chip" data-filter="cdc" role="radio" aria-checked="false">Change Streams</button>
+      <button type="button" class="trouble-chip" data-filter="check" role="radio" aria-checked="false">Checking &amp; Proving</button>
+      <button type="button" class="trouble-chip" data-filter="cutover" role="radio" aria-checked="false">Cutover &amp; Guards</button>
+      <button type="button" class="trouble-chip" data-filter="ops" role="radio" aria-checked="false">Operations &amp; Web</button>
+    </div>
+  </div>
+
+  <div class="trouble-jump-bar">
+    <label for="trouble-jump-select">Jump to area or engine:</label>
+    <select id="trouble-jump-select" class="trouble-jump-select">
+      <option value="">Choose an area ({len(groups)} total)...</option>
+      {options_html}
+    </select>
+  </div>
+
+  <div id="trouble-no-results" class="trouble-no-results" style="display:none;">
+    <div class="no-res-title">No refusals matched your search</div>
+    <div class="no-res-desc">Try searching for a different keyword, error phrase, or click <strong>All</strong> above to reset filters.</div>
+  </div>
+</div>"""
+    return Raw(html_content)
+
+
+def page_troubleshooting():
+    groups = refusals_by_area()
+    blocks = [
+        trouble_filter_block(groups),
+        P("Every refusal migkit can stop with, read from where the code raises"
+          " it: search this page for the words you saw. The parts filled in"
+          " at run time are shown as `<...>`. Each message says what to do."),
+    ]
+    for i, (heading, texts) in enumerate(groups):
+        cat = trouble_category(heading, i)
+        blocks += [H(heading, f"area-{i}"),
+                   UL([Said(t) for t in texts], cls="trouble-list", cat=cat, area=f"area-{i}")]
     total = sum(len(t) for _, t in groups)
     return Page("troubleshooting", "Troubleshooting", "Troubleshooting",
                 f"{total} refusals, each in the words migkit prints it.",
