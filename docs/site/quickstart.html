@@ -231,7 +231,7 @@ margin-top:40px;padding-top:16px}
 <p class="lede">Install, two addresses, assess, move, check, cut over.</p>
 <p>From two addresses to a cutover. Every command that writes shows its plan first and does nothing until <code>--go</code>.</p>
 <h2 id="step-1">1. Install, and let migkit fill what this machine lacks</h2>
-<pre><code>uv tool install migkit
+<pre><code>uv tool install git+https://github.com/arkashira/migkit.git
 migkit doctor --install</code></pre>
 <p>What this machine can do, and whether the configured hops connect.</p>
 <h2 id="step-2">2. Two addresses</h2>

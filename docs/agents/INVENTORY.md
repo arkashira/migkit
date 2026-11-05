@@ -23,7 +23,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 | workflows | 10 | 111 | 151518 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
 | cli | 11 | 4 | 10561 | the command line and the guide that asks for two addresses |
 | web | 11 | 30 | 6451 | the web view and its API |
-| tools | - | 13 | 7989 | the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them |
+| tools | - | 13 | 7969 | the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them |
 | data | - | 5 | 10810 | the files migkit ships as resources |
 
 ## configuration (11 files)
@@ -532,7 +532,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 | `tools/final_suite.py` | - | 859 | 0 | configuration 7, integrations 1, tools 1 | - | none |
 | `tools/gen_changelog.py` | - | 120 | 1: tools.gen_docs | - | - | none |
 | `tools/gen_codemap.py` | - | 2086 | 1: tools.gen_docs | configuration 4, decision 2, engines 1, workflows 1 | - | none |
-| `tools/gen_docs.py` | - | 2576 | 0 | cli 6, configuration 27, conversion 2, decision 8, engines 5, reporting 6, tools 2, web 4, workflows 1 | - | none |
+| `tools/gen_docs.py` | - | 2556 | 0 | cli 6, configuration 25, conversion 2, decision 8, engines 5, reporting 6, tools 2, web 4, workflows 1 | - | none |
 | `tools/measures_table.py` | - | 42 | 0 | workflows 1 | - | none |
 | `tools/pin_programs.py` | - | 239 | 0 | integrations 1 | - | none |
 | `tools/whole_use.py` | - | 353 | 0 | configuration 2, integrations 1 | - | none |

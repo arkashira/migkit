@@ -2113,7 +2113,7 @@ def quickstart_steps(hop="shop"):
     from migkit import cli, hopkeys
     return [
         ("Install, and let migkit fill what this machine lacks",
-         ["uv tool install migkit", "migkit doctor --install"],
+         ["uv tool install git+https://github.com/arkashira/migkit.git", "migkit doctor --install"],
          _first_sentence(cli.main.commands["doctor"].help)),
         ("Two addresses",
          ["migkit init",
@@ -2224,119 +2224,99 @@ def page_contributing():
 
 
 def page_index():
-    from migkit import hopkeys
     names, matrix = _engine_rows()
     shown = [n for n in names if n not in ("hetero", "generic")]
-    hop_yaml = (
-        "hops:\n"
-        "  shop:\n"
-        "    goal: cutover\n"
-        "    source: postgres://app@db1.example.com:5432/shop?sslmode=verify-full\n"
-        "    target: postgres://app@db2.example.com:5432/shop?sslmode=verify-full"
-    )
-    cutover_cmds = (
-        "migkit assess shop\n"
-        "migkit move shop --mode full+cdc --go\n"
-        "migkit check shop\n"
+
+    quick_run_cmds = (
+        "# 1. Install via git\n"
+        "uv tool install git+https://github.com/arkashira/migkit.git\n"
+        "migkit doctor --install\n"
+        "\n"
+        "# 2. Configure source, target and goal (passwords stored in keychain)\n"
+        "MIGKIT_SOURCE=postgres://app@db1.example.com/shop \\\n"
+        "MIGKIT_TARGET=postgres://app@db2.example.com/shop \\\n"
+        "MIGKIT_GOAL=cutover MIGKIT_HOP=shop migkit init\n"
+        "\n"
+        "# 3. Run: snapshot copy + continuous change stream (CDC)\n"
+        "migkit sync shop --mode migrate --go\n"
+        "\n"
+        "# 4. Prove: full row hash + deep semantic drift audit\n"
+        "migkit check shop --deep\n"
+        "\n"
+        "# 5. Cut over: zero write loss, reverse stream ready\n"
         "migkit move shop --mode cdc --drop --go"
     )
-    corruption_rows = [
-        ["Truncated large text / JSON / LOB", "`check` (server-side length + digest projection)", "Target silently clips values at column or driver buffer ceiling"],
-        ["Float / NaN / `-0.0` drift", "`check --deep`", "`NaN != NaN` or `-0.0` vs `0.0` after cross-engine cast"],
-        ["Timezone shift on `TIMESTAMP`", "`check`", "Session timezone differed during load (`+07:00` stored as `UTC`)"],
-        ["TRAILING space strip (`CHAR` -> `VARCHAR`)", "`check`", "Oracle/MySQL pad vs PostgreSQL strip"],
-        ["NULL vs `''` (Oracle empty string)", "`check`", "Oracle treats `''` as `NULL`; target stores both"],
-        ["Case-folded collation duplicate", "`check --schema` + `check`", "`ci` collation on target merges two distinct source keys"],
-        ["Sequence / `AUTO_INCREMENT` behind max(id)", "`check --sequences` / `cutover`", "First `INSERT` after cutover fails with duplicate key"],
-        ["Orphaned foreign-key rows (copied without snapshot)", "`check --consistent`", "Parent/child tables read at different points in time"],
-        ["Missing `NOT VALID` constraint validation", "`check --schema`", "Constraint created for load speed was never validated"],
-        ["Trigger firing during bulk load", "`move` / `cutover`", "Audit or billing trigger duplicates rows as data arrives"],
-        ["Replication lag mistaken for diff", "`check --delta` (lag-aware)", "Checker flags rows that are still in flight"],
-    ]
-    compare_rows = [
-        ["Cross-engine schema conversion (`schema`)", "Yes (all SQL dialects)", "Separate conversion tool", "No", "No", "No"],
-        ["Snapshot-consistent bulk + change stream (`move --mode full+cdc`)", "Yes", "Yes", "Yes (connector setup)", "No", "No"],
-        ["Fenced cutover + sequence bump + target guard (`cutover`)", "Yes (single command)", "Manual", "Manual", "No", "No"],
-        ["All-column hash + exact diff localization (`check`)", "Yes (adaptive Merkle + keyset)", "Optional / slow", "No", "Yes", "Yes (licensed)"],
-        ["Deterministic repair with reversible SQL (`sync --mode reconcile --apply`)", "Yes + `rollback`", "No", "No", "MySQL only, no undo", "Yes"],
-        ["Runs locally from a single CLI without cloud lock-in", "Yes", "Cloud-only", "JVM + cluster", "Perl + MySQL", "Enterprise server"],
-    ]
+
+    lifecycle_table = Table(
+        ["Phase", "Command", "Action", "Operational guarantee"],
+        [
+            ["**1. Assess**", "`migkit assess shop`",
+             "Pre-flight audit of schemas, data types, sequences, and replication privileges.",
+             "Read-only on source. Flags incompatible constructs before moving data."],
+            ["**2. Move & Stream**", "`migkit sync shop --mode migrate --go`",
+             "Snapshot table copy followed immediately by CDC change stream replication.",
+             "Point-in-time snapshot. O(1) resume from key-range cursor if interrupted."],
+            ["**3. Verify**", "`migkit check shop --deep`",
+             "Injective per-row hash + Merkle diff drilldown + 20 semantic drift audits.",
+             "Never writes to either database. Detects silent corruption that count(*) misses."],
+            ["**4. Cut over**", "`migkit move shop --mode cdc --drop --go`",
+             "Source writes drained, final stream sync drained, target sequences raised.",
+             "Atomic switchover within outage budget. Reverse stream armed for rollback."],
+        ],
+        ids=["phase-assess", "phase-move", "phase-verify", "phase-cutover"]
+    )
+
+    verify_summary_table = Table(
+        ["Command / Mode", "When to run", "Scope & guarantees", "Complexity"],
+        [
+            ["`migkit check shop`", "Pre-cutover sign-off",
+             "Schema structure, exact row counts, auto-increment sequences, and row hash blocks",
+             "O(all rows) resumable"],
+            ["`migkit check shop --deep`", "Catalog & semantic audit",
+             "Detects 20+ silent drift classes: NULL vs empty string, float precision, collation, unvalidated FKs, trigger status",
+             "O(1 fused scan)"],
+            ["`migkit watch shop --verify --delta`", "During CDC replication",
+             "Verifies primary keys modified in WAL/binlog since last checkpoint; gates SAFE TO CUT OVER",
+             "O(changed keys)"],
+            ["`migkit check shop --sample`", "Fast sanity check",
+             "Times a bounded random sample of keys across tables without scanning full data volume",
+             "O(budgeted seconds)"],
+            ["`scan` (engine)", "Internal query planner",
+             "Packs up to 512 SQL aggregates into 1 range scan per side to minimize DB load",
+             "Automatic in check"],
+        ],
+        ids=["v-check", "v-deep", "v-delta", "v-sample", "v-scan"]
+    )
+
     blocks = [
-        Pills([f"[{title(n)}](engines.html#engine-{n})" for n in shown]
-              + ["any two of them as a pair",
-                 "any other SQL engine by its URL"]),
-        P(f"**{POSITION}**, and says which it"
-          " chose and why. Around the move it does what a mover leaves"
-          " out: it prepares the target, follows the source's changes,"
-          " proves every row and object arrived, repairs what did not with"
-          " the undo kept, and cuts over with the least downtime.", "rule"),
-        H("Five minutes", "start"),
-        Pre("\n".join(c for _, cmds, _ in quickstart_steps() for c in cmds
-                      if not c.startswith("MIGKIT_"))),
-        P("Click any highlighted parameter (`shop`, `db1.example.com`,"
-          " `full+cdc`) or use the completion chips below a command block"
-          " to customize values inline before copying. Full walkthrough:"
-          " [the quickstart](quickstart.html)."),
-        H("Configure a hop", "configure"),
-        P("A hop in `conf/hops.yaml` needs only its two addresses and what"
-          " it is for (`goal`). Passwords are kept by `migkit init` in the"
-          " system keychain or `env:MIGKIT_<HOP>_<SIDE>_PASSWORD`, never in"
-          " the file:"),
-        Pre(hop_yaml),
-        H("What a hop is for (Goals)", "goals"),
-        Table(["Goal", "What it is for"],
-              [[f"[`{g}`](goals.html#goal-{g})", Said(v["what"])]
-               for g, v in hopkeys.GOALS.items()]),
-        H("Execution modes (`--mode`)", "modes"),
-        P("Every move or synchronization mode shows its plan first and"
-          " writes nothing until `--go` or `--apply`:"),
-        modes_table(),
-    ] + verification_layers_blocks() + [
-        H("Cutover runbook", "cutover-runbook"),
-        P("From readiness check to fenced switchover in four commands:"),
-        Pre(cutover_cmds),
-        H("Silent-corruption classes detected", "corruption"),
-        P("Row counts (`SELECT COUNT(*)`) pass on every one of these failure"
-          " modes. `migkit check` catches all 11 before cutover:"),
-        Table(["Silent corruption class", "Caught by", "How it happens"],
-              corruption_rows),
-        H("How it compares", "compare"),
-        Table(["Capability", "migkit", "Cloud migration service",
-               "Change-capture connector", "Table-sync script",
-               "Enterprise verifier"],
-              compare_rows, wide=True),
-        H("The manual", "manual"),
-        UL(["[Quickstart](quickstart.html): install, two addresses, assess,"
-            " move, check, cut over",
-            f"[Engines](engines.html): {len(shown)} engines, what each can"
-            " do, the shapes of table, stored code, the managed services",
-            "[Goals and modes](goals.html): what each does on the source and"
-            " the target, and what it guarantees",
-            "[Recipes](recipes.html): use cases as source -> target pairs",
-            "[Hop options](options.html): every key a hop may say",
-            "[Environment](environment.html): every `MIGKIT_*` variable",
-            "[Commands](commands.html): every command and option, and the"
-            " metrics",
-            "[Troubleshooting](troubleshooting.html): every refusal, in"
-            " migkit's words",
-            "[Evidence](evidence.html): what the evidence export holds",
-            "[Web and API](web.html): the multi-user web view, roles, SSO"
-            " and REST API",
-            "[Telemetry](telemetry.html): local-only product telemetry and"
-            " privacy guarantees",
-            "[Contributing](contributing.html): where each kind of thing"
-            " lives in the source",
-            "[Releases](releases.html): each release's changes"]),
-        H("Safety", "safety"),
-        UL(["Every command that writes shows its plan first, starting with"
-            " what each side will see, and writes nothing until `--go` or"
-            " `--apply`.",
-            "What each goal does on the source is said before it runs:"
-            " [goals](goals.html). No goal turns the cutover migkit drives"
-            " on; a hop turns it on itself.",
-            "Every repair keeps its undo, and `migkit rollback` puts it"
-            " back.",
-            "`migkit check` never writes to either side."]),
+        P(f"**{POSITION}**. Universal database migration, replication, and mathematical verification across 64 database technologies.", "rule"),
+        H("How it works", "lifecycle"),
+        P("Every migration passes through four predictable phases, from pre-flight safety checks to verified zero-downtime cutover:"),
+        lifecycle_table,
+        H("Quickstart", "quickstart"),
+        P("Install, configure, and execute a verified cutover in five commands:"),
+        Pre(quick_run_cmds),
+        P("Click any parameter (`shop`, `db1.example.com`, `full+cdc`) to customize inline before copying. Detailed walkthrough: [the quickstart guide](quickstart.html)."),
+        H("Verification modes", "verification"),
+        P("Select the verification depth matching your operational maintenance window:"),
+        verify_summary_table,
+        H("Core guarantees", "guarantees"),
+        UL([
+            "**Read-only on source**: Source database is never modified unless explicit cutover is triggered.",
+            "**O(1) Resumability**: Checkpoints saved at key range cursor level; recovery skips completed rows in O(1) without re-scanning.",
+            "**Zero silent corruption**: Catches truncated LOBs, float precision errors, collation fold duplicates, and timezone shifts that pass naive row counts.",
+            "**Guaranteed reversibility**: Reverse stream back to old source is armed and ready from the second of cutover.",
+        ]),
+        H("Explore by topic", "explore"),
+        Table(
+            ["Category", "Documentation", "Description"],
+            [
+                ["**Getting started**", "[Quickstart](quickstart.html)<br>[Recipes](recipes.html)", "Step-by-step setup and 10 common source -> target pairing recipes."],
+                ["**Reference**", f"[Engines ({len(shown)})](engines.html)<br>[Goals & Modes](goals.html)<br>[Commands](commands.html)<br>[Hop Options](options.html)<br>[Environment](environment.html)", "Engine catalog, CLI flags, configuration options, and environment variables."],
+                ["**Operations**", "[Troubleshooting](troubleshooting.html)<br>[Evidence](evidence.html)<br>[Web & API](web.html)<br>[Telemetry](telemetry.html)<br>[Releases](releases.html)", "Diagnostic bundles, evidence exports, multi-user web UI, and privacy guarantees."],
+            ],
+            ids=["cat-start", "cat-ref", "cat-ops"]
+        ),
     ]
     return Page("index", "migkit", "Overview",
                 "Move, follow, prove and cut over databases between any two"
