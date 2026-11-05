@@ -234,8 +234,8 @@ margin-top:40px;padding-top:16px}
 <table><tr><th>Phase</th><th>Command</th><th>Action</th><th>Operational guarantee</th></tr><tr id="phase-assess"><td><b>1. Assess</b></td><td><code>migkit assess shop</code></td><td>Pre-flight audit of schemas, data types, sequences, and replication privileges.</td><td>Read-only on source. Flags incompatible constructs before moving data.</td></tr><tr id="phase-move"><td><b>2. Move &amp; Stream</b></td><td><code>migkit sync shop --mode migrate --go</code></td><td>Snapshot table copy followed immediately by CDC change stream replication.</td><td>Point-in-time snapshot. O(1) resume from key-range cursor if interrupted.</td></tr><tr id="phase-verify"><td><b>3. Verify</b></td><td><code>migkit check shop --deep</code></td><td>Injective per-row hash + Merkle diff drilldown + 20 semantic drift audits.</td><td>Never writes to either database. Detects silent corruption that count(*) misses.</td></tr><tr id="phase-cutover"><td><b>4. Cut over</b></td><td><code>migkit move shop --mode cdc --drop --go</code></td><td>Source writes drained, final stream sync drained, target sequences raised.</td><td>Atomic switchover within outage budget. Reverse stream armed for rollback.</td></tr></table>
 <h2 id="quickstart">Quickstart</h2>
 <p>Install, configure, and execute a verified cutover in five commands:</p>
-<pre><code># 1. Install via git
-uv tool install git+https://github.com/arkashira/migkit.git
+<pre><code># 1. Install via PyPI
+uv tool install migkit
 migkit doctor --install
 
 # 2. Configure source, target and goal (passwords stored in keychain)

@@ -2113,7 +2113,7 @@ def quickstart_steps(hop="shop"):
     from migkit import cli, hopkeys
     return [
         ("Install, and let migkit fill what this machine lacks",
-         ["uv tool install git+https://github.com/arkashira/migkit.git", "migkit doctor --install"],
+         ["uv tool install migkit", "migkit doctor --install"],
          _first_sentence(cli.main.commands["doctor"].help)),
         ("Two addresses",
          ["migkit init",
@@ -2228,8 +2228,8 @@ def page_index():
     shown = [n for n in names if n not in ("hetero", "generic")]
 
     quick_run_cmds = (
-        "# 1. Install via git\n"
-        "uv tool install git+https://github.com/arkashira/migkit.git\n"
+        "# 1. Install via PyPI\n"
+        "uv tool install migkit\n"
         "migkit doctor --install\n"
         "\n"
         "# 2. Configure source, target and goal (passwords stored in keychain)\n"

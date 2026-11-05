@@ -76,7 +76,7 @@ below show a plan first; `--go` allows the write:
 
 <!-- gen_docs: quickstart -->
 ```
-uv tool install git+https://github.com/arkashira/migkit.git
+uv tool install migkit
 migkit doctor --install
 migkit init
 migkit assess shop
